@@ -1,0 +1,40 @@
+# Virtual environment
+venv/
+.venv/
+
+# Environment files with secrets
+.env
+.env.beir
+
+# Benchmark data (symlinks / large corpora live under /storage)
+datasets/
+test_docs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+eggs/
+*.egg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Misc
+.DS_Store
+*.log
+jmfts-needle/heads/*.pt
+jmfts-needle/experiments/e6_index.npz

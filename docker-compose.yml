@@ -1,0 +1,68 @@
+# Local JMFTS development stack: pgvector Postgres + the API, both in Docker.
+#
+#   docker compose up --build -d      # first run builds the image (CPU torch)
+#   docker compose logs -f api        # watch startup / the auth token line
+#   docker compose down               # stop (keeps data + model cache volumes)
+#   docker compose down -v            # stop and WIPE the DB + HF model cache
+#
+# The API is reachable at http://127.0.0.1:8100 with a pinned dev bearer token
+# (JMFTS_API_TOKEN below). LLM-backed endpoints (raptor, fact-extraction,
+# synthesis) report "degraded" — no LLM is wired here — but documents,
+# embeddings, chunking, indexing and search all work, which is everything the
+# tau session store needs.
+name: jmfts-dev
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: jmfts
+      POSTGRES_USER: jmfts
+      POSTGRES_PASSWORD: jmfts
+    ports:
+      # Host 5433 -> container 5432, so this never clashes with a host Postgres
+      # and the tau contract tests / psql can reach it from the host.
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # schema.sql is the complete canonical DDL (extensions, all tables, the
+      # CR-1 position column) — it runs once, on a fresh data volume. The
+      # numbered migrations are upgrade deltas for existing DBs and are not
+      # needed to bootstrap.
+      - ./schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jmfts -d jmfts"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build: .
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8100 --reload
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Settings read env with the JMFTS_ prefix (config.py: env_prefix).
+      JMFTS_DB_HOST: postgres
+      JMFTS_DB_PORT: "5432"
+      JMFTS_DB_NAME: jmfts
+      JMFTS_DB_USER: jmfts
+      JMFTS_DB_PASSWORD: jmfts
+      JMFTS_EMBEDDING_DEVICE: cpu
+      # Pinned dev token so tau can point at this instance with a known value.
+      # Override by exporting JMFTS_API_TOKEN before `docker compose up`.
+      JMFTS_API_TOKEN: ${JMFTS_API_TOKEN:-jmfts-dev-local}
+    ports:
+      - "127.0.0.1:8100:8100"
+    volumes:
+      # Live-reload: edits to these on the host reload the running server.
+      - ./jmfts_core:/app/jmfts_core
+      - ./api:/app/api
+      # Persist the downloaded embedding model across restarts (first boot pulls
+      # nomic-ai/modernbert-embed-base — a few hundred MB — into this volume).
+      - hf_cache:/root/.cache/huggingface
+
+volumes:
+  pgdata:
+  hf_cache:

@@ -1,0 +1,679 @@
+"""Rollup: PELT segmentation and ``effective_content``. ``INGEST_SPEC.md`` 5.4 and 11.4.
+
+Structuring turns bytes into a tree from the top down. Rollup runs the other way — it is
+what the settling walk asks for when a node's whole subtree has finished — and it does two
+things:
+
+**``structure:semantic``** segments a node's children. Spec 3.5's third rung is "PELT over
+``ruptures``", and this is it, moved out of Part 4's structuring table for a reason 5.4
+already states: its input is the child sequence *and their embeddings*, which do not exist
+until the rung above has finished and its nodes have settled. A task list that named the
+tree in advance would be stale before it ran.
+
+**``summarize``** gives a node that holds no text of its own a text embedding, from the
+text of its children.
+
+**PELT is not RAPTOR, and the difference is the whole design.** RAPTOR clusters: a cluster
+is a SET, so a node built from one holds material from wherever in the document it happened
+to be. PELT segments: the children are a SEQUENCE in the order the author wrote them, and a
+segment is a contiguous run of siblings. So a structural node here is a SPAN of the
+document and the tree reads the way the document reads. Ingestion is the only moment at
+which that order is still available for free; nothing downstream can recover an order
+discarded here. RAPTOR over an ingested tree remains wanted and is a different operation.
+
+**Represent before interpreting.** A node's embedding comes from concatenating its
+children's text in document order while that fits the embedding window, and from an LLM
+summary only when it does not. Concatenated length grows quickly walking upward, so
+summarization becomes unavoidable a few levels up — the rule is only that it does not
+happen before then. A span that was concatenated is a stronger record of what the document
+said than any paraphrase of it, and the deciding token count is recorded either way so a
+reader can tell the two apart without inferring it from the text.
+
+**Nothing here writes ``content``.** A structural node's prose lives in its leaves. Putting
+it on the container as well would enter the same text into the full-text and vector indexes
+twice and answer one query with both. The summary lives in
+``structured_content['effective_content']``, which the full-text index does not read, and
+the node gets a document vector and no token embeddings — MaxSim over text that is not this
+node's own content would be the same double-count by another route.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Optional, Sequence
+
+import httpx
+import numpy as np
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from jmfts_core.config import Settings, get_settings
+from jmfts_core.contracts.attempt import param_fingerprint
+from jmfts_core.embedding import get_embedding_service
+from jmfts_core.ingest_options import resolve_options
+from jmfts_core.ingest_tasks import (
+    OPTIONS_KEY,
+    TASK_STRUCTURE_SEMANTIC,
+    TASK_SUMMARIZE,
+    TaskOutcome,
+    register_task_handler,
+)
+from jmfts_core.llm_utils import extract_llm_text
+from jmfts_core.models.document import SETTLED_IN_FLIGHT, Document
+from jmfts_core.models.task_queue import WRITE_SELF, WRITE_SUBTREE, TaskQueue
+from jmfts_core.repositories.document import DocumentRepository
+from jmfts_core.repositories.task_queue import TaskQueueRepository
+from jmfts_core.segmentation import Segment, enforce_segment_bounds, pelt_segment
+from jmfts_core.settling import TaskSpec, enqueue_batch
+
+logger = logging.getLogger(__name__)
+
+#: Spec 3.5's rung name for a boundary PELT found, written into the nodes it creates.
+RUNG_SEMANTIC = "semantic"
+
+#: What produced those boundaries. Named beside the rung for the same reason the structure
+#: rungs name theirs: the rung says how good the evidence is, the source says where it came
+#: from, and only the second one tells a person why a tree came out the shape it did.
+SOURCE_PELT = "pelt_changepoints"
+
+#: The usetype of a node PELT created. Not ``section`` — a section is a span the DOCUMENT
+#: named, and this is a span this appliance found. An open string like every usetype
+#: (spec Part 9).
+USETYPE_SEGMENT = "segment"
+
+#: How ``effective_content`` was produced. ``concatenated`` is the preferred outcome and
+#: the one that involves no interpretation at all.
+METHOD_CONCATENATED = "concatenated"
+METHOD_LLM_SUMMARY = "llm_summary"
+
+#: The prefix the embedding service expects for stored text, matching what
+#: ``DocumentRepository.embed_document`` uses. Spelled here because this module embeds
+#: text that is not any node's ``content`` and so cannot go through that method.
+EMBED_PREFIX = "search_document: "
+
+SUMMARIZE_SYSTEM_PROMPT = (
+    "You summarize one contiguous span of a document. The passages you are given are "
+    "consecutive and in the order the author wrote them, so preserve that order and the "
+    "narrative it carries. Write a single factual summary of what this span says. Do not "
+    "add opinions, do not add knowledge from outside the passages, and do not describe "
+    "the passages as passages."
+)
+
+
+# ---------------------------------------------------------------------------
+# The planner — spec 5.4 step 4
+# ---------------------------------------------------------------------------
+
+
+class IngestRollupPlanner:
+    """What becomes eligible for a node once its whole subtree has settled.
+
+    Called by :func:`~jmfts_core.settling.settle_node` under the node's row lock, at the
+    exact instant the rollup's inputs are complete. It returns at most ONE task, and the
+    walk brings it back after that task finishes — which is what makes 11.4's two
+    recursion directions the same mechanism instead of two:
+
+    * *downward* — segmentation creates containers, each carrying its own ``summarize``;
+      a container that is itself too wide segments again on its own walk;
+    * *upward* — the containers settle, the walk returns here, and this node now has a
+      different number of children. If that is still too many it segments THOSE, one level
+      up, over nodes that did not exist when the first pass ran.
+
+    **6.1's diff is applied here rather than by wrapping**
+    :class:`~jmfts_core.settling.AttemptDiffPlanner`, because the choice between the two
+    tasks depends on the diff: a node whose segmentation already ran and produced nothing
+    must fall through to ``summarize`` rather than be offered the same segmentation again.
+    The termination argument is otherwise identical — a completed task appends an attempt
+    carrying its ``(task, param_fingerprint)`` pair, and the pair is not offered twice.
+
+    **The params carry the measurement that triggered the task**, which is 11.4's stated
+    tension with that diff and its resolution. PELT's real input is the child set, and a
+    node segmented once and then given more children would be over the limit again with an
+    identical fingerprint. ``child_count`` in the params moves when the input moves, and
+    stays put when it does not.
+    """
+
+    def __call__(self, session: Session, node: Document) -> Sequence[TaskSpec]:
+        children = child_ids(session, node.id)
+        if not children:
+            # A leaf has nothing to roll up. Its own text is its own content, and it was
+            # embedded when it was created.
+            return ()
+
+        options = rollup_options(session, node)
+        attempted = TaskQueueRepository(session).attempted_fingerprints(node.id)
+
+        if len(children) > options["max_children"]:
+            spec = _segment_spec(children, options)
+            if (TASK_STRUCTURE_SEMANTIC, param_fingerprint(spec.params)) not in attempted:
+                return (spec,)
+
+        spec = _summarize_spec(children, options)
+        if (TASK_SUMMARIZE, param_fingerprint(spec.params)) not in attempted:
+            return (spec,)
+        return ()
+
+
+def _segment_spec(children: Sequence[int], options: dict) -> TaskSpec:
+    """``subtree``, not ``children``, and spec 5.3 is why.
+
+    Segmentation reparents nodes that may have descendants of their own — the upward
+    direction moves whole containers — and moving a populated node rewrites every
+    descendant's ``path``. 5.3 reserves that for ``subtree``, which is the only mode that
+    reserves a region, and the claim gate enforces it in SQL.
+    """
+    return TaskSpec(
+        task_type=TASK_STRUCTURE_SEMANTIC,
+        write_mode=WRITE_SUBTREE,
+        params={
+            "child_count": len(children),
+            "penalty": options["penalty"],
+            "min_segment": options["min_segment"],
+        },
+    )
+
+
+def _summarize_spec(children: Sequence[int], options: dict) -> TaskSpec:
+    """``self``: it reads descendants and writes only this node's own row (spec 5.3)."""
+    return TaskSpec(
+        task_type=TASK_SUMMARIZE,
+        write_mode=WRITE_SELF,
+        params={"child_count": len(children), "llm_model": options["llm_model"]},
+    )
+
+
+def child_ids(session: Session, parent_id: int) -> list[int]:
+    """This node's children, in the sibling-ordering contract's order.
+
+    ``position ASC NULLS LAST, created_at ASC, id ASC`` — document order, which is the
+    input PELT segments and the order the concatenation is built in. Read directly rather
+    than through ``get_children`` because that method takes a row limit, and a truncated
+    child list here would segment part of a node and call it the whole thing.
+    """
+    return list(
+        session.execute(
+            select(Document.id)
+            .where(Document.parent_id == parent_id)
+            .order_by(
+                Document.position.asc().nullslast(),
+                Document.created_at.asc(),
+                Document.id.asc(),
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+def rollup_options(session: Session, node: Document) -> dict:
+    """The ``rollup`` options this node is rolled up under.
+
+    Read from the nearest ancestor that recorded any — the upload writes them on the file
+    node, and the segments created underneath it inherit what that upload asked for rather
+    than whatever the profile defaults have become since. A node with no such ancestor
+    resolves to the task defaults, which is the documented meaning of "no overrides".
+
+    The format is taken from the same ancestor's ``matched`` block, so a format profile
+    that deviates applies to its rollup as well as to its structuring.
+    """
+    owner = _options_owner(session, node)
+    stored = ((owner.structured_content or {}) if owner is not None else {}).get(OPTIONS_KEY)
+    fmt = (
+        ((owner.structured_content or {}) if owner is not None else {}).get("matched") or {}
+    ).get("format", "")
+    return resolve_options(fmt, stored)["rollup"]
+
+
+def _options_owner(session: Session, node: Document) -> Optional[Document]:
+    """``node`` itself if it records options, else the nearest ancestor that does."""
+    if (node.structured_content or {}).get(OPTIONS_KEY) is not None:
+        return node
+    for ancestor_id in reversed(node.path or []):
+        ancestor = session.get(Document, ancestor_id)
+        if ancestor is not None and (ancestor.structured_content or {}).get(OPTIONS_KEY):
+            return ancestor
+    return None
+
+
+# ---------------------------------------------------------------------------
+# structure:semantic
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _NotSegmented:
+    """Why a node stayed wide. 11.4's rule 3: that is a correct state, and it is recorded.
+
+    Wide and unsummarized hides nothing — the node is retrievable and so are its children.
+    Quietly making progress is the one outcome that would be a defect, so every path that
+    declines to segment names itself here.
+    """
+
+    reason: str
+    detail: dict
+
+
+@register_task_handler(TASK_STRUCTURE_SEMANTIC)
+def run_structure_semantic(session: Session, task: TaskQueue) -> TaskOutcome:
+    """Segment this node's children at PELT's changepoints and reparent them.
+
+    Creates one container per segment, in document order, and gives each container its own
+    ``summarize``. The containers are created IN FLIGHT and carry that task, which is what
+    brings the settling walk to them: the walk only travels upward, so a node created
+    settled and given no work would never be visited and would never get an embedding.
+    """
+    doc = _scope_node(session, task)
+    params = dict(task.params or {})
+    children = child_ids(session, doc.id)
+
+    refusal = _refuse_to_segment(session, children, params)
+    if refusal is not None:
+        return TaskOutcome(
+            rung=RUNG_SEMANTIC,
+            detail={"segmented": False, "reason": refusal.reason, **refusal.detail},
+        )
+
+    segments = _segments(session, children, params)
+    if len(segments) <= 1:
+        # 11.4 rule 1. One segment covering every child is a NON-RESULT: creating a
+        # container for it would give the next walk the same children under a new parent,
+        # which segments the same way, and the tree extends forever as a linked list with
+        # an LLM call per level.
+        return TaskOutcome(
+            rung=RUNG_SEMANTIC,
+            detail={
+                "segmented": False,
+                "reason": (
+                    "PELT found no changepoint: one segment covers every child, and a "
+                    "container for it would deepen the tree without narrowing it"
+                ),
+                "children": len(children),
+                "segments": len(segments),
+            },
+        )
+
+    return _write_segments(session, doc, children, segments, params)
+
+
+def _refuse_to_segment(
+    session: Session, children: Sequence[int], params: dict
+) -> Optional[_NotSegmented]:
+    """The conditions under which there is nothing to segment, each with its reason."""
+    if len(children) < 2:
+        return _NotSegmented(
+            reason="a node with fewer than two children has no sequence to segment",
+            detail={"children": len(children)},
+        )
+
+    unembedded = [
+        row
+        for row in session.execute(
+            select(Document.id).where(Document.id.in_(children)).where(Document.embed.is_(None))
+        ).scalars()
+    ]
+    if unembedded:
+        # The honest limit of this pass, recorded rather than worked around. Section
+        # containers written by the structure rungs settle at creation and are never
+        # embedded, so a file whose children are sections cannot be segmented yet.
+        # Segmenting the embedded subset would produce a tree over a different set of
+        # children from the one the node actually has.
+        return _NotSegmented(
+            reason=(
+                "the child sequence is not fully embedded, and segmenting the embedded "
+                "subset would build a tree over a different set of children than this "
+                "node has"
+            ),
+            detail={"children": len(children), "unembedded": len(unembedded)},
+        )
+    return None
+
+
+def _segments(session: Session, children: Sequence[int], params: dict) -> list[Segment]:
+    """PELT over the child embedding sequence. Every boundary here is a changepoint.
+
+    ``jump=1`` because the default grid of 5 makes a short sequence unsegmentable
+    regardless of how sharp the change in it is — with six children there is exactly one
+    candidate position, and ``min_size`` rules it out.
+
+    ``enforce_segment_bounds`` is called for its MERGE phase only, and its split phase is
+    disabled by handing it a maximum no segment can exceed. That phase divides an oversized
+    segment into equal parts, which would put a boundary where the document has none —
+    and a run with no changepoint in it that came back as two segments would be 11.4's
+    rule 1 defeated by arithmetic. An oversized segment is handled by recursion instead:
+    it becomes a container, and its own walk segments it again.
+    """
+    rows = {
+        doc_id: embed
+        for doc_id, embed in session.execute(
+            select(Document.id, Document.embed).where(Document.id.in_(children))
+        ).all()
+    }
+    embeddings = np.array([np.asarray(rows[doc_id], dtype=np.float32) for doc_id in children])
+
+    segments = pelt_segment(
+        embeddings,
+        list(children),
+        penalty=float(params["penalty"]),
+        min_size=int(params["min_segment"]),
+        jump=1,
+    )
+    return enforce_segment_bounds(
+        segments,
+        min_segment=int(params["min_segment"]),
+        max_segment=len(children),
+    )
+
+
+def _write_segments(
+    session: Session,
+    doc: Document,
+    children: Sequence[int],
+    segments: Sequence[Segment],
+    params: dict,
+) -> TaskOutcome:
+    """Create a container per multi-child segment, reparent into it, and re-order."""
+    repo = DocumentRepository(session)
+    tasks = TaskQueueRepository(session)
+    planner = IngestRollupPlanner()
+
+    #: The parent's children after the move, in document order: a container where one was
+    #: made, the child itself where it was left alone.
+    remaining: list[int] = []
+    created: list[int] = []
+
+    for index, segment in enumerate(segments):
+        if len(segment.child_ids) < 2:
+            # 11.4 rule 2. One child under a new node adds a level and no information.
+            remaining.extend(segment.child_ids)
+            continue
+
+        container = repo.create(
+            # No title. The document does not name this span, and naming it would be the
+            # interpretation this rung exists to postpone — `summarize` writes what the
+            # span says, and the ordering is what says where it is.
+            title=None,
+            content=None,
+            parent_id=doc.id,
+            usetype=USETYPE_SEGMENT,
+            structured_content={
+                "structure": {
+                    "primary_rung": RUNG_SEMANTIC,
+                    "source": SOURCE_PELT,
+                    "segment_index": index,
+                    "segment_count": len(segments),
+                    "child_count": len(segment.child_ids),
+                }
+            },
+            auto_embed=False,
+            sequential=True,
+            settled=SETTLED_IN_FLIGHT,
+        )
+        for child_id in segment.child_ids:
+            # `childless_only=False`: the upward direction moves containers that have
+            # children of their own, which is why this task declares `subtree` (5.3).
+            repo.reparent(child_id, container.id)
+        session.flush()
+
+        # The container's own first task comes from the SAME planner the walk would have
+        # asked, rather than a hardcoded `summarize`. A container that is itself too wide
+        # must segment before it summarizes: summarizing first would concatenate forty
+        # children — an LLM call, at that size — and then be asked to do it again over the
+        # five containers that replaced them.
+        specs = planner(session, container)
+        if not specs:
+            raise ValueError(
+                f"the rollup planner offered nothing to segment container {container.id}, "
+                "which holds children and no attempts; it would never settle"
+            )
+        enqueue_batch(tasks, container.id, specs)
+        created.append(container.id)
+        remaining.append(container.id)
+
+    if not created:
+        # Every segment held one child — 11.4's maximum-fragmentation shape, absorbed by
+        # rule 2 into no change at all.
+        return TaskOutcome(
+            rung=RUNG_SEMANTIC,
+            detail={
+                "segmented": False,
+                "reason": (
+                    "every segment held a single child, and a container per child adds a "
+                    "level and no information"
+                ),
+                "children": len(children),
+                "segments": len(segments),
+            },
+        )
+
+    _reorder(session, remaining)
+    session.flush()
+
+    return TaskOutcome(
+        rung=RUNG_SEMANTIC,
+        detail={
+            "segmented": True,
+            "children_before": len(children),
+            "children_after": len(remaining),
+            "segments": len(segments),
+            "containers": len(created),
+            "sizes": [len(s.child_ids) for s in segments],
+            "params": {
+                "penalty": params["penalty"],
+                "min_segment": params["min_segment"],
+            },
+        },
+        produced={"node_count": len(created), "child_ids": created},
+    )
+
+
+def _reorder(session: Session, node_ids: Sequence[int]) -> None:
+    """Renumber a sibling group so it reads in document order.
+
+    Necessary because the two halves of the move number themselves independently: a new
+    container is appended to the tail of the sibling group, while a child left in place by
+    rule 2 keeps the position it already had. Without this a document whose second segment
+    was containerised and whose first was not would come back with the second span first.
+    """
+    for position, node_id in enumerate(node_ids):
+        node = session.get(Document, node_id)
+        if node is not None:
+            node.position = position
+
+
+# ---------------------------------------------------------------------------
+# summarize — effective_content
+# ---------------------------------------------------------------------------
+
+
+@register_task_handler(TASK_SUMMARIZE)
+def run_summarize(session: Session, task: TaskQueue) -> TaskOutcome:
+    """Give this node a text embedding derived from its children. 11.4's ``effective_content``.
+
+    Concatenate while the result fits the embedding window; summarize with an LLM only when
+    it does not. The deciding token count goes into the attempt detail either way, because
+    "this node was concatenated" and "this node was paraphrased" are different facts about
+    how much interpretation stands between a query and the document.
+
+    A node with no LLM configured and text too long to concatenate records ``skipped`` with
+    the reason (spec 3.4, 11.4 §4). A missing summary is never silent.
+    """
+    doc = _scope_node(session, task)
+    children = child_ids(session, doc.id)
+    if not children:
+        return TaskOutcome(
+            status="skipped",
+            detail={"reason": "the node has no children, so there is nothing to roll up"},
+        )
+
+    text = effective_text(session, doc.id, own_content=False)
+    if not text.strip():
+        return TaskOutcome(
+            status="skipped",
+            detail={
+                "reason": "no child of this node carries any text",
+                "children": len(children),
+            },
+        )
+
+    service = get_embedding_service()
+    fit = service.check_fit(text, with_tokens=False, prefix=EMBED_PREFIX)
+
+    if not fit.truncated:
+        return _store(
+            session,
+            doc,
+            embed_text=text,
+            method=METHOD_CONCATENATED,
+            children=len(children),
+            detail={"tokens": fit.token_count, "window": fit.limit, "characters": len(text)},
+        )
+
+    settings = get_settings()
+    if not settings.effective_llm_url:
+        return TaskOutcome(
+            status="skipped",
+            detail={
+                "reason": (
+                    "the concatenated children do not fit the embedding window and no LLM "
+                    "is configured to summarize them"
+                ),
+                "tokens": fit.token_count,
+                "window": fit.limit,
+                "children": len(children),
+            },
+        )
+
+    model = (task.params or {}).get("llm_model") or settings.effective_llm_model
+    summary = summarize_span(text, settings, model)
+    summary_fit = service.check_fit(summary, with_tokens=False, prefix=EMBED_PREFIX)
+    if summary_fit.truncated:
+        # The model returned something longer than the window it was called to get under.
+        # Raising is right: embedding it is impossible and storing it unembedded would
+        # leave a node claiming an `effective_content` that nothing can retrieve.
+        raise ValueError(
+            f"the summary of document {doc.id} is {summary_fit.token_count} tokens, over "
+            f"the {summary_fit.limit}-token embedding window; the model did not summarize"
+        )
+
+    return _store(
+        session,
+        doc,
+        embed_text=summary,
+        method=METHOD_LLM_SUMMARY,
+        children=len(children),
+        text=summary,
+        detail={
+            "tokens": summary_fit.token_count,
+            "window": summary_fit.limit,
+            "input_tokens": fit.token_count,
+            "input_characters": len(text),
+            "model": model,
+        },
+    )
+
+
+def effective_text(session: Session, node_id: int, *, own_content: bool = True) -> str:
+    """The text this node stands for, in document order.
+
+    A node's own ``content`` when it has one; its stored summary when it has one; otherwise
+    its children's effective text joined in order. Recursive, and it terminates at the
+    leaves, which always have content.
+
+    Computed rather than stored. A concatenation is derivable from the subtree it came
+    from, and storing it at every level would duplicate the whole document once per level
+    for no fact that could not be recomputed — where a summary is NOT derivable and is
+    therefore the one thing that is written down.
+
+    ``own_content=False`` for the node being summarized, because a node that already has
+    content is not asking what its children say.
+    """
+    node = session.get(Document, node_id)
+    if node is None:
+        return ""
+    if own_content and node.content:
+        return node.content
+    summary = ((node.structured_content or {}).get("effective_content") or {}).get("text")
+    if summary:
+        return summary
+    parts = [effective_text(session, child) for child in child_ids(session, node_id)]
+    return "\n\n".join(part for part in parts if part.strip())
+
+
+def _store(
+    session: Session,
+    doc: Document,
+    *,
+    embed_text: str,
+    method: str,
+    children: int,
+    detail: dict,
+    text: Optional[str] = None,
+) -> TaskOutcome:
+    """Embed ``embed_text`` onto the node and record how the text was arrived at.
+
+    The DOCUMENT vector only. Token embeddings would put this text into the MaxSim index
+    under a node whose ``content`` it is not, which is the same double-count that keeps
+    ``content`` off a container in the first place.
+
+    ``text`` is stored only for a summary. It lives in ``structured_content``, which the
+    full-text index does not read (``to_tsvector(title || content)``), so a summary cannot
+    skew the BM25 statistics of the corpus it summarizes.
+    """
+    service = get_embedding_service()
+    doc.embed = service.embed_text(embed_text, prefix=EMBED_PREFIX).tolist()
+
+    structured = dict(doc.structured_content or {})
+    record = {"method": method, "source_children": children, **detail}
+    if text is not None:
+        record["text"] = text
+    structured["effective_content"] = record
+    doc.structured_content = structured
+    session.flush()
+
+    return TaskOutcome(detail={"method": method, "source_children": children, **detail})
+
+
+def summarize_span(text: str, settings: Settings, model: str) -> str:
+    """One LLM call over a contiguous span, in document order.
+
+    Deliberately not ``summarization._llm_summarize``. That one is written for a RAPTOR
+    cluster — its prompt says the passages "belong to the same topic cluster", which is
+    the wrong instruction for a span whose order carries meaning — and it silently
+    truncates its input to a character budget, which would produce a summary of the first
+    part of a span and label it a summary of the span.
+
+    The full text is sent. If it is over the model's context the server refuses, the
+    worker classifies that refusal and records it, and the answer is to segment further —
+    not to send less and call the result a summary.
+
+    A module-level function so a test can replace it without a live model.
+    """
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": SUMMARIZE_SYSTEM_PROMPT},
+            {"role": "user", "content": text},
+        ],
+        "temperature": settings.summarization_temperature,
+        "max_tokens": settings.raptor_max_summary_tokens,
+    }
+    if settings.summarization_disable_thinking:
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
+
+    base_url = settings.effective_llm_url.rstrip("/")
+    with httpx.Client(timeout=settings.effective_llm_timeout) as client:
+        response = client.post(f"{base_url}/v1/chat/completions", json=payload)
+        response.raise_for_status()
+        data = response.json()
+    return extract_llm_text(data["choices"][0])
+
+
+def _scope_node(session: Session, task: TaskQueue) -> Document:
+    doc = session.get(Document, task.scope_document_id)
+    if doc is None:
+        raise ValueError(
+            f"{task.task_type} is scoped to document {task.scope_document_id}, which does "
+            "not exist"
+        )
+    return doc

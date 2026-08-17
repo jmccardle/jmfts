@@ -1,0 +1,18 @@
+# Keep the build context small: only pyproject + jmfts_core/ + api/ are needed.
+.git
+.venv
+venv
+__pycache__
+*.pyc
+*.egg-info
+.pytest_cache
+tests
+analysis
+test_reports
+scripts
+plugin
+migrations
+docs
+*.md
+.env
+data
