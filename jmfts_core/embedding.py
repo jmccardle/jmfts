@@ -5,16 +5,33 @@ Provides matryoshka embeddings using ModernBERT with support for:
 - Full document embeddings (1024 dim)
 - Token-level embeddings with importance scoring
 - Truncation to various dimensions (128, 256, 384, 512)
+
+TORCH AND SENTENCE-TRANSFORMERS ARE NOT INSTALLED BY DEFAULT, and this class is split down
+that line. Half of what it does needs no weights — `check_fit`, `fits_token_window` and
+`chunk_to_fit` are the tokenizer, `truncate_embedding` is a numpy slice — and that half is
+base JMFTS. The other half is `model`, `embed_text*` and `embed_*_with_tokens`, and it
+needs the `embed` extra (`pip install 'jmfts[embed]'`, see pyproject.toml).
+
+So every import of the model stack happens at the point of use, guarded by `_torch()` or
+`_sentence_transformer()`, which turn a bare ModuleNotFoundError into
+`ModelStackNotInstalled` naming both ways out: install the extra, or point
+JMFTS_RUNNER_URL at a JMFTS that has it. An install that can measure text but not embed it
+is a supported deployment, not a broken one — it is what a storage-side worker is — so the
+failure has to say which of the two it is rather than reading as a missing dependency.
+
+`tests/test_thin_worker.py` asserts the whole worker path imports neither.
 """
+
+from __future__ import annotations
 
 import threading
 
-import torch
-import torch.nn.functional as F
 import numpy as np
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from dataclasses import dataclass
-from sentence_transformers import SentenceTransformer
+
+if TYPE_CHECKING:  # annotations only; never executed
+    from sentence_transformers import SentenceTransformer
 
 from jmfts_core.chunking import ChunkStrategy, chunk_text
 from jmfts_core.config import get_settings
@@ -22,6 +39,54 @@ from jmfts_core.token_selection import (
     TokenSelector,
     get_token_selector,
 )
+
+
+class ModelStackNotInstalled(ImportError):
+    """This install can measure text but not embed it, and something asked it to.
+
+    Raised instead of letting a bare ``ModuleNotFoundError: No module named 'torch'`` reach
+    the caller, because that message describes a broken environment and this one usually is
+    not: an install without the model stack is the intended shape for a storage-side
+    worker, and the honest question is which of the two things it is missing — the extra,
+    or a runner to ask.
+
+    Classified PERMANENT by ``jmfts_core.task_errors``, along with every other
+    ``ImportError``: a package that is not installed does not appear on the third attempt,
+    and spending the retry budget on it only delays the moment somebody reads this.
+    """
+
+
+#: What to do about it. One string, because the message is the whole value of the
+#: exception and two copies of it would be free to drift.
+_INSTALL_HINT = (
+    "This JMFTS was installed without the embedding model stack, so it cannot produce "
+    "vectors itself. Either give it the model:\n"
+    "    pip install 'jmfts[embed]'                                  # CUDA build\n"
+    "    pip install torch --index-url https://download.pytorch.org/whl/cpu\n"
+    "    pip install 'jmfts[embed]'                                  # ...then CPU\n"
+    "or point it at a JMFTS that has one:\n"
+    "    JMFTS_RUNNER_URL=http://<host>:8100 JMFTS_RUNNER_KEY=<the shared secret>\n"
+    "The second is the intended shape for a worker; see jmfts_core/embedder.py."
+)
+
+
+def _torch():
+    """``(torch, torch.nn.functional)``, or say what is missing and what to do."""
+    try:
+        import torch
+        import torch.nn.functional as F
+    except ImportError as exc:
+        raise ModelStackNotInstalled(f"{exc}\n\n{_INSTALL_HINT}") from exc
+    return torch, F
+
+
+def _sentence_transformer():
+    """The ``SentenceTransformer`` class, or say what is missing and what to do."""
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError as exc:
+        raise ModelStackNotInstalled(f"{exc}\n\n{_INSTALL_HINT}") from exc
+    return SentenceTransformer
 
 
 class TextTooLongError(ValueError):
@@ -111,7 +176,14 @@ class EmbeddingService:
 
     @property
     def model(self) -> SentenceTransformer:
-        """Lazy-load the embedding model (double-checked under the infer lock)."""
+        """Lazy-load the embedding model (double-checked under the infer lock).
+
+        The IMPORT is lazy as well as the load, and it may legitimately fail: the model
+        stack is the `embed` extra, not a base dependency. `_sentence_transformer` is what
+        turns that into a message naming both ways out — see the module docstring.
+        """
+        SentenceTransformer = _sentence_transformer()
+
         if self._model is None:
             with self._infer_lock:
                 if self._model is None:
@@ -122,6 +194,16 @@ class EmbeddingService:
                         model_kwargs={"attn_implementation": "eager"},
                     )
         return self._model
+
+    @property
+    def model_loaded(self) -> bool:
+        """Are the model weights resident yet?
+
+        Reported by the runner surface so a caller can tell a warm process from one that
+        will pay a multi-second load on its first request. Reading this must never be what
+        triggers the load, so it inspects the slot rather than the ``model`` property.
+        """
+        return self._model is not None
 
     @property
     def tokenizer(self):
@@ -285,6 +367,11 @@ class EmbeddingService:
         if fit.truncated:
             raise TextTooLongError(fit.token_count, fit.limit, fit.chars_total, "token/maxsim")
 
+        # Lazy, like `model` itself: this is one of the three methods in the class that
+        # runs the weights, and the stack it needs is the `embed` extra rather than a base
+        # dependency. See the module docstring.
+        torch, F = _torch()
+
         # Get the underlying transformer model
         transformer = self.model[0].auto_model
         tokenizer = self.model.tokenizer
@@ -404,6 +491,9 @@ class EmbeddingService:
                 raise TextTooLongError(
                     fit.token_count, fit.limit, fit.chars_total, f"token/maxsim (batch item {i})"
                 )
+
+        # Lazy, like the single-text path above. See the module docstring.
+        torch, F = _torch()
 
         # Get the underlying transformer model
         transformer = self.model[0].auto_model

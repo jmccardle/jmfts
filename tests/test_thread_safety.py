@@ -80,7 +80,16 @@ def test_get_engine_singleton_under_threads():
 def test_model_loads_exactly_once_under_thread_burst(monkeypatch):
     """The ``model`` property must load the weights once even when many threads race
     to first-touch it — the double-load hazard. A counting, slightly-slow fake model
-    stands in for SentenceTransformer so no real weights are loaded."""
+    stands in for SentenceTransformer so no real weights are loaded.
+
+    The stand-in goes onto ``sentence_transformers`` rather than onto
+    ``jmfts_core.embedding``, because the import is now inside the property — the module
+    holds no ``SentenceTransformer`` attribute to replace. That laziness is deliberate: a
+    process embedding through another JMFTS's ``/runner`` surface must not import torch
+    just to reach the tokenizer (see ``jmfts_core/embedder.py``).
+    """
+    import sentence_transformers
+
     import jmfts_core.embedding as emb
 
     load_count = {"n": 0}
@@ -93,7 +102,7 @@ def test_model_loads_exactly_once_under_thread_burst(monkeypatch):
             # Widen the race window so an unlocked check-then-set would double-load.
             _busy_wait(0.02)
 
-    monkeypatch.setattr(emb, "SentenceTransformer", _FakeModel)
+    monkeypatch.setattr(sentence_transformers, "SentenceTransformer", _FakeModel)
 
     service = emb.EmbeddingService()  # nothing loaded yet (lazy)
     models = _hammer(lambda: service.model, n_threads=16)

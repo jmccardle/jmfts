@@ -2,7 +2,7 @@
 
 Moved out of ``api/schemas.py`` so the service layer (``jmfts_core.services``) can
 depend on them without importing FastAPI. ``api/schemas.py`` re-exports these names,
-so existing ``from api.schemas import TemplateCreate`` imports keep working.
+so existing ``from jmfts_core.rest.schemas import TemplateCreate`` imports keep working.
 
 ``TemplateResponse.from_document`` is the SINGLE ORM→response mapping for a template
 document (it was the router's local ``_doc_to_template``); keeping it here means the

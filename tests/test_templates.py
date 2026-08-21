@@ -237,7 +237,7 @@ class TestStructuredContent:
 
 class TestSchemaValidation:
     def test_template_create_schema(self):
-        from api.schemas import TemplateCreate
+        from jmfts_core.rest.schemas import TemplateCreate
 
         tc = TemplateCreate(
             title="Test",
@@ -249,7 +249,7 @@ class TestSchemaValidation:
         assert tc.category == "implementation"
 
     def test_template_create_with_variables(self):
-        from api.schemas import TemplateCreate, TemplateVariable
+        from jmfts_core.rest.schemas import TemplateCreate, TemplateVariable
 
         tc = TemplateCreate(
             title="Test",
@@ -263,7 +263,7 @@ class TestSchemaValidation:
         assert tc.variables[0].name == "name"
 
     def test_template_update_all_optional(self):
-        from api.schemas import TemplateUpdate
+        from jmfts_core.rest.schemas import TemplateUpdate
 
         tu = TemplateUpdate()
         assert tu.title is None
@@ -272,20 +272,20 @@ class TestSchemaValidation:
         assert tu.variables is None
 
     def test_template_render_request(self):
-        from api.schemas import TemplateRenderRequest
+        from jmfts_core.rest.schemas import TemplateRenderRequest
 
         rr = TemplateRenderRequest(variables={"name": "John", "task": "build"})
         assert rr.variables["name"] == "John"
 
     def test_template_search_request_defaults(self):
-        from api.schemas import TemplateSearchRequest
+        from jmfts_core.rest.schemas import TemplateSearchRequest
 
         sr = TemplateSearchRequest(query="implementation task")
         assert sr.limit == 10
         assert sr.category is None
 
     def test_template_response_schema(self):
-        from api.schemas import TemplateResponse
+        from jmfts_core.rest.schemas import TemplateResponse
 
         tr = TemplateResponse(
             id=1,
@@ -301,7 +301,7 @@ class TestSchemaValidation:
         assert tr.success_rate == 0.8
 
     def test_template_render_response(self):
-        from api.schemas import TemplateRenderResponse
+        from jmfts_core.rest.schemas import TemplateRenderResponse
 
         rr = TemplateRenderResponse(
             rendered="Hello John",

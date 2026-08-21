@@ -1,0 +1,77 @@
+# The GPU worker pool: the task types whose handlers run the embedding model.
+#
+# `embed` is one node's vectors — a transformer forward with `output_attentions=True`,
+# once per chunk, and the bulk of ingest. `summarize` embeds one vector per interior node.
+# Together these were 99.9% of ingest wall clock when measured on CPU. The structure rungs
+# used to be here because they embedded inline; `embed` is now its own task and they are
+# string work, so they run on the CPU pool.
+#
+# A THIRD SHAPE EXISTS AND IS NOT DEPLOYED HERE. `jmfts-worker --runner-url <api>` claims
+# `embed` and posts the text to another JMFTS's /runner surface instead of loading the
+# model, so it needs no card and no weights. Split that way, the GPUs sit behind one
+# runner that both embedding and summarization draw from, rather than being allocated by
+# which pool you happened to start. That needs a runner Deployment and a second
+# ScaledObject and is deliberately left out of this directory for now — the code side is
+# `jmfts_core/embedder.py`, and this comment is the note that it exists.
+#
+# ONE POD PER GPU, AND ONE INFERENCE PER POD. EmbeddingService holds an RLock across the
+# whole forward pass (jmfts_core/embedding.py), so threads inside one process do not
+# overlap inference and a second worker thread would buy nothing. Concurrency here is
+# processes, and each process holds its own copy of the model plus its own attention peak
+# — which at embedding_token_window=512 is the real budget, not the weights. Requesting a
+# whole `nvidia.com/gpu` gives the pod exclusive access and lets the scheduler, rather
+# than luck, decide there is room.
+#
+# So: replicas equals the number of GPUs you have. Raising it past that leaves pods
+# Pending forever, since the device plugin has nothing to allocate.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jmfts-worker-gpu
+  namespace: jmfts
+  labels:
+    app.kubernetes.io/name: jmfts-worker
+    app.kubernetes.io/component: gpu
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: jmfts-worker
+      app.kubernetes.io/component: gpu
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: jmfts-worker
+        app.kubernetes.io/component: gpu
+    spec:
+      # Longer than the CPU pool's. The tasks here are the slow ones by construction, and
+      # `summarize` can additionally be waiting on an LLM.
+      terminationGracePeriodSeconds: 600
+      # nvidia.com/gpu in `limits` is what the device plugin schedules on; a nodeSelector
+      # is not required once the plugin is installed, and is left out so this manifest does
+      # not assume a label your cluster may not apply.
+      containers:
+        - name: worker
+          image: jmfts-worker-gpu:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: JMFTS_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: JMFTS_WORKER_BADGE
+              value: "embed"
+            - name: JMFTS_EMBEDDING_DEVICE
+              value: "cuda"
+          envFrom:
+            - configMapRef:
+                name: jmfts-worker
+            - secretRef:
+                name: jmfts-worker-db
+          resources:
+            requests:
+              cpu: "1"
+              memory: "8Gi"
+            limits:
+              memory: "16Gi"
+              nvidia.com/gpu: 1

@@ -23,6 +23,7 @@ import logging
 from typing import Optional
 
 from jmfts_core.config import get_settings
+from jmfts_core.embedding import ModelStackNotInstalled
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +54,22 @@ class RerankerService:
         self._load_model()
 
     def _load_model(self):
-        """Load the cross-encoder. Raises if the model is unavailable."""
-        from sentence_transformers import CrossEncoder
+        """Load the cross-encoder. Raises if the model is unavailable.
+
+        A CrossEncoder is the same sentence-transformers stack the embedding model uses, so
+        it belongs to the same `embed` extra and is absent from a base install for the same
+        reason. Guarded here rather than left as a bare ModuleNotFoundError so the message
+        names the extra — reranking has no remote equivalent to fall back to, unlike
+        embedding, so installing it is the only answer.
+        """
+        try:
+            from sentence_transformers import CrossEncoder
+        except ImportError as exc:
+            raise ModelStackNotInstalled(
+                f"{exc}\n\nThe reranker needs the model stack: pip install 'jmfts[embed]'. "
+                "Unlike embedding there is no /runner equivalent for it, so JMFTS_RUNNER_URL "
+                "does not help here — either install the extra or leave rerank off."
+            ) from exc
 
         self._model = CrossEncoder(
             self.model_name,

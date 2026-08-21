@@ -175,7 +175,7 @@ def mock_embedding():
     if not _DB_AVAILABLE:
         pytest.skip("Database not available")
     svc = MockEmbeddingService()
-    with patch("jmfts_core.repositories.document.get_embedding_service", return_value=svc):
+    with patch("jmfts_core.repositories.document.get_embedder", return_value=svc):
         yield svc
 
 
@@ -465,7 +465,7 @@ class TestOversizeRootContainer:
 
 try:
     from fastapi.testclient import TestClient
-    from api.main import app
+    from jmfts_core.rest.main import app
 
     # CR-4: present the shared-bearer token pinned by tests/conftest.py.
     from tests.conftest import AUTH_HEADERS
@@ -535,7 +535,7 @@ class TestDocumentCreateEmbedTokens:
     """
 
     def test_schema_default_and_override(self):
-        from api.schemas import DocumentCreate
+        from jmfts_core.rest.schemas import DocumentCreate
 
         assert DocumentCreate().embed_tokens is True  # backward-compatible default
         assert DocumentCreate(embed_tokens=False).embed_tokens is False

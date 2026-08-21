@@ -439,7 +439,7 @@ class TestIngestEndpoint:
     def client(self):
         from fastapi.testclient import TestClient
 
-        from api.main import app
+        from jmfts_core.rest.main import app
 
         # CR-4: present the shared-bearer token pinned by tests/conftest.py.
         from tests.conftest import AUTH_HEADERS
@@ -484,7 +484,7 @@ class TestIngestEndpoint:
         ``db`` dependency is overridden via ``app.dependency_overrides[get_db]``
         rather than by patching a (now-deleted) router module.
         """
-        from api.main import app
+        from jmfts_core.rest.main import app
         from jmfts_core.database import get_db
 
         fake_repo = _FakeRepo()

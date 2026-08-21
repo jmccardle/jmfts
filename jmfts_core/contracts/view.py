@@ -2,7 +2,7 @@
 
 Moved verbatim out of ``api/schemas.py`` so the service layer (``jmfts_core.services``)
 can depend on them without importing FastAPI. ``api/schemas.py`` re-exports these names,
-so existing ``from api.schemas import ViewResponse`` imports keep working.
+so existing ``from jmfts_core.rest.schemas import ViewResponse`` imports keep working.
 
 These are all response models (the /view/* endpoints are reads); there is no request
 body on this surface. Every field is unchanged from the pre-unification definitions.

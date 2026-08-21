@@ -174,6 +174,17 @@ CREATE TABLE task_queue (
     param_fingerprint TEXT NOT NULL,
     service_badge VARCHAR(50),
     claimed_by VARCHAR(100),
+    -- Worker liveness while the task is held, NOT a bound on how long it may run. The
+    -- worker touches this on a fixed interval, so a slow task keeps its claim as long as
+    -- it keeps beating; see migration 011 for why a lease DURATION was rejected.
+    heartbeat_at TIMESTAMPTZ,
+    -- Where a `batched` task is parked: the external provider's batch id, and when it went
+    -- there. A column rather than a key in `params`, because param_fingerprint is derived
+    -- from params at enqueue and keys spec 6.1's re-run diff. See migration 012 — and note
+    -- that a `batched` row is reachable by NOTHING else, so batched_at is the only way its
+    -- stall is ever detected.
+    batch_id TEXT,
+    batched_at TIMESTAMPTZ,
     -- Server-side clocks: `retry_after` is compared against the server's NOW().
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     started_at TIMESTAMPTZ,
@@ -186,7 +197,7 @@ CREATE TABLE task_queue (
     retry_after TIMESTAMPTZ,
 
     CONSTRAINT ck_task_queue_status
-        CHECK (status IN ('pending', 'claimed', 'running', 'completed', 'failed')),
+        CHECK (status IN ('pending', 'claimed', 'running', 'batched', 'completed', 'failed')),
     CONSTRAINT ck_task_queue_write_mode
         CHECK (write_mode IN ('self', 'children', 'subtree')),
     CONSTRAINT ck_task_queue_error_type
@@ -392,14 +403,26 @@ CREATE INDEX idx_task_queue_claimable
     ON task_queue(priority DESC, created_at ASC, id ASC)
     WHERE status IN ('pending', 'failed');
 -- The conflict predicate's inner NOT EXISTS: which tasks hold a reservation right now.
+-- `batched` is here and NOT in idx_task_queue_lease below: a task parked at a batch
+-- provider still owns its node's `effective_content`, but nothing is beating for it and
+-- the lease must never reap it. See migration 012.
 CREATE INDEX idx_task_queue_active
     ON task_queue(scope_document_id)
-    WHERE status IN ('claimed', 'running');
+    WHERE status IN ('claimed', 'running', 'batched');
+-- The poll pass: every task in one outstanding batch, and how long it has been out.
+CREATE INDEX idx_task_queue_batch
+    ON task_queue(batch_id, batched_at)
+    WHERE status = 'batched';
 -- Spec 6.3 reads the DAG backward — "tasks whose dependencies contain this id" — which
 -- is an array containment query.
 CREATE INDEX idx_task_queue_dependencies ON task_queue USING GIN (dependencies);
 -- Part 7 routing: a badged worker or review queue asking for its own work.
 CREATE INDEX idx_task_queue_service ON task_queue(service_badge, status, priority DESC);
+-- The lease reaper's scan: rows holding a reservation, oldest heartbeat first. Partial
+-- for the same reason idx_task_queue_active is.
+CREATE INDEX idx_task_queue_lease
+    ON task_queue(heartbeat_at)
+    WHERE status IN ('claimed', 'running');
 
 -- ============================================================================
 -- HELPER FUNCTIONS

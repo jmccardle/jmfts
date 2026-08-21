@@ -6,6 +6,11 @@ venv/
 .env
 .env.beir
 
+# Local Compose overrides. docker-compose.override.yml is picked up automatically and
+# holds one machine's addresses and model paths; it says "not for commit" in its own
+# header, and this is what makes that hold.
+docker-compose.override.yml
+
 # Benchmark data (symlinks / large corpora live under /storage)
 datasets/
 test_docs/

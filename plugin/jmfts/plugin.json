@@ -1,6 +1,6 @@
 {
   "name": "jmfts",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Tree-structured knowledgebase substrate with semantic search, typed cross-references, and temporal triples. Provides one orientation skill plus three capability skills (search, ingest, explore) auto-discovered when an agent needs durable memory or accumulated knowledge.",
   "skills": [
     "skills/jmfts",

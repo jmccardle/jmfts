@@ -50,12 +50,14 @@ from sqlalchemy.orm import Session
 
 from jmfts_core.config import Settings, get_settings
 from jmfts_core.contracts.attempt import param_fingerprint
+from jmfts_core.embedder import get_embedder
 from jmfts_core.embedding import get_embedding_service
 from jmfts_core.ingest_options import resolve_options
 from jmfts_core.ingest_tasks import (
     OPTIONS_KEY,
     TASK_STRUCTURE_SEMANTIC,
     TASK_SUMMARIZE,
+    TASK_SUMMARIZE_LLM,
     TaskOutcome,
     register_task_handler,
 )
@@ -137,8 +139,10 @@ class IngestRollupPlanner:
     def __call__(self, session: Session, node: Document) -> Sequence[TaskSpec]:
         children = child_ids(session, node.id)
         if not children:
-            # A leaf has nothing to roll up. Its own text is its own content, and it was
-            # embedded when it was created.
+            # A leaf has nothing to roll up: its own text is its own content, and its
+            # `embed` task — which is what brought the walk here — has already written its
+            # vectors. Returning nothing is what lets the leaf settle and the walk continue
+            # up to the node that DOES have children to roll up.
             return ()
 
         options = rollup_options(session, node)
@@ -520,13 +524,89 @@ def run_summarize(session: Session, task: TaskQueue) -> TaskOutcome:
     fit = service.check_fit(text, with_tokens=False, prefix=EMBED_PREFIX)
 
     if not fit.truncated:
-        return _store(
+        return store_effective_content(
             session,
             doc,
             embed_text=text,
             method=METHOD_CONCATENATED,
             children=len(children),
             detail={"tokens": fit.token_count, "window": fit.limit, "characters": len(text)},
+        )
+
+    # PAST HERE AN LLM IS REQUIRED, and this handler does not call one. It hands the node
+    # to `summarize:llm`, which carries its own badge and therefore its own pool — see
+    # TASK_SUMMARIZE_LLM for why the split exists at all.
+    #
+    # The check-and-defer is NOT a scheduling decision that could have been made at enqueue
+    # time. `fit.truncated` is a fact about this node's children as they are right now, and
+    # the only way to learn it is to concatenate them and tokenise, which is what this task
+    # just did. Deferring is the point: the expensive pool is asked for only after the work
+    # is known to need it.
+    deferred = enqueue_batch(
+        TaskQueueRepository(session),
+        doc.id,
+        [
+            TaskSpec(
+                task_type=TASK_SUMMARIZE_LLM,
+                write_mode=WRITE_SELF,
+                params=dict(task.params or {}),
+                # Inherit the deferring task's priority so a tree that was pushed to the
+                # front of the queue does not fall back to the default when it crosses into
+                # the LLM pool. getattr because a handler is also driven directly in tests
+                # with a stand-in row that carries only what handlers read.
+                priority=getattr(task, "priority", 0) or 0,
+            )
+        ],
+    )
+    return TaskOutcome(
+        detail={
+            "deferred_to": TASK_SUMMARIZE_LLM,
+            "deferred_task_ids": list(deferred),
+            "reason": (
+                "the concatenated children do not fit the embedding window, so this node "
+                "needs an LLM summary"
+            ),
+            "tokens": fit.token_count,
+            "window": fit.limit,
+            "children": len(children),
+        },
+    )
+
+
+@register_task_handler(TASK_SUMMARIZE_LLM)
+def run_summarize_llm(session: Session, task: TaskQueue) -> TaskOutcome:
+    """Summarize this node's children with an LLM, then embed the summary.
+
+    Reached only from :func:`run_summarize`, which has already established that the
+    concatenation does not fit. It re-derives the text rather than receiving it on the task
+    row: the children may have changed between the two tasks, and a summary of a stale
+    concatenation would be a quiet wrong answer where re-deriving is one cheap walk.
+
+    A node whose text is too long to concatenate and that has NO LLM configured records
+    ``skipped`` with the reason (spec 3.4, 11.4 §4). A missing summary is never silent.
+    """
+    doc = _scope_node(session, task)
+    children = child_ids(session, doc.id)
+    text = effective_text(session, doc.id, own_content=False)
+    service = get_embedding_service()
+    fit = service.check_fit(text, with_tokens=False, prefix=EMBED_PREFIX)
+
+    if not fit.truncated:
+        # The children shrank between the deferral and now. Concatenating is strictly
+        # better than paraphrasing — fewer layers of interpretation between a query and the
+        # document — so take it rather than calling an LLM to undo a change.
+        return store_effective_content(
+            session,
+            doc,
+            embed_text=text,
+            method=METHOD_CONCATENATED,
+            children=len(children),
+            detail={
+                "tokens": fit.token_count,
+                "window": fit.limit,
+                "characters": len(text),
+                "note": "the node fit the window by the time the LLM task ran",
+            },
         )
 
     settings = get_settings()
@@ -556,7 +636,7 @@ def run_summarize(session: Session, task: TaskQueue) -> TaskOutcome:
             f"the {summary_fit.limit}-token embedding window; the model did not summarize"
         )
 
-    return _store(
+    return store_effective_content(
         session,
         doc,
         embed_text=summary,
@@ -600,7 +680,7 @@ def effective_text(session: Session, node_id: int, *, own_content: bool = True) 
     return "\n\n".join(part for part in parts if part.strip())
 
 
-def _store(
+def store_effective_content(
     session: Session,
     doc: Document,
     *,
@@ -612,6 +692,13 @@ def _store(
 ) -> TaskOutcome:
     """Embed ``embed_text`` onto the node and record how the text was arrived at.
 
+    PUBLIC BECAUSE A SUMMARY CAN ARRIVE HOURS AFTER THE TASK THAT ASKED FOR IT. The
+    reference batch worker (``jmfts_batch/``) submits a node's text to an external batch
+    provider, is marked ``batched``, and applies the returned summary in a later process.
+    That path must write ``effective_content`` the same way this module does — same
+    embedding, same prefix, same record shape — so the definition lives here and has one
+    caller-visible name rather than being copied into the worker.
+
     The DOCUMENT vector only. Token embeddings would put this text into the MaxSim index
     under a node whose ``content`` it is not, which is the same double-count that keeps
     ``content`` off a container in the first place.
@@ -620,8 +707,11 @@ def _store(
     full-text index does not read (``to_tsvector(title || content)``), so a summary cannot
     skew the BM25 statistics of the corpus it summarizes.
     """
-    service = get_embedding_service()
-    doc.embed = service.embed_text(embed_text, prefix=EMBED_PREFIX).tolist()
+    # `get_embedder`, like the other ingest write: a worker pointed at a runner summarizes
+    # locally and embeds the summary remotely. The `check_fit` calls above stay on the
+    # local service, which answers them from the tokenizer alone.
+    embedder = get_embedder()
+    doc.embed = embedder.embed_text(embed_text, prefix=EMBED_PREFIX).tolist()
 
     structured = dict(doc.structured_content or {})
     record = {"method": method, "source_children": children, **detail}
@@ -661,9 +751,18 @@ def summarize_span(text: str, settings: Settings, model: str) -> str:
     if settings.summarization_disable_thinking:
         payload["chat_template_kwargs"] = {"enable_thinking": False}
 
-    base_url = settings.effective_llm_url.rstrip("/")
+    base_url, _ = settings.require_llm("Span summarization", model)
+    # No key, no header. A llama-server on the LAN wants none, and sending an empty bearer
+    # to one is a header it has to ignore; a metered web API wants one and refuses without
+    # it. Sending the header only when a key is configured is what lets the SAME worker
+    # image serve both — which is the whole premise of naming the badge `llm` after the
+    # resource rather than after the hardware.
+    headers = {}
+    if settings.llm_api_key:
+        headers["Authorization"] = f"Bearer {settings.llm_api_key}"
+
     with httpx.Client(timeout=settings.effective_llm_timeout) as client:
-        response = client.post(f"{base_url}/v1/chat/completions", json=payload)
+        response = client.post(f"{base_url}/v1/chat/completions", json=payload, headers=headers)
         response.raise_for_status()
         data = response.json()
     return extract_llm_text(data["choices"][0])

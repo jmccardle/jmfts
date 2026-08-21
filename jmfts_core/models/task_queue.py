@@ -52,12 +52,22 @@ from jmfts_core.database import Base
 TASK_PENDING = "pending"
 TASK_CLAIMED = "claimed"
 TASK_RUNNING = "running"
+
+#: Submitted to an external batch provider and waiting for it. Migration 012.
+#:
+#: Not a variant of ``failed`` despite looking like one from the claim query's side, where
+#: both are simply "not claimable": ``batched`` must not consume a retry, must not touch
+#: the node's ``settled``, and must never become claimable on its own. What it shares with
+#: ``failed`` is only that no worker is holding it.
+TASK_BATCHED = "batched"
+
 TASK_COMPLETED = "completed"
 TASK_FAILED = "failed"
 TASK_STATUSES: tuple[str, ...] = (
     TASK_PENDING,
     TASK_CLAIMED,
     TASK_RUNNING,
+    TASK_BATCHED,
     TASK_COMPLETED,
     TASK_FAILED,
 )
@@ -65,7 +75,26 @@ TASK_STATUSES: tuple[str, ...] = (
 #: Statuses that hold a reservation on the scope region. A ``pending`` task reserves
 #: nothing — it has not started — which is what lets the queue hold thousands of
 #: pending tasks over one subtree without any of them blocking each other.
-TASK_ACTIVE_STATUSES: tuple[str, ...] = (TASK_CLAIMED, TASK_RUNNING)
+#:
+#: ``batched`` IS here: the task will write its node's ``effective_content`` when the batch
+#: returns, and a second ``self`` task writing there in the meantime is exactly the race
+#: the reservation exists to prevent.
+TASK_RESERVING_STATUSES: tuple[str, ...] = (TASK_CLAIMED, TASK_RUNNING, TASK_BATCHED)
+
+#: Statuses in which a LIVE WORKER is holding the row, so a stale heartbeat means the
+#: worker died and the task should be requeued.
+#:
+#: ``batched`` is deliberately NOT here, and that exclusion is the whole reason these two
+#: tuples exist separately. Until migration 012 one constant answered both questions
+#: because the answers coincided. Nothing beats for a batched row and nothing should —
+#: the work is at the provider, not in a worker — so reaping one would requeue a task
+#: whose answer is already bought and paid for.
+#:
+#: The cost of that exclusion is that a ``batched`` row is invisible to every recovery
+#: mechanism here. ``batched_at`` and
+#: :meth:`~jmfts_core.repositories.task_queue.TaskQueueRepository.stalled_batches` are what
+#: make its stall detectable at all.
+TASK_REAPABLE_STATUSES: tuple[str, ...] = (TASK_CLAIMED, TASK_RUNNING)
 
 #: Declared write modes, spec 5.3. See ``TaskQueueRepository.claim_next`` for the
 #: conflict matrix these drive.
@@ -86,7 +115,7 @@ class TaskQueue(Base):
     # under a different name.
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending', 'claimed', 'running', 'completed', 'failed')",
+            "status IN ('pending', 'claimed', 'running', 'batched', 'completed', 'failed')",
             name="ck_task_queue_status",
         ),
         CheckConstraint(
@@ -134,6 +163,30 @@ class TaskQueue(Base):
     # claims un-badged work by default.
     service_badge: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     claimed_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+    # Worker liveness while the task is held. Touched on a fixed interval by whoever holds
+    # the claim, so what it measures is "the worker is still alive", not "the task has run
+    # this long". That distinction is the whole design: see migration 011: a lease keyed on
+    # elapsed RUNTIME needs a bound on legitimate task duration, which this branch does not
+    # have and cannot guess, while a bound on how long a live worker may go without
+    # reporting in is a property of the loop itself.
+    #
+    # Set at claim time as well as by the beat, so a worker that dies between claiming and
+    # its first beat is still reapable.
+    heartbeat_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Where a `batched` task is parked, and since when. Migration 012.
+    #
+    # COLUMNS, NOT KEYS IN `params`. `param_fingerprint` is derived from `params` at enqueue
+    # and spec 6.1 keys the re-run diff on (task_name, param_fingerprint), so writing
+    # execution state into `params` mid-flight would silently invalidate that key. `params`
+    # is what the task was asked to do; this is what happened while doing it.
+    #
+    # `batch_id` survives completion on purpose: it is part of the record of how the answer
+    # was obtained, and the index that serves the poll pass is partial on `batched` so the
+    # kept-around ids cost nothing.
+    batch_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    batched_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Server-side clocks throughout. `retry_after` is compared against the server's
     # NOW() in the claim query, so a client clock here would make backoff depend on

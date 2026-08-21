@@ -307,7 +307,7 @@ def mock_embedding():
     if not _DB_AVAILABLE:
         pytest.skip("Database not available")
     svc = MockEmbeddingService()
-    with patch("jmfts_core.repositories.document.get_embedding_service", return_value=svc):
+    with patch("jmfts_core.repositories.document.get_embedder", return_value=svc):
         yield svc
 
 

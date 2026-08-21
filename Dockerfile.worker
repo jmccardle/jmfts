@@ -1,0 +1,104 @@
+# The ingest worker image. One Dockerfile, three tags.
+#
+#   docker build -f Dockerfile.worker -t jmfts-worker-cpu:latest .
+#   docker build -f Dockerfile.worker -t jmfts-worker-gpu:latest \
+#          --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu126 .
+#   docker build -f Dockerfile.worker -t jmfts-worker-thin:latest \
+#          --build-arg EXTRAS= .
+#
+# Separate image NAMES rather than tags on one name, because kustomize matches an image
+# override by name: see deploy/k8s/kustomization.yaml.
+#
+# THE THIN VARIANT IS THE INTERESTING ONE. `--build-arg EXTRAS=` installs base JMFTS,
+# which since the dependency split does not include torch: the image gets the tokenizer
+# and nothing else, and the worker must be run with `--runner-url` pointing at a JMFTS
+# that does have the model. Measured with `docker images`: 689 MB against 3.98 GB for the
+# CPU image built from this same file. The CUDA one is larger again — not measured here,
+# so no number for it. That gap is what bounds how many replicas a pool can cold-start.
+#
+# Not a variant of the API image. That one exists to serve HTTP with `--reload` over a
+# bind-mounted source tree and says so; this one runs `jmfts-worker` over code baked in at
+# build time, because a pod that scales up cannot bind-mount a developer's checkout.
+#
+# NO CUDA BASE IMAGE. The cu126 wheels vendor the CUDA runtime as `nvidia-*` pip packages,
+# so a slim Python base plus the right wheel index is a complete GPU install — the host
+# contributes only the driver, through nvidia-container-toolkit. Using nvidia/cuda as the
+# base instead would pin a second, redundant CUDA against the one torch brings, and make
+# the two images differ by more than one build argument.
+FROM python:3.11-slim
+
+# libgomp1: the OpenMP runtime torch and python-igraph load at import time.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libgomp1 \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Whether this image holds the model at all. `[embed]` is the extra that adds torch and
+# sentence-transformers; empty gives base JMFTS, which can measure text but not embed it
+# (jmfts_core/embedding.py::ModelStackNotInstalled says so by name, and names the two ways
+# out). A worker built empty MUST be run with --runner-url.
+ARG EXTRAS="[embed]"
+
+# Which torch, when there is one. Default CPU, because that is the replica count that
+# grows: a CPU worker pool scales with queue depth while the GPU pool is bounded by the
+# number of GPUs, so the common image should be the small one. The CUDA wheels add several
+# GB, which is paid on every cold start of every replica.
+#
+# Installed FIRST and from an explicit index, so the `[embed]` resolve below sees
+# torch>=2.1.0 already satisfied rather than dragging in whatever PyPI defaults to. Skipped
+# entirely for a thin build — the point of which is that this line never runs.
+ARG TORCH_INDEX=https://download.pytorch.org/whl/cpu
+RUN if [ -n "${EXTRAS}" ]; then \
+      pip install --no-cache-dir torch --index-url ${TORCH_INDEX}; \
+    else \
+      echo "thin build: no torch"; \
+    fi
+
+COPY pyproject.toml ./
+COPY jmfts_core ./jmfts_core
+RUN pip install --no-cache-dir -e ".${EXTRAS}"
+
+# BAKE THE MODEL IN. Without this every cold pod downloads a few hundred MB before it can
+# claim its first task, which is precisely the wrong shape for autoscaling: scale-up
+# latency would be dominated by the download, and a queue spike would be answered by pods
+# that spend their first minute doing nothing. The alternative — a shared ReadWriteMany
+# volume — needs storage that a k3s cluster may not have, and would make the image
+# non-portable to a cluster that does not.
+#
+# A THIN BUILD STILL TAKES THE TOKENIZER. It does not embed, but it does measure:
+# `check_fit` decides what fits the window and the chunker calls it per candidate piece, so
+# a thin worker that had to fetch the tokenizer on first use would stall on exactly the
+# same cold start this exists to remove. Weights when we embed, tokenizer files when we do
+# not.
+#
+# Kept as a build arg matching Settings.embedding_model so a fork that changes the model
+# does not silently ship an image warmed for the wrong one.
+ARG EMBEDDING_MODEL=nomic-ai/modernbert-embed-base
+ENV JMFTS_EMBEDDING_MODEL=${EMBEDDING_MODEL}
+ENV HF_HOME=/opt/hf
+RUN if [ -n "${EXTRAS}" ]; then \
+      python -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('${EMBEDDING_MODEL}')"; \
+    else \
+      python -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('${EMBEDDING_MODEL}', allow_patterns=['*.json', 'tokenizer*', 'vocab*', 'merges*'])"; \
+    fi \
+ && find /opt/hf -name '*.onnx' -delete
+
+# Offline at runtime. The model is present, so a lookup against huggingface.co can only
+# add a startup delay and a dependency on the cluster having egress — and if the model is
+# somehow absent, failing immediately is better than a pod that appears healthy while it
+# downloads.
+ENV HF_HUB_OFFLINE=1
+
+# Read by jmfts_core.worker as the default --worker-id. Kubernetes should override it with
+# the pod name via the downward API; see deploy/k8s/. Left unset here rather than given a
+# placeholder, so the fallback is the honest {hostname}-{pid}.
+ENV JMFTS_WORKER_ID=""
+
+# No badge by default: an un-badged worker claims everything, which is right for a single
+# host and wrong for a fleet. The deployment sets JMFTS_WORKER_BADGE.
+CMD ["jmfts-worker"]

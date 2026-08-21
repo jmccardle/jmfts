@@ -27,15 +27,16 @@ from datetime import datetime
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import select, text
 
-from api.main import app
+from jmfts_core.rest.main import app
 from jmfts_core.contracts.ingest import IngestRequest
 from jmfts_core.contracts.upload import UploadedFile
 from jmfts_core.database import get_db, get_session
 from jmfts_core.ingest_options import OPTION_CHECKS, STRUCTURE_CHUNK_PARAMS
 from jmfts_core.ingest_tasks import (
     DECLARED_STRUCTURE,
+    TASK_EMBED,
     TASK_EXTRACT_IMAGES,
     TASK_EXTRACT_TABLES,
     TASK_EXTRACT_TEXT,
@@ -54,14 +55,21 @@ from jmfts_core.ingest_tasks import (
 )
 from jmfts_core.ingest_worker import IngestWorker
 from jmfts_core.models.document import (
+    Document,
     SETTLED_FAILED,
     SETTLED_IN_FLIGHT,
     SETTLED_SETTLED,
 )
-from jmfts_core.models.task_queue import TASK_COMPLETED, TASK_FAILED, TASK_PENDING
+from jmfts_core.models.task_queue import (
+    TASK_COMPLETED,
+    TASK_FAILED,
+    TASK_PENDING,
+    TASK_RUNNING,
+)
 from jmfts_core.repositories.document import DocumentRepository
 from jmfts_core.repositories.task_queue import TaskQueueRepository
 from jmfts_core.services.ingest_service import IngestService
+from jmfts_core.structure_tasks import USETYPE_CHUNK
 from tests.conftest import AUTH_HEADERS, DB_READY, _borrowed_session, drain_ingest_queue
 
 # ---------------------------------------------------------------------------
@@ -371,20 +379,44 @@ class TestWorkerDrainsTheQueue:
     def test_draining_runs_the_whole_file_pipeline_and_settles_the_file_node(
         self, db_session, pdf_bytes
     ):
-        """probe, then extract:text, then the rung probe's patterns chose."""
+        """probe, extract:text, the rung probe's patterns chose, and an embed per chunk.
+
+        The count is derived from the tree rather than written down: this fixture is one
+        page and produces one chunk today, and a chunking change that made it two would
+        turn a hardcoded number into a failure about arithmetic instead of about ingestion.
+        """
         response = _upload(db_session, pdf_bytes)
 
-        assert drain_ingest_queue(db_session) == 3
+        ran = drain_ingest_queue(db_session)
 
         node = DocumentRepository(db_session).get(response.document_id)
         assert node.structured_content["matched"]["patterns"]["has_outline"] is True
+        # The file node's OWN attempts are unchanged by the embed split: `embed` is scoped
+        # to each chunk, so its attempt records land there.
         assert [e["task"] for e in node.structured_content["attempts"]] == [
             TASK_PROBE,
             TASK_EXTRACT_TEXT,
             TASK_STRUCTURE_DECLARED,
         ]
-        # Nothing is pending for it and every node it created settled as it was written,
-        # so the 5.4 walk settles the file node itself.
+
+        chunks = (
+            db_session.execute(
+                select(Document)
+                .where(Document.path.contains([node.id]))
+                .where(Document.usetype == USETYPE_CHUNK)
+            )
+            .scalars()
+            .all()
+        )
+        assert chunks, "the declared rung wrote no chunks"
+        assert ran == 3 + len(chunks)
+        for chunk in chunks:
+            assert [e["task"] for e in chunk.structured_content["attempts"]] == [TASK_EMBED]
+            assert chunk.embed is not None, "the embed task did not write a vector"
+
+        # Every chunk's own task drained, so each settled, so the walk reached the file
+        # node and settled that. Before `embed` was its own task this held for a different
+        # reason — the chunks were born settled — and the walk never had to travel.
         assert node.settled == SETTLED_SETTLED
 
     def test_the_pending_entry_becomes_the_outcome_rather_than_gaining_a_sibling(
@@ -872,3 +904,329 @@ class TestFrontier:
     def test_an_unknown_document_is_a_404_not_a_row_of_zeros(self, client_with_db):
         """A caller polling for progress would read all-zeros as 'finished'."""
         assert client_with_db.get("/ingest/file/10000000/frontier").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# The lease — migration 011, and the fleet the in-process worker grew into
+# ---------------------------------------------------------------------------
+
+
+class TestHeartbeatLease:
+    """Recovering a worker that never comes back.
+
+    ``requeue_stale_claims`` recovers a RESTARTING worker's own rows and is provably safe
+    with no clock, because a process that is starting cannot also be running the task its
+    previous incarnation claimed. The cases it structurally cannot reach are the ones a
+    fleet produces: a pod rescheduled under a new id (nothing matches the dead
+    ``claimed_by``) and a host that stays down (no worker ever starts to do the matching).
+
+    The property that separates this design from "requeue anything claimed longer than N"
+    is asserted directly in
+    :meth:`test_a_slow_task_that_is_still_beating_is_not_reaped`. A lease keyed on elapsed
+    RUNTIME would reap a long `summarize` and run it a second time, concurrently, against
+    the same tree region.
+    """
+
+    def _held(self, db_session, temp_handler, worker_id="dead-worker"):
+        """A task claimed and marked running by ``worker_id``."""
+        docs = DocumentRepository(db_session)
+        node = _node(docs)
+        db_session.flush()
+        ran: list[int] = []
+        temp_handler("test:leased", lambda session, task: ran.append(task.id) or TaskOutcome())
+        tasks = TaskQueueRepository(db_session)
+        task = tasks.enqueue("test:leased", node.id, "self")
+        db_session.flush()
+        claimed = tasks.claim_next(worker_id)
+        tasks.mark_running(claimed)
+        db_session.flush()
+        return docs, node, task.id, ran
+
+    def _age_heartbeat(self, db_session, task_id, seconds):
+        """Backdate the beat, so the test does not have to wait out a real lease."""
+        db_session.execute(
+            text(
+                "UPDATE task_queue SET heartbeat_at = clock_timestamp() "
+                "- make_interval(secs => :s) WHERE id = :i"
+            ),
+            {"s": seconds, "i": task_id},
+        )
+        db_session.expire_all()
+
+    def test_the_claim_stamps_a_first_beat(self, db_session, temp_handler):
+        """So a worker that dies between claiming and starting its heartbeat thread still
+        leaves a timestamp, and the reaper never has to guess what NULL meant."""
+        _, _, task_id, _ = self._held(db_session, temp_handler)
+        assert TaskQueueRepository(db_session).get(task_id).heartbeat_at is not None
+
+    def test_a_worker_that_stops_beating_loses_the_task_to_another_worker(
+        self, db_session, temp_handler
+    ):
+        """The case `requeue_stale_claims` cannot reach: the dead worker's id is never
+        seen again, so recovery must not depend on matching it."""
+        docs, node, task_id, ran = self._held(db_session, temp_handler)
+        tasks = TaskQueueRepository(db_session)
+
+        # A differently-named worker recovers nothing by the old mechanism.
+        assert tasks.requeue_stale_claims("some-other-worker") == []
+        assert drain_ingest_queue(db_session) == 0
+        assert tasks.structuring_complete(node.id) is False
+
+        self._age_heartbeat(db_session, task_id, 120)
+        assert tasks.requeue_expired_claims(90) == [task_id]
+
+        assert drain_ingest_queue(db_session) == 1
+        assert ran == [task_id]
+        assert tasks.get(task_id).status == TASK_COMPLETED
+        assert docs.get(node.id).settled == SETTLED_SETTLED
+
+    def test_a_slow_task_that_is_still_beating_is_not_reaped(self, db_session, temp_handler):
+        """THE point of a heartbeat. This task has been running far longer than the lease;
+        what keeps it is that its worker is still reporting in. A lease measured against
+        `started_at` — the "requeue anything claimed longer than N" design this replaced —
+        would take it away and run it twice."""
+        _, _, task_id, _ = self._held(db_session, temp_handler)
+        tasks = TaskQueueRepository(db_session)
+
+        db_session.execute(
+            text(
+                "UPDATE task_queue SET started_at = clock_timestamp() "
+                "- make_interval(secs => 3600) WHERE id = :i"
+            ),
+            {"i": task_id},
+        )
+        assert tasks.touch_heartbeat(task_id) is True
+        db_session.expire_all()
+
+        assert tasks.requeue_expired_claims(90) == []
+        assert tasks.get(task_id).status == TASK_RUNNING
+
+    def test_the_reaped_run_is_in_the_durable_log_and_costs_a_retry(self, db_session, temp_handler):
+        """Through `fail()`, exactly as `requeue_stale_claims` goes: spec 5.6 wants the
+        record, and the retry cap is what stops a task that reliably kills its worker from
+        crash-looping the whole fleet."""
+        docs, node, task_id, _ = self._held(db_session, temp_handler)
+        self._age_heartbeat(db_session, task_id, 120)
+
+        TaskQueueRepository(db_session).requeue_expired_claims(90)
+
+        entries = docs.get(node.id).structured_content["attempts"]
+        assert [e["status"] for e in entries] == ["failed"]
+        assert "stopped reporting in" in entries[0]["error"]
+        assert entries[0]["detail"]["reason"] == "lease expired"
+        assert entries[0]["detail"]["worker_id"] == "dead-worker"
+        assert TaskQueueRepository(db_session).get(task_id).retryable is True
+
+    def test_the_retry_is_immediate_not_backed_off(self, db_session, temp_handler):
+        """The backoff decorrelates tasks that failed against one overloaded dependency. A
+        worker that stopped beating is not that, and the work should move to a live worker
+        now."""
+        _, _, task_id, _ = self._held(db_session, temp_handler)
+        self._age_heartbeat(db_session, task_id, 120)
+
+        tasks = TaskQueueRepository(db_session)
+        tasks.requeue_expired_claims(90)
+
+        assert tasks.claim_next("live-worker") is not None
+
+    def test_a_task_that_keeps_killing_its_worker_ends_as_a_failed_node(
+        self, db_session, temp_handler
+    ):
+        docs, node, task_id, _ = self._held(db_session, temp_handler)
+        tasks = TaskQueueRepository(db_session)
+        db_session.execute(
+            text("UPDATE task_queue SET retry_count = max_retries WHERE id = :i"), {"i": task_id}
+        )
+        self._age_heartbeat(db_session, task_id, 120)
+
+        tasks.requeue_expired_claims(90)
+
+        assert tasks.get(task_id).retry_after is None
+        assert docs.get(node.id).settled == SETTLED_FAILED
+
+    def test_a_beat_cannot_resurrect_a_row_somebody_else_already_reaped(
+        self, db_session, temp_handler
+    ):
+        """The beat is scoped to the active statuses. Once the row is 'failed', the worker
+        that was holding it no longer owns it, and a late beat must not make it look live —
+        which is also how the beating thread learns to stop."""
+        _, _, task_id, _ = self._held(db_session, temp_handler)
+        tasks = TaskQueueRepository(db_session)
+        self._age_heartbeat(db_session, task_id, 120)
+        tasks.requeue_expired_claims(90)
+
+        assert tasks.touch_heartbeat(task_id) is False
+
+    def test_only_one_worker_reaps_per_round(self, db_session, temp_handler):
+        """`with_reaper_lock` is what keeps every worker running the sweep on its own timer
+        from meaning N workers reap the same rows at once. Losing it is the normal case."""
+        tasks = TaskQueueRepository(db_session)
+        assert tasks.with_reaper_lock() is True
+
+        from jmfts_core.database import get_session
+
+        with get_session() as other:
+            assert TaskQueueRepository(other).with_reaper_lock() is False
+
+
+class TestHeartbeatThread:
+    """The beating thread itself: it must use a session of its OWN.
+
+    The handler runs inside one long transaction. An UPDATE issued on that session is
+    invisible to every other connection until it commits — which is exactly when the beat
+    stops being needed — so a beat sharing the work's transaction reports nothing to
+    anyone. These tests assert the mechanics without a database, because what is being
+    tested is the threading, not the SQL.
+    """
+
+    def _worker(self):
+        from contextlib import contextmanager
+
+        import jmfts_core.ingest_worker as worker_module
+
+        # The session is never used: touch_heartbeat is monkeypatched in every test here.
+        @contextmanager
+        def factory():
+            yield object()
+
+        return worker_module.IngestWorker(
+            worker_id="beater",
+            session_factory=factory,
+            heartbeat_seconds=0.02,
+            lease_seconds=90.0,
+        )
+
+    def test_it_beats_while_the_block_runs_and_stops_after(self, monkeypatch):
+        calls: list[int] = []
+        monkeypatch.setattr(
+            TaskQueueRepository,
+            "touch_heartbeat",
+            lambda self, task_id: calls.append(task_id) or True,
+        )
+        worker = self._worker()
+
+        with worker._heartbeat(7):
+            time.sleep(0.15)
+        beats_during = len(calls)
+
+        assert beats_during >= 2, f"expected repeated beats, got {beats_during}"
+        time.sleep(0.1)
+        assert len(calls) == beats_during, "the thread kept beating after the block exited"
+
+    def test_it_stops_when_the_row_is_no_longer_active(self, monkeypatch):
+        """Another worker has reaped the task. Continuing to beat would be claiming
+        liveness for a row somebody else now owns."""
+        calls: list[int] = []
+        monkeypatch.setattr(
+            TaskQueueRepository,
+            "touch_heartbeat",
+            lambda self, task_id: calls.append(task_id) or False,
+        )
+        worker = self._worker()
+
+        with worker._heartbeat(7):
+            time.sleep(0.15)
+
+        assert len(calls) == 1, f"expected one beat then a stop, got {len(calls)}"
+
+    def test_a_failing_beat_does_not_kill_the_task(self, monkeypatch):
+        """The thread cannot interrupt the handler, and a database blip is what the lease
+        exists to ride out. Raising here would turn a blip into a failed task."""
+        calls: list[int] = []
+
+        def explode(self, task_id):
+            calls.append(task_id)
+            raise RuntimeError("database went away")
+
+        monkeypatch.setattr(TaskQueueRepository, "touch_heartbeat", explode)
+        worker = self._worker()
+
+        with worker._heartbeat(7):
+            time.sleep(0.15)
+
+        assert len(calls) >= 2, "a failed beat should be retried, not fatal"
+
+
+class TestWorkerProcessShutdown:
+    """``python -m jmfts_core.worker``'s signal handling.
+
+    Found in a live run rather than by this suite: the first version logged and called
+    ``worker.stop()`` from inside the signal handler. A SIGTERM that landed while the main
+    thread was inside logging's ``stream.flush()`` raised a reentrancy error out of the
+    shutdown path — a Python signal handler runs on the main thread between bytecodes, so
+    it can interrupt code holding a lock and must not try to take that lock again.
+    ``stop()`` is worse still: it joins a thread, and blocking in a handler blocks the
+    interpreter that has to run the thread being waited for.
+    """
+
+    def test_the_handler_only_sets_a_flag(self):
+        """Asserted on the source, because the failure needs a signal to land inside a
+        lock the handler then re-enters — reproducing that reliably in a test is harder
+        than stating the rule the handler has to obey."""
+        import ast
+        import inspect
+
+        import jmfts_core.worker as worker_module
+
+        tree = ast.parse(inspect.getsource(worker_module))
+        handlers = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "request_stop"
+        ]
+        assert len(handlers) == 1, "expected exactly one signal handler in jmfts_core.worker"
+
+        called = {
+            node.func.attr
+            for node in ast.walk(handlers[0])
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        forbidden = called & {"info", "warning", "error", "exception", "debug", "stop", "join"}
+        assert not forbidden, (
+            f"the signal handler calls {sorted(forbidden)}; it must only set an Event. "
+            "Logging from a handler can re-enter logging's own lock, and stop()/join() "
+            "block the interpreter that has to run the thread being waited for."
+        )
+
+    def test_build_worker_carries_the_rollup_planner(self):
+        """With NO_ROLLUP every tree settles without ever being summarised — which looks
+        like success and produces a tree nothing can retrieve."""
+        from jmfts_core.rollup_tasks import IngestRollupPlanner
+        from jmfts_core.worker import build_parser, build_worker
+
+        worker = build_worker(build_parser().parse_args(["--badge", "embed"]))
+
+        assert isinstance(worker.planner, IngestRollupPlanner)
+        assert worker.service_badges == ["embed"]
+
+    def test_repeated_badge_flags_accumulate(self):
+        """A host running a local LLM on a GPU answers both pools; one badge per worker
+        would leave it idle whenever the other kind of work was queued."""
+        from jmfts_core.worker import build_parser, build_worker
+
+        worker = build_worker(build_parser().parse_args(["--badge", "embed", "--badge", "llm"]))
+
+        assert worker.service_badges == ["embed", "llm"]
+
+    def test_the_env_form_of_the_badge_list_is_comma_separated(self, monkeypatch):
+        """A container sets one variable, not a repeated flag."""
+        from jmfts_core.worker import build_parser, build_worker
+
+        monkeypatch.setenv("JMFTS_WORKER_BADGE", "llm, embed ,")
+
+        worker = build_worker(build_parser().parse_args([]))
+
+        # Blank entries dropped: a badge named "" matches nothing and would silently
+        # reduce the worker to un-badged work only.
+        assert worker.service_badges == ["llm", "embed"]
+
+    def test_a_lease_shorter_than_the_beat_is_refused_at_construction(self):
+        """The ratio is checked in Settings AND here, because a caller can build a worker
+        directly and the failure it prevents — a live worker's task reaped and run twice,
+        concurrently — does not show up as a crash."""
+        from jmfts_core.worker import build_parser, build_worker
+
+        args = build_parser().parse_args(["--heartbeat-seconds", "10", "--lease-seconds", "20"])
+
+        with pytest.raises(ValueError, match="at least"):
+            build_worker(args)

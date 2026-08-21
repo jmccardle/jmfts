@@ -212,8 +212,7 @@ async def _llm_summarize(texts: list[str], settings: Settings, llm_model: str | 
 
     Uses the same OpenAI-compatible endpoint as the synthesis service.
     """
-    model = llm_model or settings.effective_llm_model
-    base_url = settings.effective_llm_url.rstrip("/")
+    base_url, model = settings.require_llm("RAPTOR summarization", llm_model)
 
     # Format passages
     passages = []

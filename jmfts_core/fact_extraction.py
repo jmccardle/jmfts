@@ -121,8 +121,7 @@ async def _llm_extract(text: str, settings: Settings, llm_model: str | None = No
 
     Returns parsed JSON list of triple dicts, or empty list on failure.
     """
-    model = llm_model or settings.effective_llm_model
-    base_url = settings.effective_llm_url.rstrip("/")
+    base_url, model = settings.require_llm("Fact extraction", llm_model)
 
     # Truncate to fit context budget (rough: 4 chars/token, leave room for prompt)
     char_budget = 60_000 * 4  # ~60K tokens for input

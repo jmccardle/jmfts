@@ -31,7 +31,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 
-from api.main import app
+from jmfts_core.rest.main import app
 from jmfts_core.access import AccessDeniedError, can_read, can_write
 from jmfts_core.contracts.attempt import AttemptRecord
 from jmfts_core.contracts.document import DocumentUpdate
@@ -1103,7 +1103,7 @@ class TestTheIngestRecordIsNotCallerWritable:
 
 
 class TestUploadOverHttp:
-    """The `UploadedFile` → `UploadFile` substitution in `api/wiring.py`.
+    """The `UploadedFile` → `UploadFile` substitution in `jmfts_core/rest/wiring.py`.
 
     Without it there is no way to have a multipart endpoint that is both generated from
     the `@expose` registry and free of FastAPI imports in `jmfts_core` — see

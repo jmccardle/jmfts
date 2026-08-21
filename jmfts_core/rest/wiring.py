@@ -166,7 +166,7 @@ def build_exposed_router() -> APIRouter:
     """Assemble one APIRouter carrying every registered ``@expose`` operation.
 
     Importing the service modules (which triggers ``@register_service``) must happen
-    before this is called; ``api.main`` imports them, then mounts this router.
+    before this is called; ``jmfts_core.rest.main`` imports them, then mounts this router.
     """
     router = APIRouter()
     for spec in REGISTRY:
@@ -181,3 +181,26 @@ def build_exposed_router() -> APIRouter:
             name=spec.name,
         )
     return router
+
+
+def build_openapi_tags() -> list[dict[str, str]]:
+    """Describe each tag group in the OpenAPI document, taken from the owning service.
+
+    ``/docs`` groups 78 operations by tag and shows nothing but the tag's own name above
+    each group. The description comes from the docstring of the service class that
+    implements those operations, so the text in the browser is the text in the code and
+    cannot drift from it — there is no second list of tag blurbs to update.
+
+    A tag is expected to belong to exactly one service. If a later tag is shared by two,
+    this returns the first one's docstring rather than guessing at a merge; the parity
+    tests are the place to catch that, not a silent join here.
+    """
+    described: dict[str, str] = {}
+    for spec in REGISTRY:
+        for tag in spec.tags or ():
+            if tag in described or spec.service_cls is None:
+                continue
+            summary = (spec.service_cls.__doc__ or "").strip().split("\n", 1)[0]
+            if summary:
+                described[tag] = summary
+    return [{"name": tag, "description": text} for tag, text in described.items()]

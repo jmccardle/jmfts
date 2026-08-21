@@ -1,0 +1,53 @@
+# Everything the workers read that is not a secret. All of it is JMFTS_*-prefixed, which
+# is the only configuration surface jmfts_core.config has — there are no config files and
+# no paths baked into the image.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jmfts-worker
+  namespace: jmfts
+data:
+  JMFTS_DB_HOST: "postgres.jmfts.svc.cluster.local"
+  JMFTS_DB_PORT: "5432"
+  JMFTS_DB_NAME: "jmfts"
+  JMFTS_DB_USER: "jmfts"
+
+  # THE ROUTING POLICY. Empty in jmfts_core/config.py by default and set here, because
+  # turning it on is a claim about which worker pools exist — and this file is where the
+  # pools are defined. The membership is measured, not guessed: see
+  # jmfts_core/task_routing.py for the per-task-type wall clock behind it.
+  #
+  # TWO RESOURCES, NOT ONE. `embed` is the embedding model; `llm` is a completion. They are
+  # separate badges because they are separately scarce and separately priced, and because
+  # the pool that serves `llm` need not have a GPU at all — a light process forwarding to a
+  # metered web API answers it just as well as a host running a model locally. Naming the
+  # badge for the resource rather than the hardware is what lets one deployment satisfy it
+  # either way.
+  #
+  # `summarize` is on `embed`, not `llm`: it always embeds, and it only DECIDES whether a
+  # completion is needed. When one is, it enqueues `summarize:llm`, which carries the `llm`
+  # badge. Before that split there was one badge for a handler needing two scarce
+  # resources, and no way to name the expensive one without also claiming the cheap one.
+  #
+  # EVERY BADGE NAMED HERE NEEDS A POOL. A worker does not claim a badge it was not given,
+  # so a badge with no worker does not run slowly — it stalls, permanently and silently,
+  # with the tasks pending and their nodes never leaving `in_flight`. Delete a Deployment,
+  # delete its badge from this map.
+  #
+  # `structure:declared` and `structure:inferred` USED TO BE HERE and are not any more.
+  # They embedded inline; now they enqueue `embed` per chunk and do string work themselves.
+  # Badging them would pin text splitting to the scarce pool for no reason.
+  JMFTS_TASK_BADGES: '{"embed":"embed","summarize":"embed","summarize:llm":"llm"}'
+
+  # Fleet liveness (migration 011). The lease bounds how long a LIVE worker may go without
+  # reporting in, not how long a task may run; Settings.validate_worker_lease refuses a
+  # lease under 3x the beat, because below that ordinary scheduling delay costs a running
+  # task and the task then runs twice, concurrently, on two hosts.
+  JMFTS_WORKER_HEARTBEAT_SECONDS: "10"
+  JMFTS_WORKER_LEASE_SECONDS: "90"
+  JMFTS_WORKER_REAP_SECONDS: "30"
+
+  # The API process serves HTTP; the worker pools do the work. Without this every API
+  # replica would also claim tasks, which is not wrong but makes the fleet's capacity
+  # depend on how many API replicas happen to be running.
+  JMFTS_INGEST_WORKER_ENABLED: "false"

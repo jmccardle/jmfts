@@ -24,7 +24,7 @@ try:
     from jmfts_core.repositories.document import DocumentRepository
     from jmfts_core.repositories.search import SearchRepository, SearchResult
     from jmfts_core.embedding import EmbeddingResult, TokenEmbeddingResult
-    from api.main import app
+    from jmfts_core.rest.main import app
 
     from sqlalchemy import text as sa_text
 
@@ -147,7 +147,7 @@ def mock_embedding_all():
         pytest.skip("Database not available")
     svc = MockEmbeddingService()
     with (
-        patch("jmfts_core.repositories.document.get_embedding_service", return_value=svc),
+        patch("jmfts_core.repositories.document.get_embedder", return_value=svc),
         patch("jmfts_core.repositories.search.get_embedding_service", return_value=svc),
     ):
         yield svc
@@ -157,7 +157,7 @@ def mock_embedding_all():
 def mock_reranker():
     svc = MockRerankerService()
     # Patch every by-name import site of the singleton getter. The whole /search/*
-    # family moved its rerank logic from api.routers.search into the SearchService
+    # family moved its rerank logic from jmfts_core.rest.routers.search into the SearchService
     # (@expose unification), so the service module now holds the by-name copy.
     with (
         patch("jmfts_core.reranker.get_reranker_service", return_value=svc),

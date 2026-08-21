@@ -2,7 +2,7 @@
 
 Moved verbatim from ``api/schemas.py`` (the ``#59`` conversation-ingestion schemas) so the
 ``ConversationService`` can depend on them without importing FastAPI. ``api/schemas.py``
-re-exports every name here, so existing ``from api.schemas import X`` imports keep working.
+re-exports every name here, so existing ``from jmfts_core.rest.schemas import X`` imports keep working.
 
 Rule of the house: core may import contracts; contracts may not import ``api``/``fastapi``.
 """

@@ -1,8 +1,26 @@
 """JMFTS Configuration"""
 
+from typing import ClassVar
 from urllib.parse import quote_plus
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 from functools import lru_cache
+
+
+class LlmNotConfiguredError(RuntimeError):
+    """Raised when LLM-backed work is asked for and no endpoint is configured.
+
+    JMFTS does not ship an LLM. Rather than defaulting to somebody's address and failing
+    later as a connection error, the unconfigured case is named here, at the point of use,
+    where the message can say which variable to set.
+    """
+
+    def __init__(self, what: str):
+        super().__init__(
+            f"{what} needs an LLM endpoint and none is configured. Set JMFTS_LLM_BASE_URL "
+            "and JMFTS_LLM_MODEL to any OpenAI-compatible server (llama-server, vLLM, "
+            "Ollama, or a hosted API). JMFTS does not ship an LLM."
+        )
 
 
 class Settings(BaseSettings):
@@ -27,6 +45,48 @@ class Settings(BaseSettings):
     # means "allow all". Set JMFTS_API_TOKEN to pin a fixed token.
     api_token: str = ""  # env JMFTS_API_TOKEN
 
+    # Runner key — the credential for the /runner surface, which is a DIFFERENT kind of
+    # credential from `api_token` and must not be confused with one. A bearer on the
+    # regular API resolves to a *principal*, and that principal's grants filter which
+    # subtree the request may see. The runner surface has no subtree: it answers "embed
+    # this text" for a caller that holds the documents somewhere else entirely, possibly
+    # in a database this process cannot reach. There is nothing there for a principal to
+    # scope, so `require_runner` binds none.
+    #
+    # It is a shared secret rather than a row in `api_tokens` because the process that
+    # checks it may have no database at all — an embedding-only deployment is a model, a
+    # tokenizer, and an HTTP port. Two pods in one namespace read the same Secret and that
+    # is the whole handshake.
+    #
+    # Blank is the OFF switch, unlike `api_token` where blank means generate-print-require.
+    # The difference is deliberate: generating a key per process is right for one appliance
+    # printing a token an operator reads, and wrong for a fleet, where two replicas would
+    # generate two different keys and a worker would authenticate against whichever pod it
+    # happened to reach. With no key set the /runner routes answer 503, which reads as
+    # "this deployment does not offer embedding" — never as "come in".
+    runner_key: str = ""  # env JMFTS_RUNNER_KEY
+
+    # The CLIENT half of the same pair. `runner_key` above says what this process ACCEPTS
+    # on /runner; this says where it SENDS text when it needs a vector and would rather not
+    # produce one itself. Both read the same key, which is the whole handshake: two pods in
+    # one namespace mount one Secret, one of them serves the surface and the other posts to
+    # it (deploy/k8s/11-secret.example.yaml).
+    #
+    # Blank means "embed locally", which is what a single appliance does and is the reason
+    # blank is the default rather than an error. Set it and this process stops loading the
+    # embedding model for ingest work — see jmfts_core/embedder.py::get_embedder.
+    #
+    # SCOPE, stated because the name is broader than the behaviour: this covers the INGEST
+    # WRITE path — `embed` and the vector `summarize` writes. Search still embeds its
+    # queries locally. A process that serves /search therefore still needs the model, and
+    # setting this on one does not make it modelless; the process this empties out is a
+    # worker.
+    runner_url: str = ""  # env JMFTS_RUNNER_URL
+
+    # How long to wait on one /runner call. A cold runner loads several GB before it can
+    # answer, so this is sized for that first request rather than for the steady state.
+    runner_timeout: float = 300.0  # env JMFTS_RUNNER_TIMEOUT
+
     # CORS allow-list (CR-4). Empty (the default) = server-to-server only: no
     # browser Origin is permitted, which is the expected case (the τ client is
     # httpx and ignores CORS). Never "*" alongside allow_credentials. Set
@@ -43,6 +103,49 @@ class Settings(BaseSettings):
     # IngestWorker.drain() synchronously instead.
     ingest_worker_enabled: bool = True  # env JMFTS_INGEST_WORKER_ENABLED
     ingest_worker_poll_seconds: float = 1.0  # env JMFTS_INGEST_WORKER_POLL_SECONDS
+
+    # The worker fleet (migration 011). A worker that holds a task touches
+    # `task_queue.heartbeat_at` every `worker_heartbeat_seconds`; any worker may reap a
+    # task whose last beat is older than `worker_lease_seconds`.
+    #
+    # The lease bounds how long a LIVE worker may go without reporting in — not how long a
+    # task may run, which is unbounded here by design. So it is sized against the things
+    # that delay a beat rather than against the work: a GC pause, a database that is
+    # briefly unreachable, a container that is CPU-throttled while another pod loads a
+    # model. 90s over a 10s beat means eight consecutive missed beats before a live worker
+    # loses a task it is still running.
+    #
+    # Reaping is a floor on recovery latency, not a target: `requeue_stale_claims` still
+    # recovers a restarting worker's own rows immediately, and the lease is what covers the
+    # worker that does not come back.
+    worker_heartbeat_seconds: float = 10.0  # env JMFTS_WORKER_HEARTBEAT_SECONDS
+    worker_lease_seconds: float = 90.0  # env JMFTS_WORKER_LEASE_SECONDS
+    # How often a worker TRIES to reap. Only the one that wins the advisory lock does any
+    # work, so this is per-worker and the fleet's actual reaping rate does not scale with
+    # its size.
+    worker_reap_seconds: float = 30.0  # env JMFTS_WORKER_REAP_SECONDS
+
+    # Bearer token for the LLM endpoint, sent as `Authorization: Bearer ...` and ONLY when
+    # non-empty. Blank by default because the appliance's own llama-server wants no auth;
+    # a worker pool that forwards to a metered web API sets it from a Secret. This is what
+    # lets one worker image serve a local model and a paid API without a code path for each.
+    llm_api_key: str = ""  # env JMFTS_LLM_API_KEY
+
+    # Task-type -> service_badge, the routing policy `enqueue` applies when the caller does
+    # not name a badge itself. EMPTY BY DEFAULT, and that is load-bearing rather than
+    # cautious: a `cpu`-badged worker will not claim `gpu`-badged work, so a cluster that
+    # applies a GPU policy without running a GPU worker does not run slowly, it stalls
+    # silently. See jmfts_core/task_routing.py, which holds the measured policy as a named
+    # constant for a deployment to copy deliberately.
+    #
+    #   JMFTS_TASK_BADGES='{"embed":"gpu","summarize":"gpu"}'
+    task_badges: dict[str, str] = {}  # env JMFTS_TASK_BADGES (JSON object)
+
+    #: Minimum lease-to-beat ratio. Below this a worker that misses one or two beats to
+    #: ordinary scheduling noise loses a task it is still running, and the task then runs
+    #: TWICE — concurrently, against the same tree region, which is the exact failure the
+    #: write-mode reservation exists to prevent.
+    MIN_LEASE_TO_HEARTBEAT_RATIO: ClassVar[float] = 3.0
 
     # Embedding model
     embedding_model: str = "nomic-ai/modernbert-embed-base"
@@ -86,19 +189,34 @@ class Settings(BaseSettings):
     bm25_exclude_usetypes: list[str] = ["entity", "summary"]
     search_exclude_usetypes: list[str] = ["entity", "summary"]
 
-    # ensonet LLM service (GPU-aware model orchestrator)
-    ensonet_url: str = "http://localhost:8853"
-    ensonet_model: str = "THUDM_GLM4_32b"
+    # LLM endpoint (any OpenAI-compatible server: llama-server, vLLM, Ollama, ensonet, or
+    # a metered web API).
+    #
+    # BLANK BY DEFAULT, and deliberately so. JMFTS does not ship an LLM, so there is no
+    # address it could name that would be right for a fresh install: a default pointing at
+    # some particular host or port answers nothing on anyone else's machine, and turns "you
+    # have not configured an LLM" into a connection error that reads like a bug in JMFTS.
+    # `llm_configured` is the question to ask, and `require_llm_url()` is what raises.
+    #
+    # LLM-backed work is optional. Ingestion, embedding, chunking, indexing and all four
+    # search modes run with these empty; only summarize:llm, RAPTOR, fact extraction and
+    # synthesis need them.
+    llm_base_url: str = ""  # env JMFTS_LLM_BASE_URL
+    llm_model: str = ""  # env JMFTS_LLM_MODEL
+    llm_timeout: float = 0  # env JMFTS_LLM_TIMEOUT; 0 = use ensonet_timeout
+
+    # ensonet (a GPU-aware model orchestrator) as a named second source for the same three
+    # values. There are no ensonet-specific code paths — it is one possible OpenAI-compatible
+    # backend — so these are a lower-precedence alias, also blank. The timeout keeps a real
+    # default because it describes how long to wait, not where to connect, and a cold-start
+    # model load is genuinely slow.
+    ensonet_url: str = ""  # env JMFTS_ENSONET_URL
+    ensonet_model: str = ""  # env JMFTS_ENSONET_MODEL
     ensonet_timeout: float = 180.0  # generous for cold-start model loading
 
-    # Generic OpenAI-compatible LLM settings (override ensonet defaults)
-    llm_base_url: str = ""  # falls back to ensonet_url if empty
-    llm_model: str = ""  # falls back to ensonet_model if empty
-    llm_timeout: float = 0  # falls back to ensonet_timeout if 0
-
-    # Summarization. Runs over the OpenAI-compatible endpoint above; these tune the
-    # request, not a local process.
-    summarization_context: int = 4096  # input budget, ~4 chars/token when packing
+    # Summarization request shape. These describe how to call the configured endpoint, not
+    # which one — the endpoint is llm_base_url above.
+    summarization_context: int = 4096
     summarization_temperature: float = 0.3
 
     # OpenAI-compatible endpoint settings (used by synthesis, RAPTOR, extraction)
@@ -132,6 +250,34 @@ class Settings(BaseSettings):
     reranker_max_length: int = 512
     reranker_batch_size: int = 32
 
+    @model_validator(mode="after")
+    def validate_worker_lease(self) -> "Settings":
+        """Refuse a lease that is too short for the beat interval.
+
+        A deployment sets these two numbers in different places — a ConfigMap, a unit file,
+        an env var somebody exported once — and nothing connects them. Getting the ratio
+        wrong does not fail loudly: the fleet runs, and occasionally a task that is still
+        running is reaped and started a second time on another host, concurrently, against
+        the same tree region. That is a corrupted tree found weeks later, so it is checked
+        here, at startup, where the reason is still attached to the cause.
+        """
+        floor = self.worker_heartbeat_seconds * self.MIN_LEASE_TO_HEARTBEAT_RATIO
+        if self.worker_lease_seconds < floor:
+            raise ValueError(
+                f"worker_lease_seconds ({self.worker_lease_seconds:g}) must be at least "
+                f"{self.MIN_LEASE_TO_HEARTBEAT_RATIO:g}x worker_heartbeat_seconds "
+                f"({self.worker_heartbeat_seconds:g}), i.e. >= {floor:g}. Below that a "
+                "worker that misses a beat to ordinary scheduling delay loses a task it is "
+                "still running, and the task runs twice concurrently."
+            )
+        if self.worker_heartbeat_seconds <= 0:
+            raise ValueError(
+                f"worker_heartbeat_seconds must be positive, got "
+                f"{self.worker_heartbeat_seconds:g}; a worker that never beats holds every "
+                "task it claims until the lease reaps it"
+            )
+        return self
+
     @property
     def effective_reranker_device(self) -> str:
         """Device for the reranker.
@@ -143,11 +289,41 @@ class Settings(BaseSettings):
 
     @property
     def effective_llm_url(self) -> str:
+        """The configured LLM endpoint, or "" when there is none."""
         return self.llm_base_url or self.ensonet_url
 
     @property
     def effective_llm_model(self) -> str:
+        """The configured LLM model name, or "" when there is none."""
         return self.llm_model or self.ensonet_model
+
+    @property
+    def llm_configured(self) -> bool:
+        """Whether LLM-backed work can run at all.
+
+        Callers that can degrade honestly — a health probe, a rollup task that reports
+        `skipped` with a reason — test this. Callers that cannot proceed without an answer
+        use `require_llm_url` instead, so the failure names the missing variable.
+        """
+        return bool(self.effective_llm_url and self.effective_llm_model)
+
+    def require_llm(self, what: str, model: str | None = None) -> tuple[str, str]:
+        """Resolve ``(base_url, model)`` for an LLM call, or raise `LlmNotConfiguredError`.
+
+        `model` is the caller's own override — a per-task `llm_model` param — and wins over
+        the configured default, so a deployment can name one endpoint and route individual
+        tasks to different models on it. `what` names the operation, so the message says
+        which feature the caller wanted.
+
+        Raises rather than returning empty strings because the alternative is a request to
+        the URL "" with the model "", which surfaces as an httpx protocol error or a remote
+        400 — neither of which mentions that no LLM was ever configured.
+        """
+        base_url = self.effective_llm_url
+        resolved = model or self.effective_llm_model
+        if not base_url or not resolved:
+            raise LlmNotConfiguredError(what)
+        return base_url.rstrip("/"), resolved
 
     @property
     def effective_llm_timeout(self) -> float:

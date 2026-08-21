@@ -23,7 +23,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
-from api.main import app
+from jmfts_core.rest.main import app
 from jmfts_core.contracts.upload import UploadedFile
 from jmfts_core.database import get_db
 from jmfts_core.ingest_options import STRUCTURE_CHUNK_PARAMS

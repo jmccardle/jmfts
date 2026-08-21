@@ -8,16 +8,26 @@ Techniques:
 - MMR: Maximum Marginal Relevance (diversity + document relevance)
 - Attention Variance: Tokens with consistent attention across layers/heads
 - Stopword Penalty: Hard penalty for function words and punctuation
+
+TORCH IS IMPORTED LAZILY, inside the two methods that use it. It is a real import cost — a
+few GB installed, a second or two to load — and this module is reachable from the
+repository layer, which every process that speaks to the database imports. Selection only
+ever runs where the attentions are, so a process embedding through another JMFTS's
+`/runner` surface (`jmfts_core.embedder`) imports this module and never calls that half.
+`tests/test_thin_worker.py` asserts torch stays out of `sys.modules` on that path.
 """
+
+from __future__ import annotations
 
 import threading
 
-import torch
-import torch.nn.functional as F
 import numpy as np
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:  # annotations only; never evaluated at runtime
+    import torch
 
 # NLTK stopwords - embedded to avoid runtime dependency
 ENGLISH_STOPWORDS = frozenset({
@@ -126,6 +136,9 @@ class TokenSelector:
         1. Relevant to the document embedding
         2. Diverse from already-selected tokens
         """
+        import torch
+        import torch.nn.functional as F
+
         seq_len = len(tokens)
 
         # Normalize embeddings
@@ -187,6 +200,8 @@ class TokenSelector:
         Tokens that receive consistent attention across all layers/heads
         tend to be semantically important.
         """
+        import torch
+
         # Stack attention layers
         attention_stack = torch.stack(attentions)  # (layers, batch, heads, seq, seq)
 

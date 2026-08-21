@@ -11,7 +11,7 @@ first end-to-end check. These tests fail the next time it happens.
 
 from datetime import datetime, timezone
 
-from api.schemas import DocumentResponse
+from jmfts_core.rest.schemas import DocumentResponse
 from jmfts_core.models.document import Document
 
 

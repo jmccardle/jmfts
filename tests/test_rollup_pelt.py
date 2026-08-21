@@ -23,7 +23,11 @@ import pytest
 from sqlalchemy import select
 
 from jmfts_core.contracts.upload import UploadedFile
-from jmfts_core.ingest_tasks import TASK_STRUCTURE_SEMANTIC, TASK_SUMMARIZE
+from jmfts_core.ingest_tasks import (
+    TASK_STRUCTURE_SEMANTIC,
+    TASK_SUMMARIZE,
+    TASK_SUMMARIZE_LLM,
+)
 from jmfts_core.models.document import SETTLED_IN_FLIGHT, SETTLED_SETTLED, Document
 from jmfts_core.models.task_queue import TaskQueue
 from jmfts_core.repositories.document import DocumentRepository
@@ -38,6 +42,7 @@ from jmfts_core.rollup_tasks import (
     effective_text,
     run_structure_semantic,
     run_summarize,
+    run_summarize_llm,
 )
 from jmfts_core.services.ingest_service import IngestService
 from tests.conftest import drain_ingest_queue
@@ -61,6 +66,22 @@ def _vector(axis: int) -> list[float]:
     vec = [0.0] * EMBED_DIM
     vec[axis % EMBED_DIM] = 1.0
     return vec
+
+
+def _configure_llm(monkeypatch, module) -> None:
+    """Point ``module``'s settings at an LLM endpoint.
+
+    The shipped default names none — JMFTS does not include an LLM — so `run_summarize_llm`
+    reports `skipped` before it reaches the model. A test that replaces `summarize_span` and
+    expects it to be called has to configure an endpoint first, even though nothing will
+    connect to it.
+    """
+    from jmfts_core.config import get_settings
+
+    settings = get_settings().model_copy()
+    settings.llm_base_url = "http://llm.invalid:8000"
+    settings.llm_model = "a-model-that-is-never-called"
+    monkeypatch.setattr(module, "get_settings", lambda: settings)
 
 
 def _tree(session, axes: list[int], *, text: str = "some retrievable body text") -> Document:
@@ -392,10 +413,31 @@ class TestEffectiveContent:
 
         assert effective_text(db_session, parent.id, own_content=False) == "the short summary"
 
-    def test_an_oversized_node_is_summarized_by_the_model(self, db_session, monkeypatch):
+    def test_an_oversized_node_is_deferred_to_the_llm_task(self, db_session):
+        """`summarize` does not call an LLM any more; it establishes that one is NEEDED and
+        hands the node to `summarize:llm`, which carries the LLM pool's badge. The split
+        exists because every summarize embeds but only some need a completion, and which
+        ones is not knowable until the children are concatenated and tokenised."""
+        long_text = "Retrieval quality is measured against a baseline. " * 900
+        parent = _tree(db_session, [0, 1], text=long_text)
+
+        outcome = run_summarize(db_session, _Task(parent.id, {}, TASK_SUMMARIZE))
+
+        assert outcome.status == "completed"
+        assert outcome.detail["deferred_to"] == TASK_SUMMARIZE_LLM
+        assert outcome.detail["tokens"] > outcome.detail["window"]
+        # The node has NOT been given effective_content yet — the deferral is the product.
+        assert "effective_content" not in (
+            db_session.get(Document, parent.id).structured_content or {}
+        )
+        queued = db_session.query(TaskQueue).filter_by(scope_document_id=parent.id).all()
+        assert [t.task_type for t in queued] == [TASK_SUMMARIZE_LLM]
+
+    def test_the_llm_task_summarizes_and_embeds(self, db_session, monkeypatch):
         """The path over the embedding window. The model is replaced, not called."""
         import jmfts_core.rollup_tasks as rollup
 
+        _configure_llm(monkeypatch, rollup)
         long_text = "Retrieval quality is measured against a baseline. " * 900
         parent = _tree(db_session, [0, 1], text=long_text)
 
@@ -406,7 +448,7 @@ class TestEffectiveContent:
             return "A short summary of a long span about retrieval quality."
 
         monkeypatch.setattr(rollup, "summarize_span", _fake)
-        outcome = run_summarize(db_session, _Task(parent.id, {}, TASK_SUMMARIZE))
+        outcome = run_summarize_llm(db_session, _Task(parent.id, {}, TASK_SUMMARIZE_LLM))
 
         assert len(calls) == 1
         assert outcome.detail["method"] == METHOD_LLM_SUMMARY
@@ -419,12 +461,13 @@ class TestEffectiveContent:
         `effective_content` that nothing can retrieve."""
         import jmfts_core.rollup_tasks as rollup
 
+        _configure_llm(monkeypatch, rollup)
         long_text = "Retrieval quality is measured against a baseline. " * 900
         parent = _tree(db_session, [0, 1], text=long_text)
         monkeypatch.setattr(rollup, "summarize_span", lambda text, settings, model: long_text)
 
         with pytest.raises(ValueError, match="did not summarize"):
-            run_summarize(db_session, _Task(parent.id, {}, TASK_SUMMARIZE))
+            run_summarize_llm(db_session, _Task(parent.id, {}, TASK_SUMMARIZE_LLM))
 
     def test_no_llm_configured_is_a_skip_with_the_measurement(self, db_session, monkeypatch):
         """11.4 §4: a missing summary is never silent."""
@@ -439,7 +482,7 @@ class TestEffectiveContent:
         settings.ensonet_url = ""
         monkeypatch.setattr(rollup, "get_settings", lambda: settings)
 
-        outcome = run_summarize(db_session, _Task(parent.id, {}, TASK_SUMMARIZE))
+        outcome = run_summarize_llm(db_session, _Task(parent.id, {}, TASK_SUMMARIZE_LLM))
         assert outcome.status == "skipped"
         assert "no LLM is configured" in outcome.detail["reason"]
         assert outcome.detail["tokens"] > outcome.detail["window"]

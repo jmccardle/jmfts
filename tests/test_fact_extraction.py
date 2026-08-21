@@ -40,16 +40,20 @@ def _run(coro):
 
 
 def _make_settings(**overrides):
-    """Create a mock Settings object with extraction defaults."""
+    """A real Settings with extraction defaults, pointed at an endpoint nothing calls.
+
+    Previously a `MagicMock(spec=Settings)` with the read-only `effective_llm_*` properties
+    stubbed out. That bypassed the resolution chain being tested: `require_llm` is a method,
+    so a mock returned another mock instead of the (url, model) pair, and the stubs hid the
+    fact that the endpoint has to be configured at all. The HTTP client is patched in each
+    test, so this address is never contacted.
+    """
     from jmfts_core.config import Settings
 
     defaults = {
-        "ensonet_url": "http://localhost:8853",
-        "ensonet_model": "THUDM_GLM4_32b",
-        "ensonet_timeout": 10.0,
-        "effective_llm_url": "http://localhost:8853",
-        "effective_llm_model": "THUDM_GLM4_32b",
-        "effective_llm_timeout": 10.0,
+        "llm_base_url": "http://llm.invalid:8853",
+        "llm_model": "a-model-that-is-never-called",
+        "llm_timeout": 10.0,
         "extraction_max_facts": 5,
         "extraction_confidence_threshold": 0.5,
         "extraction_entity_similarity_threshold": 0.8,
@@ -57,10 +61,7 @@ def _make_settings(**overrides):
         "extraction_max_tokens": 2048,
     }
     defaults.update(overrides)
-    mock = MagicMock(spec=Settings)
-    for k, v in defaults.items():
-        setattr(mock, k, v)
-    return mock
+    return Settings(**defaults)
 
 
 # ============================================================================

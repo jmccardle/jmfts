@@ -2,7 +2,7 @@
 
 Moved out of ``api/schemas.py`` so the service layer (``jmfts_core.services``) can
 depend on them without importing FastAPI. ``api/schemas.py`` re-exports these names,
-so existing ``from api.schemas import TripleCreate`` imports keep working.
+so existing ``from jmfts_core.rest.schemas import TripleCreate`` imports keep working.
 """
 
 from datetime import datetime

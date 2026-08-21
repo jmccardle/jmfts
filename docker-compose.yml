@@ -27,9 +27,10 @@ services:
       - pgdata:/var/lib/postgresql/data
       # schema.sql is the complete canonical DDL (extensions, all tables, the
       # CR-1 position column) — it runs once, on a fresh data volume. The
-      # numbered migrations are upgrade deltas for existing DBs and are not
-      # needed to bootstrap.
-      - ./schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      # numbered migrations beside it are upgrade deltas for existing DBs and
+      # are not needed to bootstrap. Both are package data so that an installed
+      # wheel can reach them too; see jmfts_core/sql/__init__.py.
+      - ./jmfts_core/sql/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U jmfts -d jmfts"]
       interval: 5s
@@ -38,7 +39,7 @@ services:
 
   api:
     build: .
-    command: uvicorn api.main:app --host 0.0.0.0 --port 8100 --reload
+    command: uvicorn jmfts_core.rest.main:app --host 0.0.0.0 --port 8100 --reload
     depends_on:
       postgres:
         condition: service_healthy
@@ -58,7 +59,6 @@ services:
     volumes:
       # Live-reload: edits to these on the host reload the running server.
       - ./jmfts_core:/app/jmfts_core
-      - ./api:/app/api
       # Persist the downloaded embedding model across restarts (first boot pulls
       # nomic-ai/modernbert-embed-base — a few hundred MB — into this volume).
       - hf_cache:/root/.cache/huggingface

@@ -70,8 +70,7 @@ async def synthesize(
         httpx.ConnectError: If the LLM endpoint is unreachable.
     """
     settings = get_settings()
-    model = llm_model or settings.effective_llm_model
-    base_url = settings.effective_llm_url.rstrip("/")
+    base_url, model = settings.require_llm("Synthesis", llm_model)
 
     context = _format_context(documents, max_context_tokens)
 

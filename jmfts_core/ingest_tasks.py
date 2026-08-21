@@ -69,6 +69,45 @@ TASK_EXTRACT_IMAGES = "extract:images"
 TASK_STRUCTURE_SEMANTIC = "structure:semantic"
 TASK_SUMMARIZE = "summarize"
 
+#: The LLM half of ``summarize``, split out so the two can be routed at different pools.
+#:
+#: Every ``summarize`` needs the embedding model. Only the ones whose concatenated children
+#: overflow the embedding window need an LLM — and which ones those are is decided by
+#: ``check_fit`` INSIDE the handler, after the claim, so the queue cannot know it at enqueue
+#: time. That left no honest badge for ``summarize``: routed at an LLM pool, embedding-only
+#: work occupies a scarce resource; routed at an embedding pool, every embedding worker
+#: needs an LLM endpoint and LLM cost stops being separately routable.
+#:
+#: So ``summarize`` now decides and defers. It does the fit check, and either stores the
+#: concatenation itself or enqueues one of these, which carries its own badge. The shape is
+#: the one ``structure:semantic`` already uses — a task whose product is more tasks.
+TASK_SUMMARIZE_LLM = "summarize:llm"
+
+#: Give one node the vectors that make it retrievable. Also not in :data:`TASK_ROWS`, and
+#: for the opposite reason to the two above: nothing probe measures decides it because
+#: EVERY leaf gets one. The structure rungs enqueue it per chunk as they write the chunk.
+#:
+#: It used to not exist. ``DocumentRepository.create`` took ``auto_embed=True`` and ran the
+#: model inline, so the transformer forward pass for every chunk in a document happened
+#: inside the one ``structure:declared`` task that created them — which is why that task
+#: measured at 54% of ingest wall clock while claiming to be a text-splitting task
+#: (:mod:`jmfts_core.task_routing`). Three things follow from splitting it out:
+#:
+#: * the chunks of one file embed CONCURRENTLY, across the fleet, instead of in a loop;
+#: * the expensive work is one task type, so routing it is one badge on one row rather
+#:   than a badge on a handler that also parses text;
+#: * a worker can run everything EXCEPT this — see ``--runner-url`` in
+#:   :mod:`jmfts_core.worker` — which is what lets a fixed set of GPUs be shared between
+#:   embedding and summarization instead of pinned to whichever pool ingests.
+#:
+#: The ordering that used to be free now has to be real: rollup reads its children's
+#: vectors, and it stopped being true that a chunk has one the moment it exists. The
+#: settling walk already carries that (5.4) and no dependency array does — a chunk is
+#: created ``in_flight`` holding this task, so its parent cannot settle and the rollup
+#: planner is not called until every chunk under it has finished. See
+#: :func:`jmfts_core.structure_tasks._TreeWriter._write_chunks`.
+TASK_EMBED = "embed"
+
 #: The write mode ``probe`` declares (spec 5.3). ``self``, not ``children``: probe writes
 #: this node's own ``structured_content`` and creates no nodes. Enqueuing follow-on work
 #: is not a write to the tree, and declaring ``children`` would reserve a region probe
@@ -998,5 +1037,6 @@ def utc_now_iso() -> str:
 #
 # The cycle is real and it resolves: `structure_tasks` imports names from this module, and
 # by the time this line runs every one of them is defined.
+from jmfts_core import embed_tasks  # noqa: E402,F401  (side effect: registration)
 from jmfts_core import rollup_tasks  # noqa: E402,F401  (side effect: registration)
 from jmfts_core import structure_tasks  # noqa: E402,F401  (side effect: registration)

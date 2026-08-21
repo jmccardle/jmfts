@@ -1,0 +1,150 @@
+# The LLM pool: `summarize:llm`, the tasks that need a completion.
+#
+# TWO DEPLOYMENTS FOR ONE BADGE, and that is the point. `llm` names a RESOURCE — "this
+# worker can get a completion" — not a machine shape. Both of the pools below answer it,
+# and they look nothing alike:
+#
+#   llm-local   runs a model on a GPU. Fast, private, bounded by the device.
+#   llm-api     forwards to a metered web API. No accelerator, scales horizontally,
+#               costs money per call.
+#
+# Because `claim_next` filters on badge and nothing else, adding a replica to either pool
+# adds capacity for the same work. Which one gets a given task is decided by whichever has
+# a free slot — the opportunistic case: when the local GPU is idle it absorbs work the API
+# would otherwise have been paid for.
+#
+# ROUTING BY COST AND URGENCY, when you want it, is a finer badge. Split `llm` into two
+# badges in 10-config.yaml (say `llm-fast` and `llm-bulk`, chosen per task by the planner),
+# give llm-local BOTH via a repeated --badge, and give llm-api only the cheap one. The
+# local pool then drains cheap work whenever it has nothing urgent, and the API pool never
+# touches urgent work.
+#
+# One caveat that is a property of the claim query, not of this file: badges are a FILTER,
+# not a preference order. `claim_next` orders by priority then age across every badge a
+# worker answers, so an idle llm-local will start a bulk task a moment before an urgent one
+# arrives. Raise `priority` on the urgent rows; that is the lever that exists.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jmfts-worker-llm-local
+  namespace: jmfts
+  labels:
+    app.kubernetes.io/name: jmfts-worker
+    app.kubernetes.io/component: llm-local
+spec:
+  # Bounded by devices, like the embed pool. If this host's GPU is already given to
+  # jmfts-worker-gpu, either give this pool its own GPU or run it at 0 and rely on llm-api.
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: jmfts-worker
+      app.kubernetes.io/component: llm-local
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: jmfts-worker
+        app.kubernetes.io/component: llm-local
+    spec:
+      terminationGracePeriodSeconds: 900
+      containers:
+        - name: worker
+          image: jmfts-worker-gpu:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: JMFTS_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # Comma-separated: the env form of a repeated --badge. Add the embed badge here
+            # too if you want this pool to absorb embedding work when no LLM work is queued.
+            - name: JMFTS_WORKER_BADGE
+              value: "llm"
+            - name: JMFTS_EMBEDDING_DEVICE
+              value: "cuda"
+            # Point at whatever serves completions on this host. A wrong model name here is
+            # an HTTP 400, which classifies PERMANENT and fails the node rather than
+            # retrying — deliberate, because a model name does not fix itself.
+            - name: JMFTS_LLM_BASE_URL
+              value: "http://llama-server.jmfts.svc.cluster.local:8080"
+          envFrom:
+            - configMapRef:
+                name: jmfts-worker
+            - secretRef:
+                name: jmfts-worker-db
+          resources:
+            requests:
+              cpu: "1"
+              memory: "8Gi"
+            limits:
+              memory: "16Gi"
+              nvidia.com/gpu: 1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jmfts-worker-llm-api
+  namespace: jmfts
+  labels:
+    app.kubernetes.io/name: jmfts-worker
+    app.kubernetes.io/component: llm-api
+spec:
+  # Light: this process embeds the summary the API returns, and otherwise waits on the
+  # network. Replicas are limited by the API's rate limit, not by this cluster.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: jmfts-worker
+      app.kubernetes.io/component: llm-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: jmfts-worker
+        app.kubernetes.io/component: llm-api
+    spec:
+      # Generous: a task here is blocked on somebody else's queue, and a 429 that backs off
+      # can hold the task for a while before it succeeds.
+      terminationGracePeriodSeconds: 900
+      containers:
+        - name: worker
+          # The CPU image. This pool still embeds the returned summary, so it needs the
+          # embedding model — which is why it is a JMFTS worker at all and not a script.
+          image: jmfts-worker-cpu:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: JMFTS_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: JMFTS_WORKER_BADGE
+              value: "llm"
+            - name: JMFTS_EMBEDDING_DEVICE
+              value: "cpu"
+            - name: JMFTS_LLM_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: jmfts-worker-llm-api
+                  key: JMFTS_LLM_BASE_URL
+            - name: JMFTS_LLM_MODEL
+              valueFrom:
+                secretKeyRef:
+                  name: jmfts-worker-llm-api
+                  key: JMFTS_LLM_MODEL
+            # Sent as `Authorization: Bearer ...` only when non-empty, so the same image
+            # also serves an unauthenticated model on the LAN.
+            - name: JMFTS_LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: jmfts-worker-llm-api
+                  key: JMFTS_LLM_API_KEY
+          envFrom:
+            - configMapRef:
+                name: jmfts-worker
+            - secretRef:
+                name: jmfts-worker-db
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              memory: "4Gi"

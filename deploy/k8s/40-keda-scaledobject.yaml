@@ -1,0 +1,121 @@
+# Autoscaling the CPU pool on queue depth.
+#
+# WHY NOT AN HPA ON CPU PERCENT. A worker spends much of a task blocked — on the database,
+# on an LLM, on the GPU pool finishing the tree it depends on — so CPU utilisation reports
+# a busy worker as idle. Scaling on it would shrink the pool exactly when the queue is
+# deepest. The signal that means anything here is how much claimable work exists, which
+# lives in `task_queue` and needs a scaler that can read it.
+#
+# Requires KEDA (https://keda.sh). Only the CPU pool is scaled: the GPU pool's replica
+# count is bounded by physical devices, so an autoscaler there could only produce Pending
+# pods.
+#
+# THE QUERY MIRRORS `claim_next`'s CLAIMABILITY, NOT THE WHOLE TABLE. It counts rows that
+# are pending or retryable-failed, whose backoff has elapsed, whose dependencies are all
+# completed, and whose badge this pool can take. The dependency gate is the one that
+# matters most: a single large tree can hold thousands of rows blocked behind an earlier
+# task, and counting those would scale the pool up to answer work that nothing can claim
+# yet.
+#
+# It deliberately does NOT apply the write-mode conflict predicate. That predicate is
+# about reservations held by tasks already running, which is a function of how many
+# workers there are — the thing being decided. Including it would make the metric depend
+# on the current replica count and oscillate.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: jmfts-worker-cpu
+  namespace: jmfts
+spec:
+  scaleTargetRef:
+    name: jmfts-worker-cpu
+  minReplicaCount: 1
+  maxReplicaCount: 12
+  # Long enough that a tree which briefly empties the queue between levels does not scale
+  # the pool to the floor and back. The settle walk enqueues the next level after the
+  # previous one commits, so short gaps are normal.
+  cooldownPeriod: 300
+  pollingInterval: 15
+  triggers:
+    - type: postgresql
+      metadata:
+        # One replica per 5 claimable tasks.
+        targetQueryValue: "5"
+        activationTargetQueryValue: "0"
+        query: >-
+          SELECT count(*) FROM task_queue t
+          WHERE (t.status = 'pending'
+                 OR (t.status = 'failed' AND t.retryable
+                     AND t.retry_count < t.max_retries))
+            AND (t.retry_after IS NULL OR t.retry_after <= NOW())
+            AND (t.service_badge IS NULL OR t.service_badge = 'cpu')
+            AND (t.dependencies IS NULL
+                 OR cardinality(t.dependencies) = 0
+                 OR (SELECT count(*) FROM task_queue dep
+                      WHERE dep.id = ANY(t.dependencies)
+                        AND dep.status = 'completed') = cardinality(t.dependencies));
+        host: postgres.jmfts.svc.cluster.local
+        port: "5432"
+        userName: jmfts
+        dbName: jmfts
+        sslmode: disable
+      authenticationRef:
+        name: jmfts-worker-db
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: jmfts-worker-db
+  namespace: jmfts
+spec:
+  secretTargetRef:
+    - parameter: password
+      name: jmfts-worker-db
+      key: JMFTS_DB_PASSWORD
+---
+# The web-API LLM pool. Scaled separately from the CPU pool because it answers a different
+# badge: a backlog of `summarize:llm` says nothing about how much `probe` work is waiting,
+# and one metric driving both would scale the wrong pool.
+#
+# maxReplicaCount is a COST CEILING here, not a capacity estimate. Every replica is calls
+# against a metered API, so this number is the most you are willing to spend at once. The
+# `llm-local` pool absorbing work for free is what makes a low ceiling tolerable.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: jmfts-worker-llm-api
+  namespace: jmfts
+spec:
+  scaleTargetRef:
+    name: jmfts-worker-llm-api
+  minReplicaCount: 0
+  maxReplicaCount: 4
+  cooldownPeriod: 600
+  pollingInterval: 30
+  triggers:
+    - type: postgresql
+      metadata:
+        targetQueryValue: "10"
+        activationTargetQueryValue: "0"
+        # Only `llm`-badged work. Un-badged rows are deliberately NOT counted: the other
+        # pools claim those, and counting them here would scale a paid pool on work it will
+        # never be the one to run.
+        query: >-
+          SELECT count(*) FROM task_queue t
+          WHERE (t.status = 'pending'
+                 OR (t.status = 'failed' AND t.retryable
+                     AND t.retry_count < t.max_retries))
+            AND (t.retry_after IS NULL OR t.retry_after <= NOW())
+            AND t.service_badge = 'llm'
+            AND (t.dependencies IS NULL
+                 OR cardinality(t.dependencies) = 0
+                 OR (SELECT count(*) FROM task_queue dep
+                      WHERE dep.id = ANY(t.dependencies)
+                        AND dep.status = 'completed') = cardinality(t.dependencies));
+        host: postgres.jmfts.svc.cluster.local
+        port: "5432"
+        userName: jmfts
+        dbName: jmfts
+        sslmode: disable
+      authenticationRef:
+        name: jmfts-worker-db

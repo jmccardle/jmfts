@@ -43,22 +43,37 @@ from sqlalchemy.orm import Session
 from jmfts_core.contracts.attempt import TERMINAL_STATUSES, AttemptRecord, param_fingerprint
 from jmfts_core.models.document import Document, SETTLED_FAILED, SETTLED_IN_FLIGHT
 from jmfts_core.models.task_queue import (
-    TASK_ACTIVE_STATUSES,
+    TASK_BATCHED,
     TASK_CLAIMED,
     TASK_COMPLETED,
     TASK_FAILED,
     TASK_PENDING,
+    TASK_REAPABLE_STATUSES,
+    TASK_RESERVING_STATUSES,
     TASK_RUNNING,
     WRITE_MODES,
     TaskQueue,
 )
 from jmfts_core.repositories.document import DocumentRepository
 from jmfts_core.task_errors import RETRYABLE_ERROR_TYPES, ErrorType
+from jmfts_core.task_routing import BADGE_FROM_POLICY, BadgeRequest, resolve_badge
 
 #: Key for the transaction-scoped advisory lock that serialises claims. Arbitrary but
 #: fixed; two-int form so it cannot collide with a single-bigint advisory lock taken
 #: elsewhere. See the module docstring for why the claim needs it at all.
 _CLAIM_LOCK_KEY = (0x4A4D_4653, 1)  # 'JMFS', slot 1
+
+#: Key for the lease reaper's lock. Same namespace, next slot: every worker runs the
+#: reaper on its own timer, and this is what makes exactly one of them do it per round.
+#: Distinct from the claim lock on purpose — sharing one would make a reaping pass block
+#: every claim in the fleet for its duration.
+_REAPER_LOCK_KEY = (0x4A4D_4653, 2)  # 'JMFS', slot 2
+
+#: First key of the per-batch poll lock; the second is ``hashtext(batch_id)``. A separate
+#: namespace slot rather than a third fixed key, because there is one lock PER BATCH and
+#: they must not serialise against each other — two workers polling two different batches
+#: is the case this is built for.
+_BATCH_LOCK_NAMESPACE = 0x4A4D_4654  # 'JMFT', the batch-id namespace
 
 #: Base of the exponential backoff, in seconds. ``2 ** retry_count`` minutes — 1, 2, 4 —
 #: which with the default ``max_retries = 3`` is where it stops.
@@ -90,10 +105,17 @@ class TaskQueueRepository:
         params: Optional[Mapping[str, Any]] = None,
         dependencies: Optional[Sequence[int]] = None,
         priority: int = 0,
-        service_badge: Optional[str] = None,
+        service_badge: BadgeRequest = BADGE_FROM_POLICY,
         max_retries: int = 3,
     ) -> TaskQueue:
         """Create a pending task and un-settle the node it is scoped to.
+
+        ``service_badge`` defaults to the routing policy for this task type
+        (:func:`jmfts_core.task_routing.badge_for`), which is empty unless a deployment
+        configured one. Passing ``None`` explicitly is different from omitting it: it
+        means "leave this task un-badged whatever the policy says", which is what Part 7's
+        review tasks and the tests need. The sentinel is what keeps those two apart — with
+        a plain ``None`` default there would be no way to say "un-badged, deliberately".
 
         The un-settling is not a side effect, it is the definition: spec 2.1 says a
         settled node has no task pending for it, so a node that gains one is by
@@ -120,6 +142,8 @@ class TaskQueueRepository:
                 f"cannot enqueue {task_type!r}: document {scope_document_id} does not exist"
             )
 
+        resolved_badge = resolve_badge(task_type, service_badge)
+
         resolved_params = dict(params or {})
         task = TaskQueue(
             task_type=task_type,
@@ -130,7 +154,7 @@ class TaskQueueRepository:
             dependencies=sorted(set(dependencies)) if dependencies else None,
             params=resolved_params,
             param_fingerprint=param_fingerprint(resolved_params),
-            service_badge=service_badge,
+            service_badge=resolved_badge,
             max_retries=max_retries,
         )
         self.session.add(task)
@@ -174,9 +198,23 @@ class TaskQueueRepository:
     # =========================================================================
 
     def claim_next(
-        self, worker_id: str, *, service_badge: Optional[str] = None
+        self, worker_id: str, *, service_badges: Optional[Sequence[str]] = None
     ) -> Optional[TaskQueue]:
         """Atomically take the highest-priority claimable task, or return None.
+
+        ``service_badges`` is a LIST, not one badge, because a pool's capability and the
+        routing decision are different things. A host running a local LLM on a GPU can
+        answer both the urgent badge and the cheap one; a light runner that forwards to a
+        metered web API can answer only the cheap one. With one badge per worker the
+        expensive pool sits idle whenever no urgent work exists, and "route by cost and
+        urgency" has no way to express the fallback that makes it worth doing.
+
+        NOTE WHAT THIS DOES NOT GIVE YOU. The ordering is still ``priority DESC,
+        created_at ASC`` — badges are a filter, not a preference order. A worker listing
+        ``[urgent, bulk]`` takes whatever is oldest and highest priority among BOTH, so an
+        idle expensive worker will start a bulk task a second before an urgent one
+        arrives. ``priority`` on the row is the lever for that; preference ordering inside
+        the claim would mean one query per badge and is deliberately not done here.
 
         A task is claimable when all of:
 
@@ -216,6 +254,11 @@ class TaskQueueRepository:
                 status = 'claimed',
                 claimed_by = :worker_id,
                 started_at = clock_timestamp(),
+                -- The first beat, written by the claim itself. Without it a worker that
+                -- died between claiming and starting its heartbeat thread would hold a
+                -- row with a NULL heartbeat, and the reaper would have to decide whether
+                -- NULL means "old worker, no heartbeat support" or "just claimed".
+                heartbeat_at = clock_timestamp(),
                 completed_at = NULL,
                 error = NULL,
                 error_type = NULL,
@@ -231,12 +274,12 @@ class TaskQueueRepository:
                             AND t.retry_count < t.max_retries)
                       )
                   AND (t.retry_after IS NULL OR t.retry_after <= NOW())
-                  -- An un-badged worker claims anything; a badged one claims its own
-                  -- badge and un-badged work. Triskelion required strict equality here,
-                  -- which made a task with a NULL badge unclaimable by anyone.
-                  AND (:service_badge IS NULL
+                  -- An un-badged worker claims anything; a badged one claims ANY of its
+                  -- own badges, plus un-badged work. Triskelion required strict equality
+                  -- here, which made a task with a NULL badge unclaimable by anyone.
+                  AND (:service_badges IS NULL
                        OR t.service_badge IS NULL
-                       OR t.service_badge = :service_badge)
+                       OR t.service_badge = ANY(CAST(:service_badges AS text[])))
                   -- Dependency gate. Counting completed rows rather than testing for a
                   -- non-completed one means a dependency whose row has VANISHED (its
                   -- document was deleted, cascading) blocks instead of silently
@@ -255,7 +298,7 @@ class TaskQueueRepository:
                         SELECT 1
                         FROM task_queue a
                         JOIN documents da ON da.id = a.scope_document_id
-                        WHERE a.status IN ('claimed', 'running')
+                        WHERE a.status IN ('claimed', 'running', 'batched')
                           AND a.id <> t.id
                           AND (
                                (a.write_mode = t.write_mode
@@ -275,8 +318,13 @@ class TaskQueueRepository:
             )
             RETURNING id
             """)
+        # An EMPTY list is normalised to None — "claims anything" — rather than passed
+        # through as an empty array, which `= ANY('{}')` would make false for every badged
+        # row. A worker configured with no badges is the un-badged appliance worker, not a
+        # worker that can claim nothing.
+        badges = list(service_badges) if service_badges else None
         row = self.session.execute(
-            sql, {"worker_id": worker_id, "service_badge": service_badge}
+            sql, {"worker_id": worker_id, "service_badges": badges}
         ).fetchone()
         if row is None:
             return None
@@ -321,7 +369,7 @@ class TaskQueueRepository:
         stmt = (
             select(TaskQueue)
             .where(TaskQueue.claimed_by == worker_id)
-            .where(TaskQueue.status.in_(TASK_ACTIVE_STATUSES))
+            .where(TaskQueue.status.in_(TASK_REAPABLE_STATUSES))
             .order_by(TaskQueue.id)
         )
         stale = list(self.session.execute(stmt).scalars().all())
@@ -337,6 +385,242 @@ class TaskQueueRepository:
                 retry_delay_seconds=0,
             )
         return [task.id for task in stale]
+
+    def touch_heartbeat(self, task_id: int) -> bool:
+        """Report that the worker holding ``task_id`` is still alive.
+
+        Returns whether a row was actually touched. False means the task is no longer
+        active — it finished, it was reaped, or its document was deleted — which is the
+        caller's signal to stop beating for it.
+
+        MUST BE CALLED FROM ITS OWN SESSION, and this method deliberately does not have
+        the usual ``self.session`` shape you would reach for. The worker runs its handler
+        inside one long transaction (see ``IngestWorker.run_once``), and an UPDATE issued
+        inside that transaction is invisible to every other connection until it commits —
+        which is precisely when the heartbeat is no longer needed. A beat written into the
+        task's own transaction reports nothing to anyone. ``IngestWorker`` therefore beats
+        from a separate thread with a separate session; this is written as a plain UPDATE
+        with no ORM identity-map involvement so that is cheap.
+
+        Scoped to the active statuses so a beat can never resurrect a row's timestamp
+        after something else has already decided the worker was gone.
+        """
+        result = self.session.execute(
+            text("""
+                UPDATE task_queue
+                SET heartbeat_at = clock_timestamp()
+                WHERE id = :task_id
+                  AND status IN ('claimed', 'running')
+            """),
+            {"task_id": task_id},
+        )
+        return result.rowcount > 0
+
+    def requeue_expired_claims(self, lease_seconds: float) -> list[int]:
+        """Fail active tasks whose worker has stopped reporting in. Spec 7.3, for a fleet.
+
+        The fleet counterpart to :meth:`requeue_stale_claims`. That one recovers rows by
+        matching a restarting worker's own id, which is provably safe with no clock at all
+        but only ever fires for a worker that comes BACK. This one covers the cases it
+        cannot: a pod rescheduled under a new id, and a host that stays down.
+
+        ``lease_seconds`` bounds how long a LIVE worker may go without beating, not how
+        long a task may run — see migration 011. It must be a comfortable multiple of the
+        beat interval, or an ordinary scheduling delay reaps a task that is still running;
+        :func:`jmfts_core.config.Settings.validate_worker_lease` enforces that ratio at
+        startup rather than leaving it to whoever writes the deployment.
+
+        ``COALESCE(heartbeat_at, started_at)``: a row claimed by a worker built before the
+        heartbeat existed has no beat, and must still be reapable. ``started_at`` is
+        written by the same statement that sets 'claimed', so it is never NULL on an
+        active row and the COALESCE cannot fall through.
+
+        Failures go through :meth:`fail`, exactly as ``requeue_stale_claims`` does, so the
+        attempt log records why the run ended, the retry cap is consumed, and a task that
+        reliably kills its worker eventually settles the node 'failed' instead of
+        crash-looping the fleet forever.
+
+        The retry is scheduled immediately. The backoff exists to decorrelate tasks that
+        failed against the same overloaded dependency, and a worker that stopped beating
+        is not that.
+
+        THIS METHOD DOES NOT TAKE THE REAPER LOCK. :meth:`with_reaper_lock` is separate so
+        the caller can hold it across the whole read-decide-write, and so a test can drive
+        the reaping directly without contending for it.
+        """
+        cutoff_expr = text(
+            "COALESCE(heartbeat_at, started_at) < clock_timestamp() "
+            "- make_interval(secs => :lease_seconds)"
+        )
+        stmt = (
+            select(TaskQueue)
+            .where(TaskQueue.status.in_(TASK_REAPABLE_STATUSES))
+            .where(cutoff_expr)
+            .order_by(TaskQueue.id)
+        )
+        expired = list(self.session.execute(stmt, {"lease_seconds": lease_seconds}).scalars().all())
+        for task in expired:
+            self.fail(
+                task,
+                error=(
+                    f"worker {task.claimed_by!r} stopped reporting in while holding this "
+                    f"task in status {task.status!r}; no heartbeat for over "
+                    f"{lease_seconds:g}s"
+                ),
+                error_type=ErrorType.RETRYABLE,
+                detail={
+                    "requeued_from": task.status,
+                    "worker_id": task.claimed_by,
+                    "lease_seconds": lease_seconds,
+                    "reason": "lease expired",
+                },
+                retry_delay_seconds=0,
+            )
+        return [task.id for task in expired]
+
+    def with_reaper_lock(self) -> bool:
+        """Try to take the fleet's reaper lock for this transaction. True if we got it.
+
+        Every worker runs the reaper on its own timer, so that the fleet has no component
+        whose death stops recovery — a dedicated reaper process would itself be the thing
+        nothing recovers when it dies. The lock is what keeps that from meaning N workers
+        all reaping the same rows at once: `pg_try_advisory_xact_lock` is non-blocking, so
+        the losers simply skip this round instead of queueing up behind the winner to
+        redo work that is already done.
+
+        Transaction-scoped, so it is released by the commit and no worker can leak it.
+        """
+        got = self.session.execute(
+            text("SELECT pg_try_advisory_xact_lock(:k1, :k2)"),
+            {"k1": _REAPER_LOCK_KEY[0], "k2": _REAPER_LOCK_KEY[1]},
+        ).scalar()
+        return bool(got)
+
+    def mark_batched(self, tasks: Sequence[TaskQueue], batch_id: str) -> list[int]:
+        """Trade a set of claims for ``batched``, recording where the work went. Spec 012.
+
+        Called AFTER the provider has accepted the batch, which is what makes this a
+        handoff between two schedulers rather than one transaction. The order is forced:
+        submit first, then write. Writing first would leave rows marked as parked against a
+        batch that was never created, and nothing would ever poll them.
+
+        The window that ordering opens is a worker dying between the provider's acceptance
+        and this call. Those rows stay ``claimed``, the lease requeues them, and a later
+        worker submits a SECOND batch for answers already bought — money spent twice and a
+        retry consumed. Committing a caller-supplied idempotency key before the submit
+        would turn that into a lookup; the provider in use offers no such key, so the
+        window is accepted and named rather than papered over. It is milliseconds wide and
+        the duplicate result overwrites an identical one, so it is expensive rather than
+        corrupting.
+
+        NOT ``fail()`` WITH A DIFFERENT STATUS. Going through the failure path would
+        consume a retry for work that has not been attempted, and at the cap it would put
+        the node into ``settled = 'failed'`` — publishing a permanent failure for a task
+        that is merely waiting. Neither is touched here.
+
+        No attempt record is written. The attempt is still open: it began at the claim and
+        ends when the batch returns and :meth:`complete` records what happened. Appending a
+        record here would log one attempt as two.
+        """
+        if not batch_id:
+            raise ValueError(
+                "mark_batched needs the provider's batch id; without it nothing can ever "
+                "poll these rows and they are unreachable by every other mechanism here"
+            )
+        moved: list[int] = []
+        for task in tasks:
+            if task.status not in TASK_REAPABLE_STATUSES:
+                raise ValueError(
+                    f"task {task.id} is {task.status!r}, not one of {TASK_REAPABLE_STATUSES}; "
+                    "only a task this worker is holding can be handed to a batch"
+                )
+            task.status = TASK_BATCHED
+            task.batch_id = batch_id
+            task.batched_at = func.clock_timestamp()
+            # The heartbeat stops meaning anything here: nothing beats for a batched row.
+            # Cleared so a stale timestamp cannot be read as liveness by a later reader.
+            task.heartbeat_at = None
+            moved.append(task.id)
+        self.session.flush()
+        return moved
+
+    def batched_tasks(self, batch_id: str) -> list[TaskQueue]:
+        """Every task still parked in ``batch_id``, oldest first.
+
+        The poll pass's read. Scoped to ``batched`` rather than to the id alone because
+        ``batch_id`` stays on the row after completion, as part of the record of how the
+        answer was obtained.
+        """
+        stmt = (
+            select(TaskQueue)
+            .where(TaskQueue.batch_id == batch_id)
+            .where(TaskQueue.status == TASK_BATCHED)
+            .order_by(TaskQueue.id)
+        )
+        return list(self.session.execute(stmt).scalars().all())
+
+    def outstanding_batches(self) -> list[str]:
+        """Distinct batch ids with at least one task still parked.
+
+        What a poll pass iterates. Deliberately not scoped to a worker: the batch is
+        durable at the provider and addressed by this id, so ANY worker that can reach the
+        provider can adopt it. Tying the poll to the worker that submitted would mean a
+        rescheduled pod strands its batch forever — the same class of stall the lease was
+        built to abolish, and one the lease cannot reach here.
+        """
+        stmt = (
+            select(TaskQueue.batch_id)
+            .where(TaskQueue.status == TASK_BATCHED)
+            .where(TaskQueue.batch_id.is_not(None))
+            .distinct()
+            .order_by(TaskQueue.batch_id)
+        )
+        return list(self.session.execute(stmt).scalars().all())
+
+    def with_batch_lock(self, batch_id: str) -> bool:
+        """Try to take the poll lock for one batch. True if we got it.
+
+        Any worker may adopt a batch, so two can poll the same one at once and both write
+        its results. The write is idempotent in content but not in effect — two workers
+        completing the same task race on the attempt log. Non-blocking, like the reaper
+        lock: the loser skips this batch and finds it again next pass.
+
+        Keyed by hashing the id into the same two-int namespace, so it cannot collide with
+        the claim or reaper locks.
+        """
+        got = self.session.execute(
+            text("SELECT pg_try_advisory_xact_lock(:k1, hashtext(:batch_id))"),
+            {"k1": _BATCH_LOCK_NAMESPACE, "batch_id": batch_id},
+        ).scalar()
+        return bool(got)
+
+    def stalled_batches(self, older_than_seconds: float) -> list[TaskQueue]:
+        """Tasks parked longer than ``older_than_seconds``. The only stall signal there is.
+
+        A ``batched`` row is invisible to every other recovery mechanism in this file, by
+        design: ``claim_next`` will not take it, the lease will not reap it, and the
+        conflict predicate counts it as a live reservation so nothing else can work that
+        node either. That is exactly the zombie-row shape migration 011 abolished,
+        reintroduced deliberately — and this query is the compensating control.
+
+        ``older_than_seconds`` should be the provider's turnaround window plus slack.
+        Anything past it is not slow, it is stuck: the batch was lost, or the worker that
+        submitted it recorded an id the provider never issued.
+
+        Returns the rows rather than acting on them. What to do about a stalled batch —
+        re-poll, fail it, resubmit — depends on what the provider says about the id, and
+        that answer does not live in this repository.
+        """
+        cutoff = text("batched_at < clock_timestamp() - make_interval(secs => :older_than_seconds)")
+        stmt = (
+            select(TaskQueue)
+            .where(TaskQueue.status == TASK_BATCHED)
+            .where(cutoff)
+            .order_by(TaskQueue.batched_at)
+        )
+        return list(
+            self.session.execute(stmt, {"older_than_seconds": older_than_seconds}).scalars().all()
+        )
 
     def mark_running(self, task: TaskQueue) -> TaskQueue:
         """Move a claimed task to ``running``.
@@ -564,6 +848,16 @@ class TaskQueueRepository:
         )
         return self.session.execute(stmt).scalar_one()
 
+    def active_task_count(self, document_id: int) -> int:
+        """Tasks currently holding a reservation on this node (claimed or running)."""
+        stmt = (
+            select(func.count())
+            .select_from(TaskQueue)
+            .where(TaskQueue.scope_document_id == document_id)
+            .where(TaskQueue.status.in_(TASK_RESERVING_STATUSES))
+        )
+        return self.session.execute(stmt).scalar_one()
+
     def attempted_fingerprints(self, document_id: int) -> set[tuple[str, str]]:
         """``(task, param_fingerprint)`` pairs the node's attempt log already records.
 
@@ -595,7 +889,7 @@ def _unfinished_criterion():
     "queued, waiting for its backoff" — settling a node while one of those is outstanding
     would publish a node whose work is about to run again.
     """
-    return TaskQueue.status.in_((TASK_PENDING, TASK_CLAIMED, TASK_RUNNING)) | (
+    return TaskQueue.status.in_((TASK_PENDING, TASK_CLAIMED, TASK_RUNNING, TASK_BATCHED)) | (
         (TaskQueue.status == TASK_FAILED)
         & TaskQueue.retryable.is_(True)
         & (TaskQueue.retry_count < TaskQueue.max_retries)

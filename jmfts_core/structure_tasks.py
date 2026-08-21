@@ -54,17 +54,20 @@ from jmfts_core.chunking import ChunkStrategy, chunk_text
 from jmfts_core.embedding import get_embedding_service
 from jmfts_core.ingest_options import STRUCTURE_CHUNK_PARAMS
 from jmfts_core.ingest_tasks import (
+    TASK_EMBED,
     TASK_EXTRACT_TEXT,
     TASK_STRUCTURE_DECLARED,
     TASK_STRUCTURE_INFERRED,
     TaskOutcome,
     register_task_handler,
 )
-from jmfts_core.models.document import Document, SETTLED_SETTLED
-from jmfts_core.models.task_queue import TaskQueue
+from jmfts_core.models.document import Document, SETTLED_IN_FLIGHT, SETTLED_SETTLED
+from jmfts_core.models.task_queue import WRITE_SELF, TaskQueue
 from jmfts_core.pdf_extraction import pdf_to_markdown
 from jmfts_core.repositories.blob import BlobRepository
 from jmfts_core.repositories.document import DocumentRepository
+from jmfts_core.repositories.task_queue import TaskQueueRepository
+from jmfts_core.settling import TaskSpec, enqueue_batch
 from jmfts_core.structural_splitting import (
     Section,
     SectionNode,
@@ -100,6 +103,26 @@ EXTRACTION_UTF8_TEXT = "utf8_text"
 #: (spec Part 9) — named here so the several places that mean the same node agree.
 USETYPE_SECTION = "section"
 USETYPE_CHUNK = "chunk"
+
+#: The ``embed`` task every chunk is created with. One shared, frozen spec rather than one
+#: built per chunk, because it is the same request every time and its ``params`` are part
+#: of the ``param_fingerprint`` 6.1 diffs on — two chunks whose embed tasks differed by an
+#: accident of construction would look to a re-ingest like two different requests.
+#:
+#: ``self`` (5.3): it writes this node's own ``embed`` column and its ``token_embeddings``
+#: rows, and creates nothing. That is also what makes a document's chunks embed in
+#: parallel — ``claim_next`` only conflicts a ``self`` task with another ``self`` on the
+#: SAME node, so N chunks are N independently claimable tasks.
+#:
+#: ``with_tokens`` is stated rather than left to the handler's default, so the queue row
+#: records which path was asked for. A chunk is exactly the node the token/maxsim path
+#: exists for: it is a leaf, its text is its own, and it is bounded to the token window by
+#: the chunker above.
+EMBED_CHUNK_SPEC = TaskSpec(
+    task_type=TASK_EMBED,
+    write_mode=WRITE_SELF,
+    params={"with_tokens": True},
+)
 
 #: The lower rungs, and why nothing enqueues them. Recorded in the attempt detail when a
 #: coverage gap remains, because "the gap is 13% and nothing is going to claim it" and
@@ -422,6 +445,7 @@ def _build_tree(
 
     writer = _TreeWriter(
         repo=DocumentRepository(session),
+        tasks=TaskQueueRepository(session),
         rung=rung,
         strategy=strategy,
         max_tokens=max_tokens,
@@ -475,22 +499,51 @@ def _build_tree(
 class _TreeWriter:
     """Creates the section and chunk nodes for one structure task.
 
-    Every node is created ``settled``. The whole subtree is written inside the handler's
-    single transaction, with nothing queued against any of it, so each node is finished at
-    the moment it exists — and creating them ``in_flight`` would leave the file node unable
-    to settle, waiting on children that nothing was ever going to work on.
+    **A CHUNK is created in flight, holding an ``embed``.** Its prose is not retrievable
+    until it has vectors, and since ``embed`` became its own task
+    (:data:`~jmfts_core.ingest_tasks.TASK_EMBED`) that no longer happens before the node
+    exists.
+
+    THAT IS ALSO THE ORDERING. Rollup reads its children's embeddings and used to be safe
+    only because they were written inline, inside this transaction. Now the chunk carries
+    an unfinished task, so ``settle_node`` refuses to settle it, the node above it is
+    blocked on ``children``, and the rollup planner is not called until every chunk under
+    it has drained. No dependency array expresses that and none could — ``enqueue_batch``
+    resolves ``after`` only within one node's batch (5.5), and this ordering is between a
+    node and its children.
+
+    **A SECTION is created in flight too, and settled here only if nothing beneath it
+    queued anything.** ``settled`` is recursive: a node is settled when its own work is
+    done AND every child is settled. A section created settled above in-flight chunks is
+    therefore a false claim, and it is not a harmless one — the file node reads its DIRECT
+    children, sees settled sections, and rolls up over grandchildren with no vectors. That
+    is measured by ``tests/test_embed_task.py``, which caught exactly this.
+
+    The case the old always-settled rule was protecting against is real and is now handled
+    by name: a heading with no prose and no subsections is a container nothing will ever
+    work on, and left in flight it would park the document forever. :meth:`write` returns
+    whether its subtree queued anything, which is how that container is told apart from one
+    whose chunks are on their way.
+
+    A consequence worth stating: a section container now gets VISITED. Before this, the
+    walk only ever started at the file node, so a section — settled at birth, with no work
+    on it — was never evaluated and never summarized, which is the gap
+    ``run_structure_semantic``'s docstring names about its own containers. Its chunks now
+    walk up through it, and it gets ``effective_content`` like any other interior node.
     """
 
     def __init__(
         self,
         *,
         repo: DocumentRepository,
+        tasks: TaskQueueRepository,
         rung: str,
         strategy: ChunkStrategy,
         max_tokens: int,
         min_chunk_length: int,
     ):
         self.repo = repo
+        self.tasks = tasks
         self.rung = rung
         self.strategy = strategy
         self.max_tokens = max_tokens
@@ -509,11 +562,25 @@ class _TreeWriter:
     def node_count(self) -> int:
         return len(self.section_ids) + self.chunk_count
 
-    def write(self, parent_id: int, node: SectionNode, *, depth: int) -> None:
+    def write(self, parent_id: int, node: SectionNode, *, depth: int) -> bool:
+        """Write one region and everything under it. Returns whether it queued any work.
+
+        THE RETURN VALUE IS WHAT KEEPS ``settled`` HONEST. ``settled`` is recursive — a
+        node is settled when its own work is done AND every child is settled — so a
+        container created settled above in-flight chunks is a false claim, and the file
+        node above IT would then read its direct children as finished and roll up over
+        grandchildren that have no vectors yet.
+
+        A container therefore starts ``in_flight`` and is settled here only if nothing
+        beneath it queued anything. That case is real and has to be handled explicitly: a
+        heading with no prose under it and no subsections is a container nothing will ever
+        work on, and leaving it in flight would park the whole document forever.
+        """
         if self._root_id is None:
             self._root_id = parent_id
         section = node.section
 
+        container: Optional[Document] = None
         if section.title:
             container = self.repo.create(
                 title=section.title,
@@ -529,7 +596,7 @@ class _TreeWriter:
                 },
                 auto_embed=False,
                 sequential=True,
-                settled=SETTLED_SETTLED,
+                settled=SETTLED_IN_FLIGHT,
             )
             self._record(container.id, parent_id)
             self.section_ids.append(container.id)
@@ -542,18 +609,29 @@ class _TreeWriter:
             host, host_depth = parent_id, depth - 1
 
         self.max_depth = max(self.max_depth, host_depth)
-        self._write_chunks(host, section, depth=host_depth + 1)
+        queued = self._write_chunks(host, section, depth=host_depth + 1)
         for child in node.children:
-            self.write(host, child, depth=host_depth + 1)
+            # `|` and not `or`: `write` has to run for every child, and short-circuiting
+            # would stop building the tree at the first subsection that queued something.
+            queued = self.write(host, child, depth=host_depth + 1) | queued
 
-    def _write_chunks(self, parent_id: int, section: Section, *, depth: int) -> None:
+        if container is not None and not queued:
+            container.settled = SETTLED_SETTLED
+        return queued
+
+    def _write_chunks(self, parent_id: int, section: Section, *, depth: int) -> bool:
+        """Chunk one region's prose. Returns whether it wrote (and queued) anything."""
         body = (section.content or "").strip()
         if not body:
-            return
-        # `fits` because these chunks are created with `auto_embed=True`, which takes the
-        # 512-token token/maxsim path: a piece inside the character cap that tokenises
-        # denser than the cap assumes raises TextTooLongError, and the classifier calls
-        # that permanent, so one dense paragraph failed a whole document (D7).
+            return False
+        # `fits` because every chunk here gets an `embed` task, which takes the 512-token
+        # token/maxsim path: a piece inside the character cap that tokenises denser than
+        # the cap assumes raises TextTooLongError, and the classifier calls that permanent,
+        # so one dense paragraph failed a whole document (D7). Measuring it here rather
+        # than discovering it in the embed task is what keeps that a chunking decision.
+        # `get_embedding_service`, not `get_embedder`: this is `check_fit` underneath, so
+        # it is the tokenizer, and it must stay local even on a worker that embeds remotely
+        # — one HTTP round trip per candidate piece would be most of the wall clock.
         service = get_embedding_service()
         chunks = chunk_text(
             body,
@@ -576,13 +654,20 @@ class _TreeWriter:
                     "chunk_index": chunk.index,
                     "source_line": section.source_line,
                 },
-                auto_embed=True,
+                # The model does not run here any more. `embed` is its own task and this
+                # node is not retrievable until that task has run, which is what
+                # `in_flight` states — see the class docstring.
+                auto_embed=False,
                 sequential=True,
-                settled=SETTLED_SETTLED,
+                settled=SETTLED_IN_FLIGHT,
             )
+            enqueue_batch(self.tasks, node.id, (EMBED_CHUNK_SPEC,))
             self._record(node.id, parent_id)
             self.chunk_count += 1
         self.max_depth = max(self.max_depth, depth)
+        # `chunk_text` can return nothing for a body that is all whitespace or shorter than
+        # `min_chunk_length`, so this is the region's real yield rather than "it had text".
+        return bool(chunks)
 
     def _record(self, node_id: int, parent_id: int) -> None:
         if parent_id == self._root_id:

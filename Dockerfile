@@ -18,12 +18,15 @@ WORKDIR /app
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 
 # Source is copied for the editable install to resolve at build time; at runtime
-# docker-compose bind-mounts jmfts_core/ and api/ over these, so edits are live.
+# docker-compose bind-mounts jmfts_core/ over this, so edits are live.
 COPY pyproject.toml ./
 COPY jmfts_core ./jmfts_core
-COPY api ./api
-RUN pip install --no-cache-dir -e .
+# `[embed]` because a dev appliance both embeds and searches, and search embeds its query
+# locally whatever JMFTS_RUNNER_URL says. Base JMFTS does NOT install torch any more — it
+# assumes external embedding — so an image that serves /search or /runner has to ask for
+# the model stack by name. See pyproject.toml.
+RUN pip install --no-cache-dir -e ".[embed]"
 
 EXPOSE 8100
 # Overridden by compose (adds --reload); kept so the image is runnable standalone.
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8100"]
+CMD ["uvicorn", "jmfts_core.rest.main:app", "--host", "0.0.0.0", "--port", "8100"]

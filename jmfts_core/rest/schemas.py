@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 # Transport-neutral contracts now live in jmfts_core.contracts (so the service
 # layer can use them without importing FastAPI). Re-exported here so existing
-# `from api.schemas import DocumentResponse` / search models keep working.
+# `from jmfts_core.rest.schemas import DocumentResponse` / search models keep working.
 # See jmfts_core/contracts/__init__.py and tests/test_api_parity.py.
 from jmfts_core.contracts import (  # noqa: F401
     AutoSearchRequest,

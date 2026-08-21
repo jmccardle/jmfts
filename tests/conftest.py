@@ -38,7 +38,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# 1. Auth env — pinned before api.main is imported anywhere.
+# 1. Auth env — pinned before jmfts_core.rest.main is imported anywhere.
 # ---------------------------------------------------------------------------
 
 TEST_API_TOKEN = "test-shared-bearer-token-cr4"
@@ -48,7 +48,7 @@ os.environ["JMFTS_API_TOKEN"] = TEST_API_TOKEN
 os.environ["JMFTS_CORS_ORIGINS"] = f'["{TEST_CORS_ORIGIN}"]'
 
 # The in-process ingest worker (INGEST_SPEC.md 5.8) is OFF for the whole suite, pinned
-# here for the same reason the token is: before `api.main` is imported anywhere. It is on
+# here for the same reason the token is: before `jmfts_core.rest.main` is imported anywhere. It is on
 # by default in the appliance, and the lifespan starts it — but only about half the
 # suite's TestClient fixtures use `with TestClient(app)`, so an unconditional worker would
 # be alive in some unrelated tests and dead in others, running a real poll loop on its own
@@ -65,7 +65,11 @@ AUTH_HEADERS = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
 # ---------------------------------------------------------------------------
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_SCHEMA_SQL = _REPO_ROOT / "schema.sql"
+# The DDL is package data (jmfts_core/sql/), not a repository-root file, so that an
+# installed wheel can build its own database. `psql -f` needs a real path, and this suite
+# always runs against a source checkout, so resolve it under the package rather than
+# through importlib.resources.
+_SCHEMA_SQL = _REPO_ROOT / "jmfts_core" / "sql" / "schema.sql"
 
 # Whether the test database was successfully provisioned and is reachable.
 # The `requires_db` marker and the `db_session` fixture consult this.

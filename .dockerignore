@@ -1,4 +1,4 @@
-# Keep the build context small: only pyproject + jmfts_core/ + api/ are needed.
+# Keep the build context small: only pyproject + jmfts_core/ are needed.
 .git
 .venv
 venv
@@ -11,8 +11,6 @@ analysis
 test_reports
 scripts
 plugin
-migrations
-docs
 *.md
 .env
 data

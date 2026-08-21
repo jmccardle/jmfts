@@ -299,7 +299,7 @@ def client_with_db(db_session):
     """TestClient bound to the savepoint-wrapped session (the house pattern)."""
     from fastapi.testclient import TestClient
 
-    from api.main import app
+    from jmfts_core.rest.main import app
     from jmfts_core.database import get_db
     from tests.conftest import AUTH_HEADERS
 

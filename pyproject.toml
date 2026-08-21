@@ -1,12 +1,13 @@
 [project]
 name = "jmfts"
-version = "0.1.0"
+version = "0.1.1"
 description = "John McCardle's Fusion Tree Search - A focused retrieval appliance with matryoshka embeddings and late interaction"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.109.0",
     # Required by the multipart upload route (POST /ingest/file). NOT optional and NOT
-    # lazy: FastAPI checks for it while the ROUTE IS BUILT, i.e. at `import api.main`, so
+    # lazy: FastAPI checks for it while the ROUTE IS BUILT, i.e. at
+    # `import jmfts_core.rest.main`, so
     # its absence is an import-time crash of the whole application, not a 500 on one
     # endpoint. It was previously present only as a transitive dependency of `mcp`.
     "python-multipart>=0.0.9",
@@ -16,8 +17,13 @@ dependencies = [
     "pgvector>=0.2.4",
     "pydantic>=2.5.0",
     "pydantic-settings>=2.1.0",
-    "sentence-transformers>=2.2.2",
-    "torch>=2.1.0",
+    # The TOKENIZER, not the model. `AutoTokenizer` is what `check_fit`,
+    # `fits_token_window` and the chunker measure with, and it needs no torch — see the
+    # `embed` extra below for the half that does. Pinned to transformers rather than to
+    # `tokenizers` directly because every token count this system is calibrated against
+    # was produced by `AutoTokenizer(...)["input_ids"]`, and a second loader would be free
+    # to disagree with it about special tokens.
+    "transformers>=4.40",
     "numpy>=1.26.0",
     "httpx>=0.26.0",
     "ruptures>=1.1.8",
@@ -28,8 +34,58 @@ dependencies = [
     "markdownify>=0.11",
 ]
 
+[project.scripts]
+# The API server. Named here so an installed wheel does not require the caller to know
+# that the ASGI app lives at `jmfts_core.rest.main:app`.
+jmfts-server = "jmfts_core.rest.main:run"
+
+# Create the database and load the shipped schema. An installed wheel has to be able to
+# bootstrap its own storage; before the DDL became package data it could not.
+jmfts-init-db = "jmfts_core.db_setup:main"
+
+# The worker fleet's entry point. Equivalent to `python -m jmfts_core.worker`; named here
+# so a container CMD and a systemd ExecStart do not have to know the module path.
+jmfts-worker = "jmfts_core.worker:main"
+
+# The reference batch worker (jmfts_batch/). A separate entry point because it is a
+# separate concern: it consumes summarize:llm through an external batch provider and
+# nothing in jmfts_core depends on it.
+jmfts-batch-worker = "jmfts_batch.cli:main"
+
 [project.optional-dependencies]
+# THE MODEL STACK, and the reason it is an extra rather than a dependency.
+#
+# Base JMFTS is storage, retrieval, the tree, BM25, the queue and the whole ingest
+# pipeline. The only step in any of that which needs an accelerator is producing vectors,
+# and since `embed` became its own task type that step is one HTTP call away from being
+# somebody else's problem: set JMFTS_RUNNER_URL and this install asks another JMFTS for
+# its vectors (jmfts_core/embedder.py). So the default install assumes external embedding,
+# and torch is what you add when this process is the one doing it.
+#
+# Which is a real difference in what you are installing. torch and its CUDA wheels are
+# several GB and dominate both the image and the cold start; the base install is tens of
+# MB. A fleet is mostly storage-side workers, and none of them need this.
+#
+# Install it when this process should embed for ITSELF, or when it should embed for
+# OTHERS — a runner node serving /runner is the same stack. The reranker
+# (jmfts_core/reranker.py) is here too: a CrossEncoder is the same sentence-transformers.
+#
+#   pip install 'jmfts[embed]'                                    # CUDA build (default)
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install 'jmfts[embed]'                                    # ...then CPU
+#
+# CPU is two steps on purpose: the wheel index is an install-time choice pip cannot take
+# from a dependency specifier, so declaring a `cpu` extra here would be a name that
+# installs the CUDA build anyway. The Dockerfiles do exactly the two steps above.
+embed = [
+    "torch>=2.1.0",
+    "sentence-transformers>=2.2.2",
+]
+
+# The suite embeds for real — it ingests documents and asserts on the vectors — so dev
+# implies the model stack rather than testing a configuration nobody ships.
 dev = [
+    "jmfts[embed]",
     "pytest>=7.4.0",
     "pytest-asyncio>=0.23.0",
     "black>=24.1.0",
@@ -41,7 +97,23 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["jmfts_core*", "api*"]
+# EVERY top-level name here is claimed globally in the installing environment's
+# site-packages. `api` and `batch_worker` used to be listed, which meant installing this
+# project put a module called `api` on every consumer's import path — it would shadow, or
+# be shadowed by, any other package using that very common name, and the failure would
+# surface as an unrelated ImportError far from the cause. They now live at
+# `jmfts_core.rest` and `jmfts_batch`.
+#
+# `jmfts_batch` is top-level rather than `jmfts_core.batch` on purpose: the dependency runs
+# one way (it imports jmfts_core; nothing in jmfts_core imports it), and nesting it under
+# core would state the opposite.
+include = ["jmfts_core*", "jmfts_batch*"]
+
+[tool.setuptools.package-data]
+# The DDL travels with the package. `schema.sql` and `migrations/` used to sit at the
+# repository root, outside every include above, so an installed wheel carried the ORM
+# models but nothing that could create the tables they map to.
+"jmfts_core.sql" = ["*.sql", "migrations/*.sql"]
 
 [tool.ruff]
 line-length = 100

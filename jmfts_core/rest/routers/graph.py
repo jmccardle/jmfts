@@ -5,7 +5,7 @@ communities,diff,stats} and POST /graph/lint) is now generated from the
 ``@expose``-decorated methods on ``jmfts_core.services.graph_service.GraphService`` via
 ``api/wiring.build_exposed_router()`` and mounted in ``api/main.py``. There is no
 hand-written route left here; the request/response models moved to
-``jmfts_core.contracts.graph`` (re-exported from ``api.schemas`` for back-compat).
+``jmfts_core.contracts.graph`` (re-exported from ``jmfts_core.rest.schemas`` for back-compat).
 
 ``tests/test_api_parity.py`` guards that the generated routes and the registry stay in
 bijection. This module is intentionally kept (empty of routes) so that historical

@@ -68,6 +68,7 @@ from jmfts_core.models.document import (
     USETYPE_FILE,
 )
 from jmfts_core.repositories.task_queue import TaskQueueRepository
+from jmfts_core.task_routing import BADGE_FROM_POLICY, BadgeRequest
 
 #: Why a node did not settle. ``None`` means it did.
 BlockedBy = Literal["tasks", "children", "enqueued", "failed"]
@@ -87,7 +88,13 @@ class TaskSpec:
     write_mode: str
     params: dict = field(default_factory=dict)
     priority: int = 0
-    service_badge: Optional[str] = None
+    #: Defaults to the sentinel, NOT to ``None``. A planner that does not mention a badge
+    #: means "route this normally", and only a planner that says ``None`` outright means
+    #: "leave it un-badged" (Part 7's review tasks, which people claim). With ``None`` as
+    #: the default, every task the settle walk creates — which is every structure and
+    #: summarize task there is — silently opted out of routing, and the GPU pool saw none
+    #: of the work it exists for. See :mod:`jmfts_core.task_routing`.
+    service_badge: BadgeRequest = BADGE_FROM_POLICY
     after: tuple[str, ...] = ()
     max_retries: int = 3
 

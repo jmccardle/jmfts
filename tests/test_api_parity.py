@@ -31,7 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 def _mounted_exposed_routes():
     """(method, path) pairs for routes generated from the registry."""
-    from api.wiring import build_exposed_router
+    from jmfts_core.rest.wiring import build_exposed_router
 
     pairs = set()
     for route in build_exposed_router().routes:
@@ -55,7 +55,7 @@ def test_hybrid_search_is_exposed_once():
 
 def test_generated_route_not_also_hand_written():
     """The pilot must have DELETED the hand-written route, not shadowed it."""
-    src = (REPO_ROOT / "api" / "routers" / "search.py").read_text()
+    src = (REPO_ROOT / "jmfts_core" / "rest" / "routers" / "search.py").read_text()
     assert (
         '"/hybrid"' not in src and "'/hybrid'" not in src
     ), "a hand-written /hybrid route still exists in search.py; it should be generated"
@@ -64,9 +64,22 @@ def test_generated_route_not_also_hand_written():
 # --- 1b. Phase E seal: no hand-written domain route escapes generation ----------
 
 # The only hand-written routes allowed to survive on the app are these three
-# infra endpoints, defined in api/main.py (health probes + non-sensitive config).
+# infra endpoints, defined in jmfts_core/rest/main.py (health probes + non-sensitive config).
 # They are NOT domain operations, so they stay out of the @expose registry.
-INFRA_ALLOWLIST = {"/", "/health", "/config"}
+# The /runner routes are here rather than in the registry because @expose generates the
+# domain surface: routes that resolve a principal and enforce subtree access on documents.
+# The runner surface has no document and no principal — it takes text and returns vectors,
+# for a caller whose database this process may not be able to reach at all. Generating it
+# from @expose would mean giving it the machinery it exists to do without. It is gated by
+# `require_runner` and its own credential; tests/test_runner_auth.py holds that seal.
+INFRA_ALLOWLIST = {
+    "/",
+    "/health",
+    "/config",
+    "/runner/info",
+    "/runner/embed",
+    "/runner/embed/tokens",
+}
 
 
 def test_all_domain_routes_are_generated():
@@ -84,7 +97,7 @@ def test_all_domain_routes_are_generated():
     """
     from fastapi.routing import APIRoute
 
-    import api.main as main
+    import jmfts_core.rest.main as main
 
     registry_names = {s.name for s in REGISTRY}
 
@@ -205,7 +218,7 @@ def _route_from_spec(spec):
 
     from fastapi import APIRouter
 
-    from api.wiring import _make_endpoint
+    from jmfts_core.rest.wiring import _make_endpoint
 
     router = APIRouter()
     router.add_api_route(

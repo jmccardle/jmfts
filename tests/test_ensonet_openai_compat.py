@@ -501,16 +501,50 @@ class TestTimeoutHandling:
 class TestJmftsConfigIntegration:
     """Validate that JMFTS Settings correctly exposes an OpenAI-compatible endpoint."""
 
-    def test_effective_llm_url_is_nonempty(self):
-        settings = get_settings()
-        assert settings.effective_llm_url, "effective_llm_url is empty"
-        assert settings.effective_llm_url.startswith("http"), (
-            f"effective_llm_url does not look like a URL: {settings.effective_llm_url}"
+    def test_no_llm_configured_is_a_supported_state(self):
+        """The shipped default names no endpoint, because JMFTS does not ship an LLM.
+
+        This used to assert the opposite — that `effective_llm_url` was always non-empty —
+        which held only because the default was the author's own host and port. That value
+        answers nothing on anyone else's machine, so it turned "you have not configured an
+        LLM" into a connection error that reads like a defect in JMFTS.
+        """
+        from jmfts_core.config import Settings
+
+        s = Settings(llm_base_url="", llm_model="", ensonet_url="", ensonet_model="")
+        assert s.effective_llm_url == ""
+        assert s.effective_llm_model == ""
+        assert s.llm_configured is False
+
+    def test_require_llm_names_the_variables_to_set(self):
+        from jmfts_core.config import LlmNotConfiguredError, Settings
+
+        s = Settings(llm_base_url="", llm_model="", ensonet_url="", ensonet_model="")
+        with pytest.raises(LlmNotConfiguredError) as exc:
+            s.require_llm("Synthesis")
+        message = str(exc.value)
+        assert "Synthesis" in message, "the message must name the operation that needed it"
+        assert "JMFTS_LLM_BASE_URL" in message
+        assert "JMFTS_LLM_MODEL" in message
+
+    def test_require_llm_takes_the_callers_model_over_the_default(self):
+        """A per-task `llm_model` is enough; the deployment need only name the endpoint."""
+        from jmfts_core.config import Settings
+
+        s = Settings(
+            llm_base_url="http://server:8000/", llm_model="", ensonet_url="", ensonet_model=""
+        )
+        assert s.require_llm("RAPTOR", "per-task-model") == (
+            "http://server:8000",
+            "per-task-model",
         )
 
-    def test_effective_llm_model_is_nonempty(self):
-        settings = get_settings()
-        assert settings.effective_llm_model, "effective_llm_model is empty"
+    def test_require_llm_rejects_a_model_with_no_endpoint(self):
+        from jmfts_core.config import LlmNotConfiguredError, Settings
+
+        s = Settings(llm_base_url="", llm_model="", ensonet_url="", ensonet_model="")
+        with pytest.raises(LlmNotConfiguredError):
+            s.require_llm("RAPTOR", "a-model-but-nowhere-to-send-it")
 
     def test_effective_llm_timeout_is_positive(self):
         settings = get_settings()

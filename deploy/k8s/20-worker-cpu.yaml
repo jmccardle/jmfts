@@ -1,0 +1,77 @@
+# The CPU worker pool: everything that does not run the embedding model.
+#
+# With the routing policy in 10-config.yaml that is `probe`, `extract:text`, the two
+# structure rungs and `structure:semantic` — file inspection, text extraction, splitting
+# text into a tree, and PELT segmentation over embeddings that already exist.
+#
+# The structure rungs joined this pool when `embed` became its own task. They were badged
+# for the GPU before that, and correctly: they created every chunk with `auto_embed=True`,
+# so their wall clock was N forward passes in a loop. Now they split text and enqueue, and
+# the model call is a separate row. This pool therefore does more than it used to and is
+# still not where throughput comes from — it exists so cheap work never queues behind a
+# GPU task, and so the GPU pool is never spending a slot on a `probe`.
+#
+# This is the pool that scales (see 40-keda-scaledobject.yaml). Replicas here are limited
+# by CPU and by the database, not by a device.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jmfts-worker-cpu
+  namespace: jmfts
+  labels:
+    app.kubernetes.io/name: jmfts-worker
+    app.kubernetes.io/component: cpu
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: jmfts-worker
+      app.kubernetes.io/component: cpu
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: jmfts-worker
+        app.kubernetes.io/component: cpu
+    spec:
+      # SIGTERM is handled: jmfts_core.worker stops the loop and lets the in-flight task
+      # commit. This has to exceed the longest task or the runtime follows with SIGKILL,
+      # the task dies mid-flight, and the lease reaps it — correct, but a wasted run.
+      terminationGracePeriodSeconds: 300
+      containers:
+        - name: worker
+          image: jmfts-worker-cpu:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            # A STABLE, UNIQUE worker id. Unique because `claimed_by` identifies a task's
+            # owner and `recover_own_claims` is scoped by it — two workers sharing an id
+            # would recover each other's in-flight tasks. Stable because that recovery is
+            # the FAST path: a restarted pod keeps its name and reclaims its own rows
+            # immediately, instead of waiting out the lease. A pod rescheduled under a new
+            # name is what the lease is for.
+            - name: JMFTS_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: JMFTS_WORKER_BADGE
+              value: "cpu"
+            - name: JMFTS_EMBEDDING_DEVICE
+              value: "cpu"
+          envFrom:
+            - configMapRef:
+                name: jmfts-worker
+            - secretRef:
+                name: jmfts-worker-db
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              # No CPU limit on purpose. Throttling a worker mid-task delays its heartbeat
+              # as readily as its work, and a throttled worker that misses beats is
+              # indistinguishable from a dead one. The memory limit stays: an OOM kill is
+              # a clean death the lease already handles.
+              memory: "4Gi"
+          # No readiness or liveness probe. A worker serves no traffic, so readiness has
+          # nothing to gate, and the honest liveness signal is `task_queue.heartbeat_at` —
+          # which another worker already acts on. An HTTP probe here would only report that
+          # the process is up, which is the one failure mode the lease already covers.

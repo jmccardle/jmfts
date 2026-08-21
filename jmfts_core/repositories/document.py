@@ -54,7 +54,8 @@ from jmfts_core.models.document_blob import DocumentBlob
 from jmfts_core.models.principal import AccessGrant
 from jmfts_core.repositories.blob import BlobRepository
 from jmfts_core.models.token_embedding import TokenEmbedding
-from jmfts_core.embedding import get_embedding_service, EmbeddingResult
+from jmfts_core.embedder import get_embedder
+from jmfts_core.embedding import EmbeddingResult
 from jmfts_core.token_selection import importance_from_salience
 
 #: `structured_content` keys the ingest pipeline owns (INGEST_SPEC.md 3.3 and 3.4):
@@ -931,7 +932,11 @@ class DocumentRepository:
         if not doc or not doc.content:
             return None
 
-        service = get_embedding_service()
+        # `get_embedder`, not `get_embedding_service`: this is the ingest WRITE path, and a
+        # worker configured with JMFTS_RUNNER_URL produces its vectors on somebody else's
+        # GPU. The two objects are interchangeable at every line below, which is why there
+        # is no branch here. See jmfts_core/embedder.py.
+        service = get_embedder()
 
         if with_tokens:
             # Get top 35% of tokens for tiered storage

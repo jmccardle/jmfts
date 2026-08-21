@@ -1,11 +1,11 @@
 """Transport-neutral request/response contracts.
 
 These Pydantic models are the SINGLE definition of JMFTS's data shapes, shared by
-every delivery surface: the in-process Python API and the generated REST adapter.
-They live in ``jmfts_core`` — NOT ``api`` — so the service layer can depend on them
-without importing FastAPI. ``api/schemas.py``
+every delivery surface: the in-process Python API, the generated REST adapter, and
+(later) the needle op-catalog. They live in ``jmfts_core`` — NOT ``api`` — so the
+service layer can depend on them without importing FastAPI. ``api/schemas.py``
 re-exports every name here for backward compatibility, so existing
-``from api.schemas import X`` imports keep working.
+``from jmfts_core.rest.schemas import X`` imports keep working.
 
 Rule of the house: core may import contracts; contracts may not import ``api`` or
 ``fastapi``. ``tests/test_api_parity.py`` enforces this.
@@ -124,6 +124,20 @@ from jmfts_core.contracts.usetype_presentation import (
     UsetypePresentationResponse,
     UsetypePresentationUpdate,
 )
+from jmfts_core.contracts.runner import (
+    DOC_DTYPE,
+    TOKEN_DTYPE,
+    RunnerEmbedRequest,
+    RunnerEmbedResponse,
+    RunnerEmbedTokensRequest,
+    RunnerEmbedTokensResponse,
+    RunnerFit,
+    RunnerInfo,
+    RunnerTokenItem,
+    decode_matrix,
+    decode_vector,
+    encode_vector,
+)
 from jmfts_core.contracts.view import (
     BackReferenceItem,
     BackReferenceResponse,
@@ -137,6 +151,18 @@ from jmfts_core.contracts.view import (
 )
 
 __all__ = [
+    "DOC_DTYPE",
+    "TOKEN_DTYPE",
+    "RunnerEmbedRequest",
+    "RunnerEmbedResponse",
+    "RunnerEmbedTokensRequest",
+    "RunnerEmbedTokensResponse",
+    "RunnerFit",
+    "RunnerInfo",
+    "RunnerTokenItem",
+    "decode_matrix",
+    "decode_vector",
+    "encode_vector",
     "CentralityResponse",
     "CentralityScoreItem",
     "CommunityItem",

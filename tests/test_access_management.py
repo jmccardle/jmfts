@@ -142,8 +142,8 @@ def _http(db_session, principal):
     the threadpool exactly as the real generator dependency does) and get_db to share the
     rolled-back test session, so uncommitted setup is visible to the endpoints.
     """
-    from api.auth import require_token
-    from api.main import app
+    from jmfts_core.rest.auth import require_token
+    from jmfts_core.rest.main import app
     from jmfts_core.database import get_db
 
     async def _bind():

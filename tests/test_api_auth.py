@@ -6,14 +6,14 @@ catch DB errors and still return 200). The app-level `require_token` dependency
 and the CORS configuration are what is under test.
 
 The pinned token / CORS origin come from ``tests/conftest.py`` (``TEST_API_TOKEN``,
-``TEST_CORS_ORIGIN``), set in the environment before ``api.main`` is imported.
+``TEST_CORS_ORIGIN``), set in the environment before ``jmfts_core.rest.main`` is imported.
 """
 
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from api.main import app
+from jmfts_core.rest.main import app
 from tests.conftest import AUTH_HEADERS, TEST_API_TOKEN, TEST_CORS_ORIGIN
 
 client = TestClient(app)
@@ -96,7 +96,7 @@ def test_cors_reflects_configured_origin_and_is_not_wildcard():
 def test_ephemeral_token_is_generated_and_still_required(monkeypatch):
     """With JMFTS_API_TOKEN unset, the server generates a token, REQUIRES it,
     and NEVER allows unauthenticated access."""
-    import api.auth as auth_mod
+    import jmfts_core.rest.auth as auth_mod
     from jmfts_core.config import get_settings
 
     # Force the empty-token path. delenv() is not enough: pydantic BaseSettings

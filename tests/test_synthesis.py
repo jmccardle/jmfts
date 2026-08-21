@@ -78,7 +78,42 @@ def _mock_llm_client(response_json, side_effect=None):
     return mock_client
 
 
+def _configured_settings(**overrides):
+    """A real Settings naming an LLM endpoint that nothing will contact.
+
+    These tests used to rely on the shipped default being a live-looking address. It is
+    blank now — JMFTS does not include an LLM — so synthesis raises `LlmNotConfiguredError`
+    before it builds a request. The HTTP client is patched in every test below, so this
+    address is never reached.
+    """
+    from jmfts_core.config import Settings
+
+    values = {
+        "llm_base_url": "http://llm.invalid:8853",
+        "llm_model": "a-model-that-is-never-called",
+        "llm_timeout": 10.0,
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
 class TestSynthesize:
+    def test_synthesis_without_a_configured_llm_says_so(self):
+        """The unconfigured case names the variables instead of failing at the socket."""
+        from jmfts_core.config import LlmNotConfiguredError, Settings
+
+        unconfigured = Settings(
+            llm_base_url="", llm_model="", ensonet_url="", ensonet_model=""
+        )
+        with patch("jmfts_core.synthesis.get_settings", return_value=unconfigured):
+            with pytest.raises(LlmNotConfiguredError, match="JMFTS_LLM_BASE_URL"):
+                _run(
+                    synthesize(
+                        query="test",
+                        documents=[{"id": 1, "title": "A", "content": "B", "score": 0.5}],
+                    )
+                )
+
     def test_successful_synthesis(self):
         mock_client = _mock_llm_client(
             {
@@ -88,7 +123,10 @@ class TestSynthesize:
         )
         docs = [{"id": 1, "title": "Doc", "content": "Text", "score": 0.9}]
 
-        with patch("jmfts_core.synthesis.httpx.AsyncClient", return_value=mock_client):
+        with (
+            patch("jmfts_core.synthesis.httpx.AsyncClient", return_value=mock_client),
+            patch("jmfts_core.synthesis.get_settings", return_value=_configured_settings()),
+        ):
             result = _run(
                 synthesize(
                     query="What is X?",
@@ -113,7 +151,10 @@ class TestSynthesize:
     def test_connection_error_propagates(self):
         mock_client = _mock_llm_client(None, side_effect=httpx.ConnectError("Connection refused"))
 
-        with patch("jmfts_core.synthesis.httpx.AsyncClient", return_value=mock_client):
+        with (
+            patch("jmfts_core.synthesis.httpx.AsyncClient", return_value=mock_client),
+            patch("jmfts_core.synthesis.get_settings", return_value=_configured_settings()),
+        ):
             with pytest.raises(httpx.ConnectError):
                 _run(
                     synthesize(
@@ -130,10 +171,7 @@ class TestSynthesize:
             }
         )
 
-        mock_settings = MagicMock()
-        mock_settings.effective_llm_model = "test-default-model"
-        mock_settings.effective_llm_url = "http://localhost:8853"
-        mock_settings.effective_llm_timeout = 10.0
+        mock_settings = _configured_settings(llm_model="test-default-model")
 
         with (
             patch("jmfts_core.synthesis.httpx.AsyncClient", return_value=mock_client),
@@ -179,7 +217,7 @@ def _make_mock_search_result(doc_id, title, content, score, method="hybrid"):
 class TestSynthesizeEndpoint:
     def test_endpoint_with_llm_available(self):
         from jmfts_core.services.search_service import SearchService
-        from api.schemas import SynthesizeRequest
+        from jmfts_core.rest.schemas import SynthesizeRequest
 
         request = SynthesizeRequest(
             query="What is JMFTS?",
@@ -233,7 +271,7 @@ class TestSynthesizeEndpoint:
 
     def test_endpoint_graceful_degradation(self):
         from jmfts_core.services.search_service import SearchService
-        from api.schemas import SynthesizeRequest
+        from jmfts_core.rest.schemas import SynthesizeRequest
 
         request = SynthesizeRequest(query="test query", search_method="vector", top_k=2)
 
@@ -268,7 +306,7 @@ class TestSynthesizeEndpoint:
 
     def test_endpoint_auto_routes_query(self):
         from jmfts_core.services.search_service import SearchService
-        from api.schemas import SynthesizeRequest
+        from jmfts_core.rest.schemas import SynthesizeRequest
 
         request = SynthesizeRequest(query="exact phrase lookup", search_method="auto", top_k=3)
 

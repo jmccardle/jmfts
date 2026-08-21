@@ -17,9 +17,44 @@ from jmfts_core.ingest_worker import build_worker_from_settings
 # Importing the services package runs @register_service, populating the @expose
 # REGISTRY that build_exposed_router() reads. Must happen before the router is built.
 import jmfts_core.services  # noqa: F401
-from api.wiring import build_exposed_router
-from api.auth import get_effective_token, require_token
-from api.schemas import HealthResponse, LlmHealthStatus
+from jmfts_core.rest.wiring import build_exposed_router, build_openapi_tags
+from jmfts_core.rest.routers import runner
+from jmfts_core.rest.auth import (
+    JMFTS_RUNNER_SCHEME,
+    PUBLIC_PATHS,
+    RUNNER_PREFIX,
+    get_effective_token,
+    require_token,
+)
+from jmfts_core.rest.schemas import HealthResponse, LlmHealthStatus
+
+# Shown above the operation list in /docs and /redoc. Markdown; keep it to what a caller
+# needs before their first request, which is the credential and the two carve-outs.
+_API_DESCRIPTION = """
+John McCardle's Fusion Tree Search — a retrieval appliance with matryoshka embeddings,
+ColBERT-style late interaction (MaxSim) and BM25 over a tree-structured document store.
+
+**Authentication.** Every operation below needs `Authorization: Bearer <token>`. Press
+**Authorize** and paste `JMFTS_API_TOKEN`; if that setting is empty the server generated a
+token at startup and printed it to the boot log. Two carve-outs: `GET /health` is open so a
+liveness probe needs no secret, and `/runner/*` takes the separate `JMFTS_RUNNER_KEY`
+instead — it embeds text and owns no documents, so the two credentials are kept disjoint.
+
+**This page is public.** `/docs`, `/redoc` and `/openapi.json` answer without a token,
+because a browser navigating to a page cannot send an `Authorization` header. The document
+describes the interface; reaching anything it describes still costs a token.
+"""
+
+# Swagger UI display options. With 78 operations the default fully-expanded list is not
+# readable, so the groups start collapsed and the filter box is on. `persistAuthorization`
+# keeps the pasted token in the browser's localStorage across reloads — a convenience with
+# a real cost, since that token is the appliance's master credential; drop this key to make
+# the operator re-Authorize after every refresh.
+_SWAGGER_UI_PARAMETERS = {
+    "docExpansion": "none",
+    "filter": True,
+    "persistAuthorization": True,
+}
 
 
 @asynccontextmanager
@@ -55,12 +90,39 @@ async def _lifespan(_app: FastAPI):
 # Create FastAPI app. The app-level `require_token` dependency (CR-4) gates
 # EVERY route — including `/config` and `/` — with a single shared bearer token.
 # `/health` and CORS-preflight `OPTIONS` are allow-listed inside the dependency.
+#
+# `require_token` also DECLARES the credential (jmfts_core/rest/auth.py::API_BEARER), which
+# is what gives /docs its Authorize button. Before that, the generated document named no
+# credential at all, so the page listed every operation and could not call one: "Try it out"
+# sent no header and came back 401 with nothing on the page to explain it.
+#
+# The doc routes themselves — /docs, /redoc, /openapi.json — are plain Starlette routes, so
+# this dependency never applied to them and they answer without a token. That is deliberate
+# and tests/test_openapi_docs.py pins it; see the auth.py module docstring for the reason.
 app = FastAPI(
     title="JMFTS",
-    description="John McCardle's Fusion Tree Search - A focused retrieval appliance with matryoshka embeddings and late interaction",
+    description=_API_DESCRIPTION,
     version=__version__,
     dependencies=[Depends(require_token)],
     lifespan=_lifespan,
+    # Descriptions for the domain tag groups come from the service class that implements
+    # each group. The two groups below have no service behind them, so they are named here:
+    # `runner` is the hand-written surface, `meta` is the three infra routes on this file.
+    openapi_tags=build_openapi_tags()
+    + [
+        {
+            "name": "runner",
+            "description": (
+                "Embed text for a caller that keeps the documents somewhere else. Takes the "
+                "runner key, not the API token, and touches no database."
+            ),
+        },
+        {
+            "name": "meta",
+            "description": "Liveness, version and the non-sensitive half of the configuration.",
+        },
+    ],
+    swagger_ui_parameters=_SWAGGER_UI_PARAMETERS,
 )
 
 
@@ -115,8 +177,56 @@ app.add_middleware(
 # last; the parity test asserts these stay in lockstep with the service layer.
 app.include_router(build_exposed_router())
 
+# The runner surface. Hand-written rather than generated from @expose, because @expose
+# builds routes that carry a principal and enforce subtree access, and this surface has
+# neither — it takes text and returns vectors. It brings its own `require_runner`
+# dependency and its own credential; see jmfts_core/rest/routers/runner.py.
+app.include_router(runner.router)
 
-@app.get("/", response_model=HealthResponse)
+
+# The generated `security` block, corrected to match the gate that actually runs.
+#
+# FastAPI writes one entry per security-declaring dependency and OpenAPI reads several
+# entries as alternatives. The app-level `require_token` declares the API token on EVERY
+# route — but it steps aside for two sets of paths, and generation cannot see that:
+#
+#   * `PUBLIC_PATHS` (/health) needs no credential at all. Left as generated, the document
+#     tells a liveness probe to carry the appliance's master token.
+#   * `RUNNER_PREFIX` (/runner/*) takes the runner key INSTEAD. Left as generated it reads
+#     "API token or runner key", so a caller following the document sends the credential
+#     that is refused there and gets a 401 with nothing on the page to explain it.
+#
+# `openapi_extra` on the routes cannot express either correction: FastAPI merges a list by
+# CONCATENATING it, so a per-route override can add entries and never remove one. Hence
+# this pass. It branches on the same two constants `require_token` itself branches on, so a
+# path added to either carve-out moves the document with it and nothing here is edited.
+_generated_openapi = app.openapi
+
+_HTTP_METHODS = frozenset({"get", "put", "post", "delete", "options", "head", "patch", "trace"})
+
+
+def _openapi_matching_the_gate() -> dict:
+    schema = _generated_openapi()
+    for path, path_item in schema.get("paths", {}).items():
+        if path in PUBLIC_PATHS:
+            required: list[dict] = []
+        elif path.startswith(RUNNER_PREFIX):
+            required = [{JMFTS_RUNNER_SCHEME: []}]
+        else:
+            continue
+        for method, operation in path_item.items():
+            if method.lower() in _HTTP_METHODS:
+                operation["security"] = required
+    return schema
+
+
+# `app.openapi()` memoises into `app.openapi_schema` and hands back that same dict, so this
+# runs once per process. Assigning `security` is idempotent regardless, which is why the
+# correction is a write and not an edit of what generation produced.
+app.openapi = _openapi_matching_the_gate
+
+
+@app.get("/", response_model=HealthResponse, tags=["meta"])
 def health_check():
     """Health check endpoint"""
     settings = get_settings()
@@ -147,6 +257,18 @@ def _probe_llm() -> LlmHealthStatus:
     reachable = False
     openai_compatible = False
     detail = None
+
+    # JMFTS ships no LLM and defaults to no endpoint, so "not configured" is an ordinary
+    # state, not a failure. Say so instead of probing "" and reporting the protocol error
+    # that produces — which reads like the endpoint is broken rather than absent.
+    if not settings.llm_configured:
+        return LlmHealthStatus(
+            url=base,
+            model=model,
+            reachable=False,
+            openai_compatible=False,
+            detail="not configured: set JMFTS_LLM_BASE_URL and JMFTS_LLM_MODEL",
+        )
 
     try:
         # Lightweight health probe (ensonet extension, may 404 on other servers)
@@ -182,7 +304,7 @@ def _probe_llm() -> LlmHealthStatus:
     )
 
 
-@app.get("/health", response_model=HealthResponse)
+@app.get("/health", response_model=HealthResponse, tags=["meta"])
 def health_check_full():
     """Comprehensive health check — includes LLM reachability probe."""
     settings = get_settings()
@@ -207,7 +329,7 @@ def health_check_full():
     )
 
 
-@app.get("/config")
+@app.get("/config", tags=["meta"])
 def get_config():
     """Get current configuration (non-sensitive)"""
     settings = get_settings()
@@ -227,7 +349,7 @@ def run():
 
     settings = get_settings()
     uvicorn.run(
-        "api.main:app",
+        "jmfts_core.rest.main:app",
         host=settings.api_host,
         port=settings.api_port,
         reload=settings.debug,

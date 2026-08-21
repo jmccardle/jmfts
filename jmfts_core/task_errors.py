@@ -90,12 +90,35 @@ def classify_exception(exception: BaseException) -> ErrorType:
 
     # A 5xx may recover; a 4xx will not. httpx only raises this from
     # `raise_for_status()`, so the response is always attached.
+    #
+    # 429 IS THE EXCEPTION, and it is not a special case so much as the one 4xx that is not
+    # a statement about the request. "You asked correctly, just not now" is the normal
+    # backpressure signal of every metered LLM API, and a worker whose whole job is passing
+    # jobs to one will meet it routinely. Classified PERMANENT it would burn the retry
+    # budget instantly and settle the node 'failed' during an ordinary traffic spike — a
+    # tree marked permanently broken because somebody else was busy. The existing
+    # exponential backoff is exactly the right response.
+    #
+    # 408 (Request Timeout) joins it for the same reason, and is given TIMEOUT so it reads
+    # in the attempt log as what it is.
     if isinstance(exception, httpx.HTTPStatusError):
-        return ErrorType.RETRYABLE if exception.response.status_code >= 500 else ErrorType.PERMANENT
+        status_code = exception.response.status_code
+        if status_code == 408:
+            return ErrorType.TIMEOUT
+        if status_code == 429 or status_code >= 500:
+            return ErrorType.RETRYABLE
+        return ErrorType.PERMANENT
 
     # Data and programming errors. See the module docstring: this includes our own bugs
     # on purpose, because retrying a bug three times only delays noticing it.
-    if isinstance(exception, (ValueError, TypeError, KeyError, AttributeError)):
+    #
+    # ImportError joins them for the same reason with a sharper edge: a package that is not
+    # installed is not installed on the third attempt either. The live case is
+    # `embedding.ModelStackNotInstalled` — a worker built without the `embed` extra and
+    # given no JMFTS_RUNNER_URL claiming an `embed` task — and its whole value is a message
+    # saying which of the two is missing. Left RETRYABLE, that message would arrive three
+    # backoffs later, with the node parked in the meantime.
+    if isinstance(exception, (ValueError, TypeError, KeyError, AttributeError, ImportError)):
         return ErrorType.PERMANENT
 
     # A full disk is the one OSError worth retrying — it is the only one an operator

@@ -22,7 +22,7 @@ try:
     from jmfts_core.repositories.search import SearchRepository
     from jmfts_core.repositories.triple import TripleRepository
     from jmfts_core.embedding import EmbeddingResult, TokenEmbeddingResult
-    from api.main import app
+    from jmfts_core.rest.main import app
 
     _engine = get_engine()
     with _engine.connect() as _conn:
@@ -92,7 +92,7 @@ def mock_embedding_all():
         pytest.skip("Database not available")
     svc = MockEmbeddingService()
     with (
-        patch("jmfts_core.repositories.document.get_embedding_service", return_value=svc),
+        patch("jmfts_core.repositories.document.get_embedder", return_value=svc),
         patch("jmfts_core.repositories.search.get_embedding_service", return_value=svc),
     ):
         yield svc
