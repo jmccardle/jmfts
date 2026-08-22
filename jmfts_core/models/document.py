@@ -65,7 +65,9 @@ class Document(Base):
 
     # Timestamps — SYSTEM time: when this row entered the store / last changed in it.
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+    )
 
     # DOMAIN time (sparse, nullable): when the thing this document records actually
     # happened. Set it for imported content whose ingest time carries no signal — a
@@ -132,10 +134,16 @@ class Document(Base):
         "TokenEmbedding", back_populates="document", cascade="all, delete-orphan"
     )
     outgoing_links: Mapped[List["DocumentLink"]] = relationship(
-        "DocumentLink", foreign_keys="DocumentLink.source_id", back_populates="source", cascade="all, delete-orphan"
+        "DocumentLink",
+        foreign_keys="DocumentLink.source_id",
+        back_populates="source",
+        cascade="all, delete-orphan",
     )
     incoming_links: Mapped[List["DocumentLink"]] = relationship(
-        "DocumentLink", foreign_keys="DocumentLink.target_id", back_populates="target", cascade="all, delete-orphan"
+        "DocumentLink",
+        foreign_keys="DocumentLink.target_id",
+        back_populates="target",
+        cascade="all, delete-orphan",
     )
 
     @property
@@ -203,5 +211,6 @@ class DocumentLink(Base):
         }
 
 
-# Import here to avoid circular import
-from jmfts_core.models.token_embedding import TokenEmbedding
+# Import here to avoid circular import: token_embedding imports Document for its
+# relationship, so this cannot move to the top of the file.
+from jmfts_core.models.token_embedding import TokenEmbedding  # noqa: E402

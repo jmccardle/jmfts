@@ -102,9 +102,7 @@ class TestSynthesize:
         """The unconfigured case names the variables instead of failing at the socket."""
         from jmfts_core.config import LlmNotConfiguredError, Settings
 
-        unconfigured = Settings(
-            llm_base_url="", llm_model="", ensonet_url="", ensonet_model=""
-        )
+        unconfigured = Settings(llm_base_url="", llm_model="", ensonet_url="", ensonet_model="")
         with patch("jmfts_core.synthesis.get_settings", return_value=unconfigured):
             with pytest.raises(LlmNotConfiguredError, match="JMFTS_LLM_BASE_URL"):
                 _run(

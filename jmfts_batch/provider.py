@@ -14,9 +14,9 @@ they agree on is the only thing the worker needs:
 
 **``custom_id`` is why this package needs no bookkeeping of its own.** Both providers
 carry it from request to result untouched, so the worker sets it to the JMFTS task id and
-the download step is a primary-key lookup. The scripts this was modelled on
-(``/storage/ModernBERT-NLI-advanced/scripts/batch/``) write a ``_metadata.jsonl`` beside
-every batch to map results back, because their sample ids are not database keys. Ours are.
+the download step is a primary-key lookup. The scripts this was modelled on write a
+``_metadata.jsonl`` beside every batch to map results back, because their sample ids are
+not database keys. Ours are.
 
 Anthropic constrains ``custom_id`` to ``^[a-zA-Z0-9_-]{1,64}$``, which is the tighter of
 the two rules, so :func:`custom_id_for` targets it and OpenAI accepts the result.

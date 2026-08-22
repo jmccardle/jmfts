@@ -10,7 +10,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from jmfts_core.contracts.document import DocumentResponse
+from jmfts_client.contracts.document import DocumentResponse
 
 
 class PredicateCreate(BaseModel):

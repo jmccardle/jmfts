@@ -135,7 +135,11 @@ class SearchRepository:
         if usetype:
             query = _apply_usetype_filter(query, usetype)
         else:
-            effective = exclude_types if exclude_types is not None else get_settings().search_exclude_usetypes
+            effective = (
+                exclude_types
+                if exclude_types is not None
+                else get_settings().search_exclude_usetypes
+            )
             query = _apply_usetype_exclusion(query, effective)
 
         if parent_id:
@@ -193,29 +197,39 @@ class SearchRepository:
         # Build tsvector query
         tsquery = func.websearch_to_tsquery("english", query_text)
 
-        query = select(
-            Document,
-            func.ts_rank(
+        query = (
+            select(
+                Document,
+                func.ts_rank(
+                    func.to_tsvector(
+                        "english",
+                        func.coalesce(Document.title, "")
+                        + " "
+                        + func.coalesce(Document.content, ""),
+                    ),
+                    tsquery,
+                ).label("score"),
+            )
+            .where(
                 func.to_tsvector(
                     "english",
                     func.coalesce(Document.title, "") + " " + func.coalesce(Document.content, ""),
-                ),
-                tsquery,
-            ).label("score"),
-        ).where(
-            func.to_tsvector(
-                "english",
-                func.coalesce(Document.title, "") + " " + func.coalesce(Document.content, ""),
-            ).op("@@")(tsquery)
-            # Same clause idx_documents_content_fts is partial on. It must be present
-            # for the GIN index to be usable at all, and it is the retrieval rule
-            # anyway: a tree that is still being built is not an answer.
-        ).where(Document.settled == SETTLED_SETTLED)
+                ).op("@@")(tsquery)
+                # Same clause idx_documents_content_fts is partial on. It must be present
+                # for the GIN index to be usable at all, and it is the retrieval rule
+                # anyway: a tree that is still being built is not an answer.
+            )
+            .where(Document.settled == SETTLED_SETTLED)
+        )
 
         if usetype:
             query = _apply_usetype_filter(query, usetype)
         else:
-            effective = exclude_types if exclude_types is not None else get_settings().search_exclude_usetypes
+            effective = (
+                exclude_types
+                if exclude_types is not None
+                else get_settings().search_exclude_usetypes
+            )
             query = _apply_usetype_exclusion(query, effective)
 
         if parent_id:
@@ -267,7 +281,6 @@ class SearchRepository:
 
         # candidate roots: parent_id itself plus all its ancestors (closest first)
         candidate_ids = [parent_id] + list(doc.path or [])
-
 
         # Find a named index whose root is one of the candidate ancestors.
         # Use array_position to prefer the most specific (deepest) match.
@@ -410,7 +423,9 @@ class SearchRepository:
 
         # Fetch documents and apply usetype/exclusion filters
         # BM25 entities/summaries are excluded at index time; exclude_types adds runtime post-filter
-        effective_exclusions = exclude_types if (usetype is None and exclude_types is not None) else []
+        effective_exclusions = (
+            exclude_types if (usetype is None and exclude_types is not None) else []
+        )
         results = []
         for doc_id, score in result:
             doc = self.session.get(Document, doc_id)
@@ -528,7 +543,11 @@ class SearchRepository:
             else:
                 filter_conditions.append(f"d.usetype = '{usetype}'")
         else:
-            effective = exclude_types if exclude_types is not None else get_settings().search_exclude_usetypes
+            effective = (
+                exclude_types
+                if exclude_types is not None
+                else get_settings().search_exclude_usetypes
+            )
             if effective:
                 filter_conditions.append(
                     "(d.usetype IS NULL OR NOT (d.usetype = ANY(CAST(:excl_types AS text[]))))"
@@ -843,9 +862,7 @@ class SearchRepository:
                 f"recency_weight={recency_weight}, importance_weight={importance_weight}"
             )
         if recency_weight and recency_halflife_days <= 0:
-            raise ValueError(
-                f"recency_halflife_days must be positive, got {recency_halflife_days}"
-            )
+            raise ValueError(f"recency_halflife_days must be positive, got {recency_halflife_days}")
         methods = methods or ["vector", "bm25"]
         # Weight resolution distinguishes "not specified" from "specified as no-opinion":
         #   None -> the tuned default (0.86/0.14 from the successive-halving sweep) — the
@@ -867,12 +884,22 @@ class SearchRepository:
 
         if "vector" in methods:
             method_results["vector"] = self.vector_search_text(
-                query_text, limit=candidate_limit, usetype=usetype, exclude_types=exclude_types, parent_id=parent_id, as_of=as_of
+                query_text,
+                limit=candidate_limit,
+                usetype=usetype,
+                exclude_types=exclude_types,
+                parent_id=parent_id,
+                as_of=as_of,
             )
 
         if "fulltext" in methods:
             method_results["fulltext"] = self.fulltext_search(
-                query_text, limit=candidate_limit, usetype=usetype, exclude_types=exclude_types, parent_id=parent_id, as_of=as_of
+                query_text,
+                limit=candidate_limit,
+                usetype=usetype,
+                exclude_types=exclude_types,
+                parent_id=parent_id,
+                as_of=as_of,
             )
 
         if "bm25" in methods:
@@ -888,7 +915,11 @@ class SearchRepository:
 
         if "maxsim" in methods:
             method_results["maxsim"] = self.maxsim_search(
-                query_text, limit=candidate_limit, usetype=usetype, exclude_types=exclude_types, as_of=as_of
+                query_text,
+                limit=candidate_limit,
+                usetype=usetype,
+                exclude_types=exclude_types,
+                as_of=as_of,
             )
 
         # RRF fusion
@@ -1077,9 +1108,7 @@ class SearchRepository:
                 {"index_id": index.id, "term": term},
             )
         self.session.execute(
-            text(
-                "DELETE FROM search_term_stats WHERE index_id = :index_id AND doc_freq <= 0"
-            ),
+            text("DELETE FROM search_term_stats WHERE index_id = :index_id AND doc_freq <= 0"),
             {"index_id": index.id},
         )
 
@@ -1161,7 +1190,6 @@ class SearchRepository:
         index = self.get_index(index_name)
         if not index:
             return False
-
 
         self.session.execute(
             text(

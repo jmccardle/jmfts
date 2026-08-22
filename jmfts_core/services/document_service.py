@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session
 
 from jmfts_core.access import can_read, filter_readable
 from jmfts_core.chunking import ChunkStrategy, chunk_text
-from jmfts_core.contracts.document import (
+from jmfts_client.contracts.document import (
     ChunkItem,
     ChunkRequest,
     ChunkResponse,

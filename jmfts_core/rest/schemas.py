@@ -3,11 +3,11 @@
 from typing import Optional
 from pydantic import BaseModel
 
-# Transport-neutral contracts now live in jmfts_core.contracts (so the service
+# Transport-neutral contracts now live in jmfts_client.contracts (so the service
 # layer can use them without importing FastAPI). Re-exported here so existing
 # `from jmfts_core.rest.schemas import DocumentResponse` / search models keep working.
-# See jmfts_core/contracts/__init__.py and tests/test_api_parity.py.
-from jmfts_core.contracts import (  # noqa: F401
+# See jmfts-client/jmfts_client/contracts/__init__.py and tests/test_api_parity.py.
+from jmfts_client.contracts import (  # noqa: F401
     AutoSearchRequest,
     AutoSearchResponse,
     BackReferenceItem,
@@ -109,7 +109,7 @@ from jmfts_core.contracts import (  # noqa: F401
 
 
 # DocumentCreate, DocumentUpdate, DocumentResponse are defined in
-# jmfts_core.contracts.document and re-exported above.
+# jmfts_client.contracts.document and re-exported above.
 
 
 # ============================================================================
@@ -119,15 +119,16 @@ from jmfts_core.contracts import (  # noqa: F401
 
 # SearchRequest, HybridSearchRequest, SearchResultItem, SearchResponse,
 # AutoSearchRequest, RoutingMetadata, AutoSearchResponse are defined in
-# jmfts_core.contracts.search and re-exported above.
+# jmfts_client.contracts.search and re-exported above.
 
 
 # ============================================================================
 # Tree Schemas
 # ============================================================================
 
-
-# SubtreeResponse is defined in jmfts_core.contracts.document and re-exported above.
+# SubtreeResponse is defined in jmfts_client.contracts.document and re-exported above.
+# TreeNodeResponse used to sit here. It was never moved to contracts and no route ever
+# returned it, so importing it from this shim got you a model nothing produces.
 
 
 # ============================================================================
@@ -135,7 +136,7 @@ from jmfts_core.contracts import (  # noqa: F401
 # ============================================================================
 
 
-# LinkCreate, LinkResponse are defined in jmfts_core.contracts.document and
+# LinkCreate, LinkResponse are defined in jmfts_client.contracts.document and
 # re-exported above.
 
 
@@ -144,7 +145,7 @@ from jmfts_core.contracts import (  # noqa: F401
 # ============================================================================
 
 
-# IndexCreate, IndexResponse are defined in jmfts_core.contracts.index and
+# IndexCreate, IndexResponse are defined in jmfts_client.contracts.index and
 # re-exported above.
 
 
@@ -179,7 +180,7 @@ class HealthResponse(BaseModel):
 
 
 # TokenEmbeddingResponse, DocumentTokensResponse are defined in
-# jmfts_core.contracts.document and re-exported above.
+# jmfts_client.contracts.document and re-exported above.
 
 
 # ============================================================================
@@ -188,7 +189,7 @@ class HealthResponse(BaseModel):
 
 # PredicateCreate, PredicateResponse, TripleCreate, TripleResponse,
 # TripleDetailResponse, TripleInvalidateRequest, TripleSupersedRequest, PathStep,
-# PathResponse are defined in jmfts_core.contracts.triple and re-exported above.
+# PathResponse are defined in jmfts_client.contracts.triple and re-exported above.
 
 
 # ============================================================================
@@ -202,7 +203,7 @@ class HealthResponse(BaseModel):
 
 # StructuralSplitRequest, StructuralSplitSectionItem, StructuralSplitResponse,
 # SegmentRequest, SegmentItem, SegmentResponse, ChunkRequest, ChunkItem, ChunkResponse
-# are defined in jmfts_core.contracts.document and re-exported above.
+# are defined in jmfts_client.contracts.document and re-exported above.
 
 
 # ============================================================================
@@ -215,7 +216,7 @@ class HealthResponse(BaseModel):
 # ============================================================================
 
 # SynthesizeRequest, SourceReference, SynthesizeResponse are defined in
-# jmfts_core.contracts.search and re-exported above.
+# jmfts_client.contracts.search and re-exported above.
 
 
 # ============================================================================
@@ -224,7 +225,7 @@ class HealthResponse(BaseModel):
 
 # TemplateVariable, TemplateCreate, TemplateUpdate, TemplateResponse,
 # TemplateRenderRequest, TemplateRenderResponse, TemplateSearchRequest are defined in
-# jmfts_core.contracts.template and re-exported above.
+# jmfts_client.contracts.template and re-exported above.
 
 
 # ============================================================================
@@ -233,11 +234,11 @@ class HealthResponse(BaseModel):
 
 
 # RaptorRequest, PortfolioRaptorRequest, RaptorLayerItem, RaptorResponse are defined in
-# jmfts_core.contracts.document and re-exported above.
+# jmfts_client.contracts.document and re-exported above.
 
 
 # SearchContextCreate, SearchContextUpdate, SearchContextResponse are defined in
-# jmfts_core.contracts.search_context and re-exported above.
+# jmfts_client.contracts.search_context and re-exported above.
 
 
 # ============================================================================
@@ -251,15 +252,17 @@ class HealthResponse(BaseModel):
 
 
 # ConversationMessage, ConversationIngestRequest, ConversationStageResult,
-# ConversationIngestResponse are defined in jmfts_core.contracts.conversation and
+# ConversationIngestResponse are defined in jmfts_client.contracts.conversation and
 # re-exported above.
 
 
-# FactExtractionRequest is defined in jmfts_core.contracts.document and re-exported above.
+# FactExtractionRequest is defined in jmfts_client.contracts.document and re-exported above.
 
 
 # SegmentExtractionItem, FactExtractionResponse are defined in
-# jmfts_core.contracts.document and re-exported above.
+# jmfts_client.contracts.document and re-exported above.
+# ExtractedTripleItem used to sit here, and was not one of the ones that moved: nothing
+# referenced it and no route returned it.
 
 
 # ============================================================================
@@ -268,7 +271,10 @@ class HealthResponse(BaseModel):
 
 
 # IngestRequest, IngestStageResult, IngestResponse, PipelineStageInfo, PipelineInfo are
-# defined in jmfts_core.contracts.ingest and re-exported above.
+# defined in jmfts_client.contracts.ingest and re-exported above.
+# IngestStageOverride used to sit here. Per-stage overrides on the queue are the
+# `options` group resolver (jmfts_core/ingest_options.py), not this model, and nothing
+# ever referenced it.
 
 
 # ============================================================================
@@ -280,7 +286,7 @@ class HealthResponse(BaseModel):
 # SubtreeAuthorityItem, SubtreeAuthorityResponse, SpineBranchAlternative,
 # SpineBranchPoint, SpineItem, SpineResponse, CommunityMember, CommunityItem,
 # CommunityResponse, GraphDiffResponse, GraphStatsResponse, LintRequest,
-# LintFinding, LintResponse are defined in jmfts_core.contracts.graph and
+# LintFinding, LintResponse are defined in jmfts_client.contracts.graph and
 # re-exported above.
 
 
@@ -288,7 +294,7 @@ class HealthResponse(BaseModel):
 # Usetype Presentation Schemas (Phase 2)
 # ============================================================================
 # UsetypePresentationCreate, UsetypePresentationUpdate, UsetypePresentationResponse
-# are defined in jmfts_core.contracts.usetype_presentation and re-exported above.
+# are defined in jmfts_client.contracts.usetype_presentation and re-exported above.
 
 
 # ============================================================================
@@ -296,4 +302,4 @@ class HealthResponse(BaseModel):
 # ============================================================================
 # ViewPresentation, ViewAncestor, ViewChildStub, ViewLinkRef, ViewTripleRef,
 # ViewResponse, BreadcrumbResponse, BackReferenceItem, BackReferenceResponse are
-# defined in jmfts_core.contracts.view and re-exported above.
+# defined in jmfts_client.contracts.view and re-exported above.

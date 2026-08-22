@@ -12,7 +12,6 @@ from jmfts_core.models.usetype_presentation import (
     UsetypePresentation,
 )
 
-
 _DEFAULT_FALLBACK_USETYPE = "*"
 
 
@@ -120,10 +119,6 @@ def _validate(renderer: str, child_handling: str, link_handling: str) -> None:
     if renderer not in RENDERERS:
         raise ValueError(f"renderer must be one of {RENDERERS}, got {renderer!r}")
     if child_handling not in CHILD_HANDLINGS:
-        raise ValueError(
-            f"child_handling must be one of {CHILD_HANDLINGS}, got {child_handling!r}"
-        )
+        raise ValueError(f"child_handling must be one of {CHILD_HANDLINGS}, got {child_handling!r}")
     if link_handling not in LINK_HANDLINGS:
-        raise ValueError(
-            f"link_handling must be one of {LINK_HANDLINGS}, got {link_handling!r}"
-        )
+        raise ValueError(f"link_handling must be one of {LINK_HANDLINGS}, got {link_handling!r}")

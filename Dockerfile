@@ -21,6 +21,12 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
 # docker-compose bind-mounts jmfts_core/ over this, so edits are live.
 COPY pyproject.toml ./
 COPY jmfts_core ./jmfts_core
+# The second distribution, installed first. `jmfts` declares `jmfts-client>=0.1.0`, and
+# that name is not on PyPI yet, so the install below would fail resolving it. Installing
+# the copy in this tree satisfies the requirement before pip reads it, and is what you
+# want regardless: the image should carry the contracts this source tree defines.
+COPY jmfts-client ./jmfts-client
+RUN pip install --no-cache-dir -e ./jmfts-client
 # `[embed]` because a dev appliance both embeds and searches, and search embeds its query
 # locally whatever JMFTS_RUNNER_URL says. Base JMFTS does NOT install torch any more — it
 # assumes external embedding — so an image that serves /search or /runner has to ask for

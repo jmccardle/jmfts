@@ -23,7 +23,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from jmfts_core.contracts.graph import (
+from jmfts_client.contracts.graph import (
     CentralityResponse,
     CentralityScoreItem,
     CommunityItem,

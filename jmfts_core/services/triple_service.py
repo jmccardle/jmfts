@@ -25,8 +25,8 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from jmfts_core.contracts.document import DocumentResponse
-from jmfts_core.contracts.triple import (
+from jmfts_client.contracts.document import DocumentResponse
+from jmfts_client.contracts.triple import (
     PathResponse,
     PathStep,
     PredicateCreate,

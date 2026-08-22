@@ -45,6 +45,7 @@ children with no container in between.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
@@ -62,6 +63,12 @@ from jmfts_core.ingest_tasks import (
     register_task_handler,
 )
 from jmfts_core.models.document import Document, SETTLED_IN_FLIGHT, SETTLED_SETTLED
+
+# The office readers. Importing this module reaches NO office library: every import of
+# python-docx / python-pptx inside it sits behind a require_* guard, at the point of use.
+# tests/test_office_packaging.py::test_starting_the_app_imports_no_office_reader is what
+# holds that, and it covers this import path.
+from jmfts_core.office.extract import docx_to_markdown, pptx_to_markdown
 from jmfts_core.models.task_queue import WRITE_SELF, TaskQueue
 from jmfts_core.pdf_extraction import pdf_to_markdown
 from jmfts_core.repositories.blob import BlobRepository
@@ -98,6 +105,9 @@ SOURCE_ATX_HEADINGS = "atx_headings"
 #: nothing else; neither of them knows what a PDF is.
 EXTRACTION_PDF_TEXT_LAYER = "pdf_text_layer"
 EXTRACTION_UTF8_TEXT = "utf8_text"
+EXTRACTION_HTML_MARKUP = "html_markup"
+EXTRACTION_DOCX_BODY = "docx_body"
+EXTRACTION_PPTX_SLIDES = "pptx_slides"
 
 #: Usetypes for the two kinds of node these tasks create. Open strings, like every usetype
 #: (spec Part 9) — named here so the several places that mean the same node agree.
@@ -157,7 +167,19 @@ class Extracted:
 
 
 def _extract_pdf(data: bytes) -> Extracted:
-    """The PDF text layer, as markdown, with the page map and outline it carries."""
+    """The PDF text layer, as markdown, with the page map and outline it carries.
+
+    ``pages_with_tables`` is in the RECORD, not only the detail, because it is a pattern
+    and not a statistic: spec Part 4's ``extract:tables`` row is predicated on it, and
+    ``probe`` does not measure it (``jmfts_core.probe._probe_pdf``). A pattern that lived
+    only in the attempt log would be a measurement nothing could plan from.
+
+    ``table_failures`` and ``tables_rejected`` go to the DETAIL, because they are the
+    attempt's own account of what it could not do — 3.4's business, not a later task's
+    input. Without them the reporting `pdf_to_markdown` performs would stop at this
+    function and never reach the node, which would make a page PyMuPDF could not analyse
+    invisible again.
+    """
     markdown, meta = pdf_to_markdown(data)
     return Extracted(
         text=markdown,
@@ -166,12 +188,17 @@ def _extract_pdf(data: bytes) -> Extracted:
             "page_count": meta["page_count"],
             "page_offsets": meta["page_offsets"],
             "control_chars_removed": meta["control_chars_removed"],
+            "pages_with_tables": meta["pages_with_tables"],
             "toc": meta["toc"],
         },
         detail={
             "page_count": meta["page_count"],
             "outline_entries": len(meta["toc"]),
             "control_chars_removed": meta["control_chars_removed"],
+            "tables_found": meta["tables_found"],
+            "pages_with_tables": meta["pages_with_tables"],
+            "table_failures": meta["table_failures"],
+            "tables_rejected": meta["tables_rejected"],
         },
     )
 
@@ -198,12 +225,110 @@ def _extract_utf8_text(data: bytes) -> Extracted:
     )
 
 
+def _extract_html(data: bytes) -> Extracted:
+    """An HTML, XML or SVG document. A CONVERSION, unlike :func:`_extract_utf8_text`.
+
+    ``INGEST_SPEC.md`` 11.3 makes markdown the intermediate format, and this is the reader
+    that gets HTML there. Before it existed, ``has_markup`` was a ``forbids`` on the
+    ``extract:text`` row: an HTML file was probed, held back with a stated reason, and
+    settled with no content and no children. The reason was recorded, but from outside the
+    upload returned 200 and every task reported "completed", so the only way to learn that
+    a document had produced nothing was to read its attempt log.
+
+    ``heading_style="ATX"`` is what makes the rest of the pipeline work unchanged:
+    ``<h1>`` becomes ``# ``, which is what :func:`_split_atx` already looks for, so the
+    structure rungs need no new dispatch entry beyond the source constant below.
+
+    The decode is strict for the same reason the text reader's is — ``probe`` decoded these
+    bytes already, so a failure here means they changed underneath us.
+    """
+    from jmfts_core.url_fetch import html_to_markdown
+
+    html = data.decode("utf-8")
+    text = html_to_markdown(html)
+    return Extracted(
+        text=text,
+        source=EXTRACTION_HTML_MARKUP,
+        record={"toc": []},
+        detail={
+            # Both numbers, not a ratio: conversion is expected to shrink a document (tags
+            # leave), and how MUCH it shrank is the signal that something went wrong.
+            "html_chars": len(html),
+            "markdown_chars": len(text),
+            "headings_found": len(find_headings(text)),
+        },
+    )
+
+
 #: format -> the reader for it. A format absent from here has no extractor, and
 #: ``extract:text`` says so by name rather than assuming one reader is the general case.
+#:
+#: HTML is NOT a key here, and cannot be: 11.3 measured that nothing in the bytes separates
+def _extract_docx(data: bytes) -> Extracted:
+    """A WordprocessingML document, as markdown. ``INGEST_SPEC.md`` Part 10 step 6.
+
+    ``toc`` is empty for the reason :func:`_extract_utf8_text` gives: the headings are in
+    the text, where ``split_on_headings`` will find them, and storing them twice would
+    create two records of one fact that are free to disagree. The counts go to the DETAIL,
+    because they are this attempt's account of what it read and no later task's input.
+    """
+    markdown, meta = docx_to_markdown(data)
+    return Extracted(
+        text=markdown,
+        source=EXTRACTION_DOCX_BODY,
+        record={"toc": []},
+        detail={
+            "paragraph_count": meta["paragraph_count"],
+            "heading_count": meta["heading_count"],
+            "list_item_count": meta["list_item_count"],
+            "table_count": meta["table_count"],
+            "markdown_chars": meta["characters"],
+        },
+    )
+
+
+def _extract_pptx(data: bytes) -> Extracted:
+    """A PresentationML deck, as markdown — one ``#`` section per slide.
+
+    ``slide_offsets`` is in the RECORD, not only the detail, and it is the one thing here
+    a later task could not recompute without re-opening the package: it is the analogue of
+    :func:`_extract_pdf`'s ``page_offsets``, indexes INTO the extracted text. ``slide_count``
+    travels with it so a consumer can tell a truncated list from a short deck.
+    """
+    markdown, meta = pptx_to_markdown(data)
+    return Extracted(
+        text=markdown,
+        source=EXTRACTION_PPTX_SLIDES,
+        record={
+            "toc": [],
+            "slide_count": meta["slide_count"],
+            "slide_offsets": meta["slide_offsets"],
+        },
+        detail={
+            "text_block_count": meta["text_block_count"],
+            "table_count": meta["table_count"],
+            "notes_slide_count": meta["notes_slide_count"],
+            # How many slide headings this reader chose rather than read from a title
+            # placeholder. In the attempt log because it is the difference between a
+            # section title the author wrote and one derived from the slide's first line.
+            "promoted_title_count": meta["promoted_title_count"],
+            "markdown_chars": meta["characters"],
+        },
+    )
+
+
+#: HTML from markdown at the FORMAT layer, so ``detect_format`` reports both as ``text``.
+#: The pattern ``has_markup`` is what separates them, and :func:`run_extract_text` consults
+#: it for the ``text`` format only. See :data:`MARKUP_EXTRACTOR`.
 TEXT_EXTRACTORS: dict[str, Callable[[bytes], Extracted]] = {
     "pdf": _extract_pdf,
     "text": _extract_utf8_text,
+    "docx": _extract_docx,
+    "pptx": _extract_pptx,
 }
+
+#: The reader that a ``text``-format file gets INSTEAD when ``probe`` called it markup.
+MARKUP_EXTRACTOR: Callable[[bytes], Extracted] = _extract_html
 
 
 @register_task_handler(TASK_EXTRACT_TEXT)
@@ -230,6 +355,13 @@ def run_extract_text(session: Session, task: TaskQueue) -> TaskOutcome:
     and do not are the signal, which is a stronger check than a threshold nobody has
     measured, and it needs no constant to be wrong about.
 
+    ONE SOURCE BREAKS THAT READING ON PURPOSE. When ``has_markup`` routed the file to
+    :func:`_extract_html`, ``characters_probed`` counted HTML and ``characters`` counts the
+    markdown it became, so they are SUPPOSED to disagree — tags left. Read ``html_chars``
+    and ``markdown_chars`` in the same detail instead; those are the pair that describes
+    this conversion, and a markdown side near zero against a large HTML side is what a
+    collapsed conversion looks like.
+
     The file node is not embedded here. Its content is the entire document, routinely well
     past the model's window, and the nodes that exist to be embedded are the chunks the
     structure task creates from it.
@@ -239,6 +371,11 @@ def run_extract_text(session: Session, task: TaskQueue) -> TaskOutcome:
     matched = (doc.structured_content or {}).get("matched") or {}
     fmt = matched.get("format")
     extractor = TEXT_EXTRACTORS.get(fmt)
+    # `has_markup` selects the reader; it does not block the row. It is consulted only for
+    # `text`, because that is the one format whose files can be either prose or markup —
+    # every other format's identity already decided which reader it gets.
+    if fmt == "text" and (matched.get("patterns") or {}).get("has_markup"):
+        extractor = MARKUP_EXTRACTOR
     if extractor is None:
         raise ValueError(
             f"extract:text is scoped to document {doc.id}, whose probed format is {fmt!r}; "
@@ -351,18 +488,41 @@ def _inferred_from_font_size(doc: Document, extraction: dict) -> Boundaries:
 #: question, settled: ``declared`` does not mean one mechanism. For PDF it is the outline;
 #: for markdown it is the headings, which are the same function that is PDF's INFERRED
 #: rung. So the splitter is per extraction source, and the task stays one task.
+#: Converted HTML gets :func:`_split_atx` because ``html_to_markdown`` is called with
+#: ``heading_style="ATX"``, so an ``<h2>`` arrives as ``## ``. The headings are DECLARED in
+#: the same sense a markdown file's are — the author wrote them — even though a converter
+#: rewrote the syntax on the way here.
+#: The two office readers get :func:`_split_atx` for the same reason converted HTML does,
+#: and the claim is stronger here rather than weaker. A ``.docx``'s ATX headings were
+#: written FROM the heading styles ``probe`` measured to report ``has_heading_styles``, and
+#: a ``.pptx``'s ``#`` per slide is the slides it counted for ``has_slides`` — so in both
+#: cases the pattern that lets this rung run and the structure it splits on are two
+#: readings of one fact about the file.
 DECLARED_SPLITTERS: dict[str, Callable[[Document, dict], Boundaries]] = {
     EXTRACTION_PDF_TEXT_LAYER: _declared_from_outline,
     EXTRACTION_UTF8_TEXT: _split_atx,
+    EXTRACTION_HTML_MARKUP: _split_atx,
+    EXTRACTION_DOCX_BODY: _split_atx,
+    EXTRACTION_PPTX_SLIDES: _split_atx,
 }
 
 #: ``extraction.source`` -> the splitter for the INFERRED rung. A text file reaches it only
 #: when ``probe`` found no headings, so what it produces is one untitled region — which is
 #: the correct answer for a ``.txt`` file and is recorded as a coverage gap rather than as
 #: a failure.
+#: HTML reaches this rung when the converted markdown carries no headings — a page built
+#: entirely from styled ``<div>``s, which is common enough that the entry has to exist.
+#: It produces one untitled region, the same honest answer a heading-less ``.txt`` gets.
+#: A ``.docx`` reaches the inferred rung when it declared no heading styles, and a ``.pptx``
+#: cannot reach it at all in practice — a deck with no slides has nothing to extract. The
+#: ``docx`` entry produces one untitled region for a document that is flat prose, which is
+#: the same honest answer a heading-less ``.txt`` gets.
 INFERRED_SPLITTERS: dict[str, Callable[[Document, dict], Boundaries]] = {
     EXTRACTION_PDF_TEXT_LAYER: _inferred_from_font_size,
     EXTRACTION_UTF8_TEXT: _split_atx,
+    EXTRACTION_HTML_MARKUP: _split_atx,
+    EXTRACTION_DOCX_BODY: _split_atx,
+    EXTRACTION_PPTX_SLIDES: _split_atx,
 }
 
 
@@ -443,6 +603,7 @@ def _build_tree(
         params.get("min_chunk_length", STRUCTURE_CHUNK_PARAMS["min_chunk_length"])
     )
 
+    text = doc.content or ""
     writer = _TreeWriter(
         repo=DocumentRepository(session),
         tasks=TaskQueueRepository(session),
@@ -450,6 +611,12 @@ def _build_tree(
         strategy=strategy,
         max_tokens=max_tokens,
         min_chunk_length=min_chunk_length,
+        # Taken from the FLAT list, which is the one thing guaranteed to be in document
+        # order. `nest` preserves that order under a preorder walk, but the writer's walk
+        # is not the place to depend on it: a cursor that advanced in traversal order would
+        # be silently wrong the day the traversal changed, and the wrongness would be a
+        # rectangle on the wrong page rather than an exception.
+        body_offsets=_locate_section_bodies(text, sections),
     )
     roots = nest(sections)
     for root in roots:
@@ -477,6 +644,11 @@ def _build_tree(
         "sections_titled": sum(1 for s in sections if s.title),
         "section_nodes": len(writer.section_ids),
         "chunk_nodes": writer.chunk_count,
+        # The paired number for `chunk_nodes`, in the same spirit as `characters_probed`
+        # beside `characters`: a chunk with no `source_span` is one `citation` cannot place,
+        # and the difference between the two is the ceiling on the anchor recovery rate
+        # before `citation` has run at all. See `_write_chunks`.
+        "chunks_with_source_span": writer.spanned_chunk_count,
         "coverage": round(coverage, 4),
         "gap_regions": gap_regions,
         "params": {
@@ -541,6 +713,7 @@ class _TreeWriter:
         strategy: ChunkStrategy,
         max_tokens: int,
         min_chunk_length: int,
+        body_offsets: dict[int, int],
     ):
         self.repo = repo
         self.tasks = tasks
@@ -548,6 +721,7 @@ class _TreeWriter:
         self.strategy = strategy
         self.max_tokens = max_tokens
         self.min_chunk_length = min_chunk_length
+        self.body_offsets = body_offsets
 
         #: Ids of the section containers, in creation order.
         self.section_ids: list[int] = []
@@ -555,6 +729,8 @@ class _TreeWriter:
         #: Direct children are enough: superseding deletes them WITH their subtrees.
         self.direct_child_ids: list[int] = []
         self.chunk_count = 0
+        #: How many of those chunks carry a verified ``source_span``.
+        self.spanned_chunk_count = 0
         self.max_depth = 0
         self._root_id: Optional[int] = None
 
@@ -641,19 +817,24 @@ class _TreeWriter:
             fits=service.fits_token_window,
         )
         label = section.title or f"Section (line {section.source_line})"
-        for chunk in chunks:
+        spans = _chunk_spans(body, self.body_offsets.get(id(section)), chunks)
+        for chunk, span in zip(chunks, spans):
+            structured = {
+                "rung": self.rung,
+                "section_title": section.title,
+                "section_level": section.level,
+                "chunk_index": chunk.index,
+                "source_line": section.source_line,
+            }
+            if span is not None:
+                structured["source_span"] = span
+                self.spanned_chunk_count += 1
             node = self.repo.create(
                 title=label if len(chunks) == 1 else f"{label} — chunk {chunk.index}",
                 content=chunk.text,
                 parent_id=parent_id,
                 usetype=USETYPE_CHUNK,
-                structured_content={
-                    "rung": self.rung,
-                    "section_title": section.title,
-                    "section_level": section.level,
-                    "chunk_index": chunk.index,
-                    "source_line": section.source_line,
-                },
+                structured_content=structured,
                 # The model does not run here any more. `embed` is its own task and this
                 # node is not retrievable until that task has run, which is what
                 # `in_flight` states — see the class docstring.
@@ -672,6 +853,114 @@ class _TreeWriter:
     def _record(self, node_id: int, parent_id: int) -> None:
         if parent_id == self._root_id:
             self.direct_child_ids.append(node_id)
+
+
+#: Any run of whitespace, for :func:`_collapsed_with_map`.
+_WHITESPACE_RUN = re.compile(r"\s+")
+
+
+def _collapsed_with_map(text: str) -> tuple[str, list[int]]:
+    """``(collapsed, offsets)`` where ``offsets[i]`` is where ``collapsed[i]`` came from.
+
+    Whitespace runs become a single space and nothing else changes — no case folding and no
+    markup stripping, unlike ``structural_splitting._normalized_with_map``, because the two
+    are answering different questions. That one matches an outline title against text a
+    reader typed differently; this one matches text against ITSELF after the chunker moved
+    through it, and the only thing the chunker changes is whitespace.
+    """
+    out: list[str] = []
+    offsets: list[int] = []
+    for index, char in enumerate(text):
+        if char.isspace():
+            if out and out[-1] == " ":
+                continue
+            out.append(" ")
+        else:
+            out.append(char)
+        offsets.append(index)
+    return "".join(out), offsets
+
+
+def _chunk_spans(body: str, base: Optional[int], chunks: Sequence) -> list[Optional[list[int]]]:
+    """Where each chunk sits in the file node's markdown, one entry per chunk.
+
+    THE SIBLING OF ``source_line``, IN THE SAME COORDINATES. ``source_line`` is a line offset
+    into the extracted markdown and it locates the SECTION; this locates the chunk itself,
+    and it is what lets ``citation`` (``OFFICE_SPEC.md`` Part 5) invert a chunk back to the
+    rectangles on the page it was set in. It is not the anchor, and it is not positional
+    information about the SOURCE document — it is an index into text this appliance produced,
+    which is exactly why the task that produced the text can write it without knowing
+    anything about the format the text came from.
+
+    ``Chunk.char_start`` is not used, and cannot be. ``chunk_text`` computes it with a
+    forward ``text.find`` of the chunk in the body, and for every packing strategy that find
+    MISSES: ``sentence_packed`` — the shipped default — joins the sentences it packed with a
+    single space, so a chunk that spans a paragraph break is not a verbatim slice of the
+    body, and ``chunk_text`` falls back to a running offset short by however much whitespace
+    it collapsed. The error is small per chunk and CUMULATIVE down a section, so a late chunk
+    in a long chapter can be pointing a paragraph or more too early — which is a plausible
+    rectangle around the wrong words, the one outcome Part 5 says is worse than no rectangle
+    at all, because the reader cannot tell.
+
+    What every strategy shares is that it only ever changes WHITESPACE: sentences and
+    paragraphs are stripped and re-joined with a space, ``_enforce_max_chars`` re-joins
+    words with a space, and the ``min_chunk_length`` merge glues two pieces with a space. So
+    collapsing both sides' whitespace makes each chunk an exact substring of the body again,
+    and :func:`_collapsed_with_map` carries the offsets needed to come back. The cursor keeps
+    the matches in order, so a sentence repeated later in the section cannot claim an earlier
+    chunk's position.
+
+    ``None`` for a chunk that still cannot be placed — there is no fallback to an approximate
+    offset, and the structure task's detail counts how many spans it wrote.
+    """
+    if base is None:
+        return [None] * len(chunks)
+
+    collapsed, offsets = _collapsed_with_map(body)
+    spans: list[Optional[list[int]]] = []
+    cursor = 0
+    for chunk in chunks:
+        needle = _WHITESPACE_RUN.sub(" ", chunk.text).strip()
+        found = collapsed.find(needle, cursor) if needle else -1
+        if found < 0:
+            spans.append(None)
+            continue
+        last = found + len(needle) - 1
+        spans.append([base + offsets[found], base + offsets[last] + 1])
+        cursor = last + 1
+    return spans
+
+
+def _locate_section_bodies(text: str, sections: Sequence[Section]) -> dict[int, int]:
+    """``{id(section): offset of its body in text}`` for the sections whose body is found.
+
+    Both splitters cut a document into ordered, non-overlapping slices and then ``strip()``
+    each one, so a forward-scanning ``find`` over the flat list recovers exactly where each
+    body sat — the cursor is what stops a section whose text repeats verbatim later in the
+    document from being located at the wrong copy.
+
+    Keyed by ``id`` because :class:`~jmfts_core.structural_splitting.Section` is a
+    dataclass with a generated ``__eq__`` and therefore unhashable, and because the tree
+    :func:`~jmfts_core.structural_splitting.nest` builds holds these very objects — so
+    identity is what connects the flat list this reads to the nodes the writer walks. The
+    dict lives only as long as the write does.
+
+    A body that is not found is simply absent from the result, and its chunks then carry no
+    ``source_span``. That is a report, not a silent default: the structure task's detail
+    counts the chunks that got one.
+    """
+    offsets: dict[int, int] = {}
+    cursor = 0
+    for section in sections:
+        body = (section.content or "").strip()
+        if not body:
+            continue
+        found = text.find(body, cursor)
+        if found < 0:
+            continue
+        offsets[id(section)] = found
+        cursor = found + len(body)
+    return offsets
 
 
 def _coverage(sections: Sequence[Section]) -> tuple[int, int, int]:

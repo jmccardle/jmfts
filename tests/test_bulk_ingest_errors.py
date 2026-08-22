@@ -133,9 +133,7 @@ class TestDuplicateTripleHandling:
         mock_triple.id = 100
 
         with (
-            patch(
-                "jmfts_core.fact_extraction._llm_extract", new_callable=AsyncMock
-            ) as mock_llm,
+            patch("jmfts_core.fact_extraction._llm_extract", new_callable=AsyncMock) as mock_llm,
             patch("jmfts_core.fact_extraction.resolve_entity") as mock_entity,
             patch("jmfts_core.fact_extraction.resolve_predicate") as mock_pred,
             patch("jmfts_core.fact_extraction.TripleRepository") as mock_triple_repo_cls,
@@ -152,9 +150,7 @@ class TestDuplicateTripleHandling:
             ]
 
             result = _run(
-                extract_facts_from_document(
-                    document_id=1, session=session, settings=settings
-                )
+                extract_facts_from_document(document_id=1, session=session, settings=settings)
             )
 
             assert len(result.created_triple_ids) == 1
@@ -323,9 +319,7 @@ class TestPipelineResilience:
         mock_triple.id = 300
 
         with (
-            patch(
-                "jmfts_core.fact_extraction._llm_extract", new_callable=AsyncMock
-            ) as mock_llm,
+            patch("jmfts_core.fact_extraction._llm_extract", new_callable=AsyncMock) as mock_llm,
             patch("jmfts_core.fact_extraction.resolve_entity") as mock_entity,
             patch("jmfts_core.fact_extraction.resolve_predicate") as mock_pred,
             patch("jmfts_core.fact_extraction.TripleRepository") as mock_triple_repo_cls,
@@ -344,9 +338,7 @@ class TestPipelineResilience:
             mock_repo.upsert_triple.return_value = (mock_triple, True)
 
             result = _run(
-                extract_facts_from_document(
-                    document_id=1, session=session, settings=settings
-                )
+                extract_facts_from_document(document_id=1, session=session, settings=settings)
             )
 
             # First triple should be created

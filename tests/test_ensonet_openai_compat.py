@@ -50,7 +50,6 @@ import pytest
 
 from jmfts_core.config import get_settings
 
-
 # ---------------------------------------------------------------------------
 # Server availability
 # ---------------------------------------------------------------------------
@@ -165,9 +164,7 @@ class TestModelsEndpoint:
     def test_configured_model_present(self, client: httpx.Client, model: str):
         r = client.get("/v1/models")
         ids = [m["id"] for m in r.json()["data"]]
-        assert model in ids, (
-            f"Configured model '{model}' not found in /v1/models response: {ids}"
-        )
+        assert model in ids, f"Configured model '{model}' not found in /v1/models response: {ids}"
 
 
 # ---------------------------------------------------------------------------
@@ -216,9 +213,9 @@ class TestChatCompletionsBasic:
     def test_max_tokens_respected(self, client: httpx.Client, model: str):
         r = client.post("/v1/chat/completions", json=_chat_payload(model, max_tokens=4))
         usage = r.json()["usage"]
-        assert usage["completion_tokens"] <= 4, (
-            f"completion_tokens={usage['completion_tokens']} exceeded max_tokens=4"
-        )
+        assert (
+            usage["completion_tokens"] <= 4
+        ), f"completion_tokens={usage['completion_tokens']} exceeded max_tokens=4"
 
     @skip_if_no_server
     def test_temperature_zero_is_deterministic(self, client: httpx.Client, model: str):
@@ -227,9 +224,7 @@ class TestChatCompletionsBasic:
         r2 = client.post("/v1/chat/completions", json=payload)
         c1 = r1.json()["choices"][0]["message"]["content"].strip().lower()
         c2 = r2.json()["choices"][0]["message"]["content"].strip().lower()
-        assert c1 == c2, (
-            f"temperature=0 produced different outputs: {c1!r} vs {c2!r}"
-        )
+        assert c1 == c2, f"temperature=0 produced different outputs: {c1!r} vs {c2!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -269,11 +264,12 @@ class TestChatCompletionsStreaming:
                     if not line:
                         continue
                     assert line.startswith("data:"), f"Unexpected SSE line: {line!r}"
-                    payload_str = line[len("data:"):].strip()
+                    payload_str = line[len("data:") :].strip()
                     if payload_str == "[DONE]":
                         done_seen = True
                         break
                     import json
+
                     chunk = json.loads(payload_str)
                     chunks.append(chunk)
 
@@ -292,13 +288,13 @@ class TestChatCompletionsStreaming:
                 for line in r.iter_lines():
                     if not line or not line.startswith("data:"):
                         continue
-                    payload_str = line[len("data:"):].strip()
+                    payload_str = line[len("data:") :].strip()
                     if payload_str == "[DONE]":
                         break
                     chunk = json.loads(payload_str)
-                    assert chunk.get("object") == "chat.completion.chunk", (
-                        f"Unexpected object type: {chunk.get('object')}"
-                    )
+                    assert (
+                        chunk.get("object") == "chat.completion.chunk"
+                    ), f"Unexpected object type: {chunk.get('object')}"
                     assert isinstance(chunk.get("choices"), list)
                     choice = chunk["choices"][0]
                     assert "delta" in choice
@@ -316,7 +312,7 @@ class TestChatCompletionsStreaming:
                 for line in r.iter_lines():
                     if not line or not line.startswith("data:"):
                         continue
-                    payload_str = line[len("data:"):].strip()
+                    payload_str = line[len("data:") :].strip()
                     if payload_str == "[DONE]":
                         break
                     chunk = json.loads(payload_str)
@@ -338,23 +334,17 @@ class TestErrorHandling:
     def test_invalid_model_returns_4xx(self, client: httpx.Client):
         payload = _chat_payload("nonexistent-model-xyz-12345")
         r = client.post("/v1/chat/completions", json=payload)
-        assert 400 <= r.status_code < 500, (
-            f"Expected 4xx for invalid model, got {r.status_code}"
-        )
+        assert 400 <= r.status_code < 500, f"Expected 4xx for invalid model, got {r.status_code}"
 
     @skip_if_no_server
     def test_missing_messages_returns_4xx(self, client: httpx.Client, model: str):
         r = client.post("/v1/chat/completions", json={"model": model})
-        assert 400 <= r.status_code < 500, (
-            f"Expected 4xx for missing messages, got {r.status_code}"
-        )
+        assert 400 <= r.status_code < 500, f"Expected 4xx for missing messages, got {r.status_code}"
 
     @skip_if_no_server
     def test_empty_messages_returns_4xx(self, client: httpx.Client, model: str):
         r = client.post("/v1/chat/completions", json={"model": model, "messages": []})
-        assert 400 <= r.status_code < 500, (
-            f"Expected 4xx for empty messages, got {r.status_code}"
-        )
+        assert 400 <= r.status_code < 500, f"Expected 4xx for empty messages, got {r.status_code}"
 
     @skip_if_no_server
     def test_malformed_json_returns_4xx(self, client: httpx.Client):
@@ -363,9 +353,7 @@ class TestErrorHandling:
             content=b"not-json",
             headers={"Content-Type": "application/json"},
         )
-        assert 400 <= r.status_code < 500, (
-            f"Expected 4xx for malformed JSON, got {r.status_code}"
-        )
+        assert 400 <= r.status_code < 500, f"Expected 4xx for malformed JSON, got {r.status_code}"
 
     @skip_if_no_server
     def test_error_response_has_error_field(self, client: httpx.Client):
@@ -392,14 +380,10 @@ class TestColdStartAndWarmup:
         r = client.post("/v1/chat/completions", json=_chat_payload(model))
         elapsed = time.monotonic() - start
         assert r.status_code == 200, f"Cold-start request failed: {r.text}"
-        assert elapsed < timeout, (
-            f"Cold-start took {elapsed:.1f}s, exceeding timeout {timeout}s"
-        )
+        assert elapsed < timeout, f"Cold-start took {elapsed:.1f}s, exceeding timeout {timeout}s"
 
     @skip_if_no_server
-    def test_warmup_is_faster_than_cold_start(
-        self, client: httpx.Client, model: str
-    ):
+    def test_warmup_is_faster_than_cold_start(self, client: httpx.Client, model: str):
         """Subsequent (warm) request should be faster than the first.
 
         Warm threshold: if cold-start took > 10 s, warm must be < cold/2.
@@ -445,14 +429,10 @@ class TestConcurrentRequests:
             return await asyncio.gather(_one_request(), _one_request(), _one_request())
 
         statuses = asyncio.run(_run())
-        assert all(s == 200 for s in statuses), (
-            f"Not all concurrent requests succeeded: {statuses}"
-        )
+        assert all(s == 200 for s in statuses), f"Not all concurrent requests succeeded: {statuses}"
 
     @skip_if_no_server
-    def test_concurrent_responses_are_independent(
-        self, base_url: str, model: str, timeout: float
-    ):
+    def test_concurrent_responses_are_independent(self, base_url: str, model: str, timeout: float):
         """Each concurrent response must have a unique completion ID."""
 
         async def _run() -> list[str]:
@@ -461,9 +441,7 @@ class TestConcurrentRequests:
                     r = await c.post("/v1/chat/completions", json=_chat_payload(model))
                     return r.json().get("id", "")
 
-            return await asyncio.gather(
-                _get_response_id(), _get_response_id(), _get_response_id()
-            )
+            return await asyncio.gather(_get_response_id(), _get_response_id(), _get_response_id())
 
         ids = asyncio.run(_run())
         assert len(set(ids)) == len(ids), f"Duplicate completion IDs in concurrent responses: {ids}"
@@ -548,9 +526,9 @@ class TestJmftsConfigIntegration:
 
     def test_effective_llm_timeout_is_positive(self):
         settings = get_settings()
-        assert settings.effective_llm_timeout > 0, (
-            f"effective_llm_timeout must be positive, got {settings.effective_llm_timeout}"
-        )
+        assert (
+            settings.effective_llm_timeout > 0
+        ), f"effective_llm_timeout must be positive, got {settings.effective_llm_timeout}"
 
     def test_ensonet_defaults_used_when_llm_override_empty(self):
         from jmfts_core.config import Settings

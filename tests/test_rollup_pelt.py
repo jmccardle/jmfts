@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 import pytest
 from sqlalchemy import select
 
-from jmfts_core.contracts.upload import UploadedFile
+from jmfts_client.contracts.upload import UploadedFile
 from jmfts_core.ingest_tasks import (
     TASK_STRUCTURE_SEMANTIC,
     TASK_SUMMARIZE,
@@ -187,7 +187,7 @@ class TestThePlanner:
 
 def _record_attempt(session, node: Document, task: str, params: dict) -> None:
     """Append the attempt a completed task would have left, so the diff can see it."""
-    from jmfts_core.contracts.attempt import param_fingerprint
+    from jmfts_client.contracts.attempt import param_fingerprint
 
     structured = dict(node.structured_content or {})
     attempts = list(structured.get("attempts", []))

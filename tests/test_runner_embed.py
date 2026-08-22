@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 import jmfts_core.rest.routers.runner as runner_router
 import jmfts_core.rest.main as main
 from jmfts_core.config import get_settings
-from jmfts_core.contracts.runner import (
+from jmfts_client.contracts.runner import (
     DOC_DTYPE,
     TOKEN_DTYPE,
     decode_matrix,

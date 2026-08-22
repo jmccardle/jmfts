@@ -442,9 +442,7 @@ def _get_embedded_child_ids(
     return [c.id for c in children if c.embed is not None]
 
 
-def _collect_report_summaries(
-    repo: DocumentRepository, portfolio_id: int
-) -> list[int]:
+def _collect_report_summaries(repo: DocumentRepository, portfolio_id: int) -> list[int]:
     """Gather report-level summary document IDs from all child reports under a portfolio.
 
     Walks each immediate child (report) of the portfolio and collects its
@@ -529,7 +527,10 @@ async def portfolio_raptor_summarize(
         gamma = settings.raptor_gamma_base * (settings.raptor_gamma_decay**layer)
         logger.info(
             "Portfolio layer %d: %d summaries, k=%d, gamma=%.3f",
-            layer, len(doc_ids), k, gamma,
+            layer,
+            len(doc_ids),
+            k,
+            gamma,
         )
 
         clusters = _leiden_cluster(embeddings, doc_ids, k, gamma, min_cluster_size)

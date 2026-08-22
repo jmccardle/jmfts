@@ -143,7 +143,7 @@ class TestSettledColumn:
     def test_settled_reaches_the_api_contract(self, db_session):
         """The to_dict/DocumentResponse coverage guards catch a dropped field only if the
         column is actually threaded; assert the round trip directly too."""
-        from jmfts_core.contracts.document import DocumentResponse
+        from jmfts_client.contracts.document import DocumentResponse
 
         repo = DocumentRepository(db_session)
         doc = _doc(repo, "in flight", "body of an unfinished node", settled="in_flight")
@@ -420,7 +420,7 @@ def test_response_refuses_a_document_with_no_state():
     surface a client uses to decide whether a document is ready."""
     from pydantic import ValidationError
 
-    from jmfts_core.contracts.document import DocumentResponse
+    from jmfts_client.contracts.document import DocumentResponse
 
     doc = Document(id=1, title="t", content="c", path=[], structured_content={})
     with pytest.raises(ValidationError):

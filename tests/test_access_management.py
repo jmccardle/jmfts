@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from jmfts_core.access import hash_token, resolve_principal_token
-from jmfts_core.contracts.access import GrantCreate, PrincipalCreate, TokenCreate
+from jmfts_client.contracts.access import GrantCreate, PrincipalCreate, TokenCreate
 from jmfts_core.models.principal import AccessGrant, ApiToken, Principal
 from jmfts_core.principal_context import OWNER, CurrentPrincipal, reset_principal, set_principal
 from jmfts_core.repositories.document import DocumentRepository

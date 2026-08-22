@@ -46,9 +46,7 @@ class TokenEmbedding(Base):
     # Relationship
     document: Mapped["Document"] = relationship("Document", back_populates="token_embeddings")
 
-    __table_args__ = (
-        UniqueConstraint("document_id", "token_idx", name="uq_token_doc_idx"),
-    )
+    __table_args__ = (UniqueConstraint("document_id", "token_idx", name="uq_token_doc_idx"),)
 
     def to_dict(self, include_embeds: bool = False) -> dict[str, Any]:
         result = {

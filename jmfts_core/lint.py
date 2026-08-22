@@ -97,9 +97,7 @@ def lint_orphans(
     return findings
 
 
-def lint_contradictions(
-    session: Session, *, max_findings: int = 200
-) -> list[LintFinding]:
+def lint_contradictions(session: Session, *, max_findings: int = 200) -> list[LintFinding]:
     """Triples with same (subject, predicate) and overlapping validity but different objects."""
     stmt = (
         select(Triple)
@@ -256,9 +254,7 @@ def lint_coverage(
                 category="coverage",
                 severity="info",
                 document_ids=[r.document_id],
-                message=(
-                    f"high-centrality doc #{r.document_id} has no summary descendant"
-                ),
+                message=(f"high-centrality doc #{r.document_id} has no summary descendant"),
                 detail={
                     "title": r.title,
                     "usetype": r.usetype,

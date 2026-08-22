@@ -57,6 +57,11 @@ RUN if [ -n "${EXTRAS}" ]; then \
 
 COPY pyproject.toml ./
 COPY jmfts_core ./jmfts_core
+# The wire contracts, installed first. `jmfts` depends on `jmfts-client`, a name PyPI does
+# not carry yet, so the resolve below needs it present. A thin worker takes it too: it is
+# two pure-Python dependencies, and the contracts are what it talks to a runner with.
+COPY jmfts-client ./jmfts-client
+RUN pip install --no-cache-dir -e ./jmfts-client
 RUN pip install --no-cache-dir -e ".${EXTRAS}"
 
 # BAKE THE MODEL IN. Without this every cold pod downloads a few hundred MB before it can

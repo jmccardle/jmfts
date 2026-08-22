@@ -211,7 +211,7 @@ The image store lives under the k3s data directory, and a CUDA torch image is se
 On a host whose root filesystem is nearly full, put it somewhere with room:
 
 ```
-curl -sfL https://get.k3s.io | sh -s - server --data-dir /storage/k3s
+curl -sfL https://get.k3s.io | sh -s - server --data-dir /path/with/room/k3s
 ```
 
 Then install the NVIDIA device plugin, which is what makes `nvidia.com/gpu` schedulable.

@@ -16,7 +16,7 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 
 from jmfts_core.chunking import ChunkStrategy, chunk_text
-from jmfts_core.contracts.attempt import AttemptRecord, param_fingerprint
+from jmfts_client.contracts.attempt import AttemptRecord, param_fingerprint
 from jmfts_core.conversation_ingest import (
     IngestResult,
     ParsedMessage,

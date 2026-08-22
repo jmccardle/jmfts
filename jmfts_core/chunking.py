@@ -17,6 +17,7 @@ from jmfts_core.config import get_settings
 class ChunkStrategy(str, Enum):
     sentence = "sentence"
     sentence_packed = "sentence_packed"
+    paragraph_packed = "paragraph_packed"
     paragraph = "paragraph"
     token_count = "token_count"
 
@@ -95,6 +96,34 @@ def _split_sentences_packed(text: str, max_tokens: int = 120) -> list[str]:
         words += length
     if current:
         packed.append(" ".join(current))
+    return packed
+
+
+def _split_paragraphs_packed(text: str, max_tokens: int = 120) -> list[str]:
+    """Pack sentences to a word budget, but NEVER across a paragraph boundary.
+
+    `sentence_packed` fills its budget from the section body as one stream, so a blank
+    line — the one boundary the author actually wrote — is invisible to it. Measured on a
+    three-paragraph section of five, six and three sentences (ABCDE / FGHIJK / LMN), it
+    returns ``ABCDEFGHI`` and ``JKLMN``: two chunks, neither of which is a paragraph, and
+    both boundaries placed where the word budget ran out rather than where the author
+    stopped. The pieces are a reasonable SIZE (593 and 329 characters) and cut in the
+    wrong PLACE, which is why a size histogram does not show the problem.
+
+    A paragraph break is a claim by the author that what follows is a separate unit.
+    Packing across it fuses two claims and splits one; this splits per paragraph first and
+    packs only within one, so a paragraph that fits the budget comes back whole and is its
+    own chunk. Paragraphs are NOT merged when they are short: merging is what
+    ``min_chunk_length`` decides in :func:`chunk_text`, and doing it here would reintroduce
+    the same fusion by another route.
+
+    The budget still applies inside an oversized paragraph, where a boundary has to be
+    invented because the document declares none. That is the only case where this differs
+    from "one chunk per paragraph".
+    """
+    packed: list[str] = []
+    for paragraph in _split_paragraphs(text):
+        packed.extend(_split_sentences_packed(paragraph, max_tokens=max_tokens))
     return packed
 
 
@@ -266,6 +295,8 @@ def chunk_text(
         raw_chunks = _split_sentences(text)
     elif strategy == ChunkStrategy.sentence_packed:
         raw_chunks = _split_sentences_packed(text, max_tokens=max_tokens)
+    elif strategy == ChunkStrategy.paragraph_packed:
+        raw_chunks = _split_paragraphs_packed(text, max_tokens=max_tokens)
     elif strategy == ChunkStrategy.paragraph:
         raw_chunks = _split_paragraphs(text)
     elif strategy == ChunkStrategy.token_count:

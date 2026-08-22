@@ -29,6 +29,11 @@ echo ">> building an empty venv at $VENV"
 "$VENV/bin/pip" install --quiet --upgrade pip
 
 echo ">> installing base jmfts (no extras)"
+# jmfts-client first, from this tree. `jmfts` pins `jmfts-client==<this version>`, a name
+# that is not on PyPI yet, so the server install would fail resolving it. Installing the
+# local copy is also the only honest check: this script asks what THIS source tree
+# installs as, and the pin means the local client is the only one that can satisfy it.
+"$VENV/bin/pip" install --quiet ./jmfts-client
 "$VENV/bin/pip" install --quiet .
 
 echo ">> checking nothing dragged the model stack in"
@@ -52,9 +57,14 @@ import jmfts_core.worker         # the CLI and the loop
 import jmfts_core.ingest_tasks   # every registered task handler, embed included
 import jmfts_core.embedder       # the remote embedder
 
+import jmfts_core.probe          # format detection, which must stay stdlib-only
+import jmfts_core.office         # the office seam: importing it imports no reader
+
 heavy = sorted(m for m in ("torch", "sentence_transformers") if m in sys.modules)
 assert not heavy, f"importing the app pulled in {heavy}"
-print("   api + worker + task registry import, with no model stack")
+readers = sorted(m for m in ("docx", "pptx", "openpyxl") if m in sys.modules)
+assert not readers, f"importing the app pulled in {readers}"
+print("   api + worker + task registry import, with no model stack and no office readers")
 
 import numpy as np
 
@@ -98,6 +108,35 @@ assert embedder.fits_token_window("hello world") is True
 assert embedder.device == "remote:http://runner:8100"
 embedder.close()
 print("   JMFTS_RUNNER_URL selects a RemoteEmbedder that still measures locally")
+
+# ---------------------------------------------------------------------------
+# The office tiers. docs/OFFICE_SPEC.md Part 1.
+# ---------------------------------------------------------------------------
+
+from jmfts_core.office import (
+    OfficeStackNotInstalled,
+    require_docx,
+    require_openpyxl,
+    require_pptx,
+)
+from jmfts_core.probe import detect_format
+
+# Tier 1 works with no readers at all: a base install can still say WHAT a file is.
+# These are the ZIP-manifest and OLE2 paths, which is the whole reason the split works.
+assert detect_format(b"%PDF-1.7 trailer", filename="a.pdf").format == "pdf"
+assert detect_format(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\0" * 32, filename="a.doc").format == "ole2"
+print("   probe detects formats with no office reader installed")
+
+# Tier 2 refuses by name.
+for label, guard in (("docx", require_docx), ("pptx", require_pptx), ("openpyxl", require_openpyxl)):
+    try:
+        guard()
+    except OfficeStackNotInstalled as exc:
+        assert "jmfts[office]" in str(exc), f"{label}: message does not name the extra"
+        assert classify_exception(exc) is ErrorType.PERMANENT, f"{label}: not PERMANENT"
+    else:
+        raise AssertionError(f"{label} imported with no office extra installed")
+print("   office readers refuse by name, classified PERMANENT")
 
 print("\nBASE INSTALL OK")
 PY

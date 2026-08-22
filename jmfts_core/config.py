@@ -335,6 +335,11 @@ class Settings(BaseSettings):
         encoded_password = quote_plus(self.db_password)
         return f"postgresql://{self.db_user}:{encoded_password}@{self.db_host}:{self.db_port}/{self.db_name}"
 
+    @property
+    def async_database_url(self) -> str:
+        encoded_password = quote_plus(self.db_password)
+        return f"postgresql+asyncpg://{self.db_user}:{encoded_password}@{self.db_host}:{self.db_port}/{self.db_name}"
+
     class Config:
         env_prefix = "JMFTS_"
         env_file = ".env"

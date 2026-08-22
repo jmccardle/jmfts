@@ -17,8 +17,18 @@
 set -euo pipefail
 
 IMAGE="pgvector/pgvector:pg16"
-CONTAINER="jmfts-ci-pg"
 HOST_PORT="${JMFTS_CI_PG_PORT:-5434}"
+
+# The container name carries the port, and that is not cosmetic. `cleanup` below runs
+# `docker rm -f "$CONTAINER"` at STARTUP as well as on exit, to clear a leftover from an
+# aborted run. Under a fixed name, a second run starting while a first is still going
+# deletes the first one's database out from under it — the suite then fails partway
+# through with connection errors that look like flakes and are not.
+#
+# Two runs in parallel is not hypothetical: it is what several worktrees, or several
+# agents, do. One variable now moves both the port and the name, so concurrent runs need
+# only `JMFTS_CI_PG_PORT` to be distinct.
+CONTAINER="jmfts-ci-pg-${HOST_PORT}"
 PY="${PYTHON:-./.venv/bin/python}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

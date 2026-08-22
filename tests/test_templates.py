@@ -6,7 +6,6 @@ and schema construction. Pure logic tests — no database or embedding service r
 
 import re
 
-
 # ============================================================================
 # Inline copies of template logic for testability (canonical in routers/templates.py)
 # ============================================================================

@@ -30,36 +30,199 @@ if TYPE_CHECKING:  # annotations only; never evaluated at runtime
     import torch
 
 # NLTK stopwords - embedded to avoid runtime dependency
-ENGLISH_STOPWORDS = frozenset({
-    'i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', "you're",
-    "you've", "you'll", "you'd", 'your', 'yours', 'yourself', 'yourselves', 'he',
-    'him', 'his', 'himself', 'she', "she's", 'her', 'hers', 'herself', 'it', "it's",
-    'its', 'itself', 'they', 'them', 'their', 'theirs', 'themselves', 'what', 'which',
-    'who', 'whom', 'this', 'that', "that'll", 'these', 'those', 'am', 'is', 'are',
-    'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'having', 'do',
-    'does', 'did', 'doing', 'a', 'an', 'the', 'and', 'but', 'if', 'or', 'because',
-    'as', 'until', 'while', 'of', 'at', 'by', 'for', 'with', 'about', 'against',
-    'between', 'into', 'through', 'during', 'before', 'after', 'above', 'below',
-    'to', 'from', 'up', 'down', 'in', 'out', 'on', 'off', 'over', 'under', 'again',
-    'further', 'then', 'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all',
-    'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not',
-    'only', 'own', 'same', 'so', 'than', 'too', 'very', 's', 't', 'can', 'will',
-    'just', 'don', "don't", 'should', "should've", 'now', 'd', 'll', 'm', 'o', 're',
-    've', 'y', 'ain', 'aren', "aren't", 'couldn', "couldn't", 'didn', "didn't",
-    'doesn', "doesn't", 'hadn', "hadn't", 'hasn', "hasn't", 'haven', "haven't",
-    'isn', "isn't", 'ma', 'mightn', "mightn't", 'mustn', "mustn't", 'needn',
-    "needn't", 'shan', "shan't", 'shouldn', "shouldn't", 'wasn', "wasn't", 'weren',
-    "weren't", 'won', "won't", 'wouldn', "wouldn't"
-})
+ENGLISH_STOPWORDS = frozenset(
+    {
+        "i",
+        "me",
+        "my",
+        "myself",
+        "we",
+        "our",
+        "ours",
+        "ourselves",
+        "you",
+        "you're",
+        "you've",
+        "you'll",
+        "you'd",
+        "your",
+        "yours",
+        "yourself",
+        "yourselves",
+        "he",
+        "him",
+        "his",
+        "himself",
+        "she",
+        "she's",
+        "her",
+        "hers",
+        "herself",
+        "it",
+        "it's",
+        "its",
+        "itself",
+        "they",
+        "them",
+        "their",
+        "theirs",
+        "themselves",
+        "what",
+        "which",
+        "who",
+        "whom",
+        "this",
+        "that",
+        "that'll",
+        "these",
+        "those",
+        "am",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "having",
+        "do",
+        "does",
+        "did",
+        "doing",
+        "a",
+        "an",
+        "the",
+        "and",
+        "but",
+        "if",
+        "or",
+        "because",
+        "as",
+        "until",
+        "while",
+        "of",
+        "at",
+        "by",
+        "for",
+        "with",
+        "about",
+        "against",
+        "between",
+        "into",
+        "through",
+        "during",
+        "before",
+        "after",
+        "above",
+        "below",
+        "to",
+        "from",
+        "up",
+        "down",
+        "in",
+        "out",
+        "on",
+        "off",
+        "over",
+        "under",
+        "again",
+        "further",
+        "then",
+        "once",
+        "here",
+        "there",
+        "when",
+        "where",
+        "why",
+        "how",
+        "all",
+        "each",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "no",
+        "nor",
+        "not",
+        "only",
+        "own",
+        "same",
+        "so",
+        "than",
+        "too",
+        "very",
+        "s",
+        "t",
+        "can",
+        "will",
+        "just",
+        "don",
+        "don't",
+        "should",
+        "should've",
+        "now",
+        "d",
+        "ll",
+        "m",
+        "o",
+        "re",
+        "ve",
+        "y",
+        "ain",
+        "aren",
+        "aren't",
+        "couldn",
+        "couldn't",
+        "didn",
+        "didn't",
+        "doesn",
+        "doesn't",
+        "hadn",
+        "hadn't",
+        "hasn",
+        "hasn't",
+        "haven",
+        "haven't",
+        "isn",
+        "isn't",
+        "ma",
+        "mightn",
+        "mightn't",
+        "mustn",
+        "mustn't",
+        "needn",
+        "needn't",
+        "shan",
+        "shan't",
+        "shouldn",
+        "shouldn't",
+        "wasn",
+        "wasn't",
+        "weren",
+        "weren't",
+        "won",
+        "won't",
+        "wouldn",
+        "wouldn't",
+    }
+)
 
 
 @dataclass
 class TokenSelectionConfig:
     """Configuration for token selection weights"""
+
     # Method weights (will be normalized)
     mmr_weight: float = 1.0
     attention_variance_weight: float = 0.5
-    stopword_penalty_weight: float = 1.0  # Applied as penalty, not combined
+    # There was a `stopword_penalty_weight` here, and it was never read. The stopword
+    # signal is not a weighted term in the combination at all — it is subtracted as a
+    # flat `stopword_penalty` below, which is the field the scorer actually uses.
 
     # MMR parameters
     mmr_lambda: float = 0.5  # Balance relevance vs diversity
@@ -74,6 +237,7 @@ class TokenSelectionConfig:
 @dataclass
 class TokenScores:
     """Intermediate scores for each technique"""
+
     tokens: list[str]
     attention_mask: np.ndarray
     mmr_scores: np.ndarray
@@ -117,7 +281,7 @@ class TokenSelector:
             return True
 
         # Single character (except meaningful ones)
-        if len(clean) == 1 and clean not in {'i', 'a'}:
+        if len(clean) == 1 and clean not in {"i", "a"}:
             return True
 
         return False
@@ -125,7 +289,7 @@ class TokenSelector:
     def compute_mmr_scores(
         self,
         token_embeddings: torch.Tensor,  # (seq_len, hidden_dim)
-        doc_embedding: torch.Tensor,      # (hidden_dim,)
+        doc_embedding: torch.Tensor,  # (hidden_dim,)
         tokens: list[str],
         attention_mask: np.ndarray,
     ) -> np.ndarray:
@@ -154,15 +318,18 @@ class TokenSelector:
         # MMR selection
         lambda_param = self.config.mmr_lambda
         selected = []
-        remaining = [i for i in range(seq_len)
-                    if attention_mask[i] == 1 and tokens[i] not in ['[CLS]', '[SEP]', '[PAD]']]
+        remaining = [
+            i
+            for i in range(seq_len)
+            if attention_mask[i] == 1 and tokens[i] not in ["[CLS]", "[SEP]", "[PAD]"]
+        ]
 
         # Select up to 50 tokens (more than we need, scores decrease with rank)
         for step in range(min(len(remaining), 50)):
             if not remaining:
                 break
 
-            best_score = -float('inf')
+            best_score = -float("inf")
             best_idx = remaining[0]
 
             for idx in remaining:
@@ -233,10 +400,9 @@ class TokenSelector:
 
         Returns 1.0 for content tokens, 0.0 for stopwords/punctuation.
         """
-        mask = np.array([
-            0.0 if self._is_stopword_or_punct(tok) else 1.0
-            for tok in tokens
-        ], dtype=np.float32)
+        mask = np.array(
+            [0.0 if self._is_stopword_or_punct(tok) else 1.0 for tok in tokens], dtype=np.float32
+        )
         return mask
 
     def compute_combined_scores(self, token_scores: TokenScores) -> np.ndarray:
@@ -249,8 +415,8 @@ class TokenSelector:
         total_weight = self.config.mmr_weight + self.config.attention_variance_weight
 
         combined = (
-            self.config.mmr_weight * token_scores.mmr_scores +
-            self.config.attention_variance_weight * token_scores.variance_scores
+            self.config.mmr_weight * token_scores.mmr_scores
+            + self.config.attention_variance_weight * token_scores.variance_scores
         ) / total_weight
 
         # Apply stopword penalty
@@ -264,9 +430,9 @@ class TokenSelector:
         self,
         tokens: list[str],
         token_embeddings: torch.Tensor,  # (seq_len, hidden_dim)
-        attentions: tuple,                # attention outputs
-        attention_mask: torch.Tensor,     # (seq_len,)
-        doc_embedding: torch.Tensor,      # (hidden_dim,)
+        attentions: tuple,  # attention outputs
+        attention_mask: torch.Tensor,  # (seq_len,)
+        doc_embedding: torch.Tensor,  # (hidden_dim,)
         top_percent: Optional[float] = None,
     ) -> tuple[list[int], np.ndarray]:
         """
@@ -287,9 +453,7 @@ class TokenSelector:
         mask_np = attention_mask.cpu().numpy()
 
         # Compute individual scores
-        mmr_scores = self.compute_mmr_scores(
-            token_embeddings, doc_embedding, tokens, mask_np
-        )
+        mmr_scores = self.compute_mmr_scores(token_embeddings, doc_embedding, tokens, mask_np)
         variance_scores = self.compute_variance_scores(attentions, mask_np)
         stopword_mask = self.compute_stopword_mask(tokens)
 
@@ -306,8 +470,9 @@ class TokenSelector:
 
         # Filter out special tokens and select top N%
         valid_indices = [
-            i for i, tok in enumerate(tokens)
-            if mask_np[i] == 1 and tok not in ['[CLS]', '[SEP]', '[PAD]']
+            i
+            for i, tok in enumerate(tokens)
+            if mask_np[i] == 1 and tok not in ["[CLS]", "[SEP]", "[PAD]"]
         ]
 
         n_select = max(1, int(len(valid_indices) * top_percent))

@@ -4,7 +4,7 @@ All `/usetype-presentations/*` routes are now generated from the `@expose` regis
 `jmfts_core/services/usetype_presentation_service.py::UsetypePresentationService`. The
 hand-written routes were deleted; the ORM→response mapping is single-sourced as
 `UsetypePresentationResponse.from_presentation` in
-`jmfts_core/contracts/usetype_presentation.py`.
+`jmfts-client/jmfts_client/contracts/usetype_presentation.py`.
 
 This module is kept (route-less) so historical imports resolve; it is no longer included
 by `api/main.py`. See `docs/API_UNIFICATION_CONTRACT_NOTES.md`.

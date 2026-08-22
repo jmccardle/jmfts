@@ -13,7 +13,7 @@ first-class verb".
 
 import pytest
 
-from jmfts_core.contracts.document import DocumentUpdate
+from jmfts_client.contracts.document import DocumentUpdate
 from jmfts_core.repositories.document import DocumentRepository
 from jmfts_core.services.document_service import DocumentService
 
@@ -49,9 +49,7 @@ class TestReparentVerb:
         b = _doc(db_session, "B")
         child = _doc(db_session, "child", parent_id=a.id)
 
-        moved = svc.update_document(
-            child.id, DocumentUpdate(title="renamed", parent_id=b.id)
-        )
+        moved = svc.update_document(child.id, DocumentUpdate(title="renamed", parent_id=b.id))
 
         assert moved.title == "renamed"
         assert moved.parent_id == b.id

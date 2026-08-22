@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from jmfts_core.contracts.index import IndexCreate, IndexResponse
+from jmfts_client.contracts.index import IndexCreate, IndexResponse
 from jmfts_core.registry import expose, register_service
 from jmfts_core.repositories.search import SearchRepository
 

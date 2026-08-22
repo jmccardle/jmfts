@@ -17,7 +17,6 @@ from __future__ import annotations
 import re
 from typing import Iterable, Optional
 
-
 _REF_PATTERN = re.compile(r"\[\[(?:doc:)?(\d+)\]\]")
 
 
@@ -59,9 +58,7 @@ def resolve_references(
         title = lk.get("title") or title_lookup.get(target_id) or f"#{target_id}"
         relation = lk.get("link_type") or "links_to"
         prefix = f"[{n}] " if link_handling == "footnotes" else "- "
-        refs.append(
-            f"{prefix}**{relation}** [{title}](/view/{target_id})"
-        )
+        refs.append(f"{prefix}**{relation}** [{title}](/view/{target_id})")
     for tp in triples:
         n += 1
         obj_id = tp.get("object_id")

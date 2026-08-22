@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from jmfts_core.access import hash_token, require_owner
-from jmfts_core.contracts.access import (
+from jmfts_client.contracts.access import (
     GrantCreate,
     GrantResponse,
     PrincipalCreate,

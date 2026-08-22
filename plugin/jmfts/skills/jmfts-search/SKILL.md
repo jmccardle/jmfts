@@ -69,9 +69,8 @@ Useful flags: `--top-k 5`, `--max-context-tokens 4096`,
 ## What you get back
 
 Each result: `document.id`, `title`, `usetype`, `score`, `content`
-(possibly truncated), `method`. For deeper context use **jmfts-explore**
-on the doc id — `--action get` for the document, `--action ancestors` and
-`--action triples` for its relationships.
+(possibly truncated), `method`. For deeper context use **jmfts-read** on
+the doc id, or **jmfts-explore** for relationships.
 
 ## When to escalate
 

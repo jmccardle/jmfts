@@ -411,19 +411,14 @@ class TestOversizeRootContainer:
     the per-message over-window decision.
     """
 
-    def test_oversize_conversation_ingests_with_root_unembedded(
-        self, db_session, mock_embedding
-    ):
+    def test_oversize_conversation_ingests_with_root_unembedded(self, db_session, mock_embedding):
         # Each message is under the 512-token maxsim window (embeds simply), but 40 of
         # them concatenate to well over the 8192-token document-vector window.
         messages = [
-            ParsedMessage(role="user", content="word " * 300, turn_index=i)
-            for i in range(40)
+            ParsedMessage(role="user", content="word " * 300, turn_index=i) for i in range(40)
         ]
         result = _run(
-            ingest_conversation(
-                db_session, messages, summarize=False, extract_triples=False
-            )
+            ingest_conversation(db_session, messages, summarize=False, extract_triples=False)
         )
 
         repo = DocumentRepository(db_session)
@@ -449,9 +444,7 @@ class TestOversizeRootContainer:
             ParsedMessage(role="assistant", content="A short answer about foxes.", turn_index=1),
         ]
         result = _run(
-            ingest_conversation(
-                db_session, messages, summarize=False, extract_triples=False
-            )
+            ingest_conversation(db_session, messages, summarize=False, extract_triples=False)
         )
         root = DocumentRepository(db_session).get(result.source_document_id)
         assert root.embed is not None
@@ -540,9 +533,7 @@ class TestDocumentCreateEmbedTokens:
         assert DocumentCreate().embed_tokens is True  # backward-compatible default
         assert DocumentCreate(embed_tokens=False).embed_tokens is False
 
-    @pytest.mark.skipif(
-        not (_DB_AVAILABLE and _APP_AVAILABLE), reason="DB or app unavailable"
-    )
+    @pytest.mark.skipif(not (_DB_AVAILABLE and _APP_AVAILABLE), reason="DB or app unavailable")
     def test_route_threads_embed_tokens(self):
         from unittest.mock import patch
 
@@ -550,8 +541,7 @@ class TestDocumentCreateEmbedTokens:
             with TestClient(app, headers=AUTH_HEADERS) as client:
                 r1 = client.post(
                     "/documents",
-                    json={"content": "a small document", "auto_embed": True,
-                          "embed_tokens": False},
+                    json={"content": "a small document", "auto_embed": True, "embed_tokens": False},
                 )
                 assert r1.status_code == 200
                 # embed_document is called with_tokens=False when the caller opts out.

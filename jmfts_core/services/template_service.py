@@ -6,7 +6,7 @@ identical; the only intentional change is that document serialisation in the tem
 converter (deleting ``templates.py``'s local ``_doc_to_doc_response`` — converter 4 of
 4, after which ``DocumentResponse.from_document`` is the ONLY ORM→document-response
 mapping left in the codebase). The template-specific mapping keeps a single home too, as
-``TemplateResponse.from_document`` in ``jmfts_core/contracts/template.py``.
+``TemplateResponse.from_document`` in ``jmfts-client/jmfts_client/contracts/template.py``.
 
 Domain → HTTP mapping is declared per-op in ``@expose(errors=...)`` and keyed by
 EXCEPTION TYPE, so the two hand-written statuses the router raised are reproduced without
@@ -30,9 +30,9 @@ from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
-from jmfts_core.contracts.document import DocumentResponse
-from jmfts_core.contracts.search import SearchResponse, SearchResultItem
-from jmfts_core.contracts.template import (
+from jmfts_client.contracts.document import DocumentResponse
+from jmfts_client.contracts.search import SearchResponse, SearchResultItem
+from jmfts_client.contracts.template import (
     TemplateCreate,
     TemplateRenderRequest,
     TemplateRenderResponse,

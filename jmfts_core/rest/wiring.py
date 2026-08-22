@@ -17,7 +17,7 @@ which exception types become which status codes (subclasses included). A spec's 
 ``status_code`` sets the success status (e.g. 201 Created); unset means FastAPI's default.
 
 One annotation is TRANSLATED rather than mirrored: a parameter typed
-``jmfts_core.contracts.upload.UploadedFile`` is republished to FastAPI as
+``jmfts_client.contracts.upload.UploadedFile`` is republished to FastAPI as
 ``fastapi.UploadFile`` and converted back before the service sees it. That is what lets a
 multipart upload be an ordinary ``@expose``'d service method while ``jmfts_core`` stays
 free of any web framework — see the module docstring of ``contracts/upload.py`` for why
@@ -35,9 +35,10 @@ import typing
 from typing import Callable
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi.routing import APIRoute
 from sqlalchemy.orm import Session
 
-from jmfts_core.contracts.upload import UploadedFile
+from jmfts_client.contracts.upload import UploadedFile
 from jmfts_core.database import get_db
 from jmfts_core.registry import REGISTRY, ExposeSpec
 
@@ -181,6 +182,81 @@ def build_exposed_router() -> APIRouter:
             name=spec.name,
         )
     return router
+
+
+class RouteWalkError(RuntimeError):
+    """This walker met a mounting shape it has not been taught to flatten."""
+
+
+def iter_mounted_api_routes(app) -> list[APIRoute]:
+    """Every ``APIRoute`` the app actually serves, in mounting order.
+
+    **Do not iterate ``app.routes`` directly.** It is not a flat list of routes and has
+    not been one since FastAPI 0.141: ``include_router`` now leaves an ``_IncludedRouter``
+    wrapper in ``app.routes`` and keeps the real routes on its ``original_router``. The
+    same app reports 100 ``APIRoute`` objects under fastapi 0.135.3 and 3 under 0.141.1.
+
+    Measured 2026-08-22. Three of those 0.141 failures were loud — ``test_runner_auth``'s
+    vacuity guard, and ``scripts/generate_client`` refusing to render a client from 0
+    joined routes. The fourth was not: ``test_api_parity``'s straggler check iterates
+    every mounted route looking for hand-written ones that escaped ``@expose``, found
+    three infra routes instead of a hundred, and PASSED. A seal that silently inspects
+    nothing is worse than one that breaks, so the traversal lives here once rather than
+    being open-coded at each call site where it can rot separately.
+
+    Walks recursively and de-duplicates, so it is correct on both shapes: a FastAPI that
+    flattens returns its routes directly, and one that wraps is followed through the
+    wrapper.
+    """
+    found: list[APIRoute] = []
+    seen: set[int] = set()
+
+    def walk(routes) -> None:
+        for route in routes:
+            if isinstance(route, APIRoute):
+                if id(route) not in seen:
+                    seen.add(id(route))
+                    found.append(route)
+                continue
+
+            # The 0.141 wrapper: no `.routes` of its own, the real ones hang off
+            # `original_router`.
+            inner = getattr(route, "original_router", None)
+            if inner is not None:
+                _refuse_a_prefix_we_cannot_compose(route)
+                walk(inner.routes)
+                continue
+
+            # A Mount, a sub-application, or an older FastAPI's nested router.
+            nested = getattr(route, "routes", None)
+            if nested is not None:
+                walk(nested)
+
+    walk(app.routes)
+    return found
+
+
+def _refuse_a_prefix_we_cannot_compose(wrapper) -> None:
+    """Raise if a wrapped router was included under a prefix.
+
+    Both of this app's routers are included with no prefix and carry their full path on
+    the route itself, so flattening is a plain collection. A non-empty prefix would mean
+    the served path is the prefix plus the route's own path, and this walker would start
+    reporting paths the app does not serve — which every caller here uses to decide
+    whether a route exists at all.
+
+    There is no such case in the tree to verify a composition against, so this refuses
+    instead of guessing. Teach it the composition when the first prefixed router lands.
+    """
+    context = getattr(wrapper, "include_context", None)
+    prefix = getattr(context, "prefix", "") or ""
+    if prefix:
+        raise RouteWalkError(
+            f"a router was included under the prefix {prefix!r}, and "
+            "iter_mounted_api_routes() has not been taught to compose a prefix with the "
+            "paths beneath it. Teach it (jmfts_core/rest/wiring.py) rather than removing "
+            "this check: the callers use the returned paths to decide what is mounted."
+        )
 
 
 def build_openapi_tags() -> list[dict[str, str]]:

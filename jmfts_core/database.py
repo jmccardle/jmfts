@@ -12,6 +12,7 @@ from jmfts_core.config import get_settings
 
 class Base(DeclarativeBase):
     """SQLAlchemy declarative base"""
+
     pass
 
 

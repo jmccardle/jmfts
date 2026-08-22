@@ -1,0 +1,367 @@
+# The fidelity corpus — docs/OFFICE_SPEC.md Part 10, docs/CORPUS.md.
+#
+# One [[file]] per corpus file. `tests/corpus/manifest.py` documents the record and is the
+# only thing that reads this; `tests/corpus/test_manifest.py` holds it against the bytes.
+#
+# Every record here is `origin = "generated"`: the bytes are built by
+# `tests/corpus/fixtures.py` and no binary is committed. `sha256` is therefore a
+# DETERMINISM PIN — if a fixture's hash moves, the generator changed, and the diff should
+# say why. Imported records (Apache POI, LibreOffice QA, EDGAR) get `origin = "imported"`,
+# a `url`, and the upstream licence; docs/CORPUS.md says what a fetch step would have to do
+# and why it is not this lane's job.
+#
+# `format` is what jmfts_core.probe.detect_format ANSWERS, not what the extension claims.
+# Where those differ the note says so — that divergence is a fact worth pinning.
+
+[[file]]
+name = "minimal.docx"
+origin = "generated"
+source = "tests/corpus/fixtures.py:minimal_docx"
+licence = "MIT"
+sha256 = "2a35e8644cf1d3d6bc92490aa9f8403c27cabd520e1210dde772314e9e1d9ad4"
+size = 1745
+format = "docx"
+tags = ["has_content_types", "has_heading_styles"]
+expect = "parses"
+minimal = true
+note = """
+The control, and the tier-1 and tier-2 subject. Four parts, every member STORED, one
+outline-styled heading and one paragraph whose text is the word tier 2 rewrites. Without a
+package that must parse, every must-reject result below is consistent with a reader that
+rejects everything.
+"""
+
+[[file]]
+name = "minimal.xlsx"
+origin = "generated"
+source = "tests/corpus/fixtures.py:minimal_xlsx"
+licence = "MIT"
+sha256 = "e0869188f515e0b06d4c828975fd94678d7a82fbca350bc6630418a1597fb8c2"
+size = 1688
+format = "xlsx"
+tags = ["has_content_types", "has_sheets"]
+expect = "parses"
+minimal = true
+note = """
+One sheet declared in xl/workbook.xml — the member detect_format identifies xlsx by, and
+the element Part 2's has_sheets counts. Part 11 step 6 and Part 12's threshold calibration
+both start here, and neither can start from a spreadsheet nobody can open.
+"""
+
+[[file]]
+name = "minimal.pptx"
+origin = "generated"
+source = "tests/corpus/fixtures.py:minimal_pptx"
+licence = "MIT"
+sha256 = "d6021c976c37b9b50a4645d9950d8772d1f95438483da297ea43362c0928cd69"
+size = 1985
+format = "pptx"
+tags = ["has_content_types", "has_slides"]
+expect = "parses"
+minimal = true
+note = """
+One slide, so ppt/slides/slide*.xml is a non-empty glob. The third format exists here for
+the same reason as the second: detect_format's three _ZIP_MEMBERS rows are three separate
+claims and a corpus that only carries docx tests one of them.
+"""
+
+[[file]]
+name = "deflated.docx"
+origin = "generated"
+source = "tests/corpus/fixtures.py:deflated_docx"
+licence = "MIT"
+sha256 = "067fd54e22f4baf4c0ca980778af38ef1b8b3b1028f15c954a6c418af91343a1"
+size = 1250
+format = "docx"
+tags = ["has_content_types", "has_heading_styles"]
+expect = "parses"
+minimal = true
+note = """
+minimal.docx's parts, deflated instead of stored: identical content, different bytes. The
+pair is what makes "compression drift" a detectable event rather than a phrase — a repack
+that decompresses and recompresses turns one of these into the other while every part still
+reads the same.
+"""
+
+[[file]]
+name = "byte-order-mark.docx"
+origin = "generated"
+source = "tests/corpus/fixtures.py:byte_order_mark_docx"
+licence = "MIT"
+sha256 = "b70d075dba88fd273957070264d4048d3c5df25a73a812916f541b2282769053"
+size = 1748
+format = "docx"
+tags = ["has_content_types", "has_heading_styles", "has_byte_order_mark"]
+expect = "parses"
+minimal = true
+note = """
+A UTF-8 BOM before the XML declaration in word/document.xml. Legal, and Word writes one.
+It is here as the case a reader gets wrong by being too STRICT: anything comparing the
+first bytes of a part against `<?xml` rejects a valid document.
+"""
+
+[[file]]
+name = "pdf-named.docx"
+origin = "generated"
+source = "tests/corpus/fixtures.py:pdf_named_docx"
+licence = "MIT"
+sha256 = "7d16a842aababb340f821968f8b7568d19ded8d517b1a42dda9f8a1ec96cdc4a"
+size = 612
+format = "pdf"
+declared_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+tags = ["declared_type_disagrees", "has_text_layer"]
+expect = "parses"
+minimal = true
+note = """
+A one-page PDF that will be uploaded as a .docx. `format` is pdf because the magic bytes
+are, and probe's own module docstring names the hazard this pins: trusting the declared
+type silently is how a file that is really something else becomes an unexplained extraction
+failure a long way downstream. It PARSES — as the PDF it is — and mime_agrees is False.
+"""
+
+[[file]]
+name = "macros.docx"
+origin = "generated"
+source = "tests/corpus/fixtures.py:macros_docx"
+licence = "MIT"
+sha256 = "3951129c1e2da63a4663ec3945637e8ef6dc20c351dfde880b07fb747bd421a5"
+size = 1923
+format = "docx"
+tags = ["has_content_types", "has_heading_styles", "has_macros"]
+expect = "parses-lossy"
+minimal = true
+note = """
+Carries word/vbaProject.bin. Nothing here executes anything, so this is not a hazard to the
+appliance — it is a fact the operator wants, and Part 2 names has_macros for it. Lossy
+because the macro project is content the extraction does not carry, and Part 3 requires
+that to be counted rather than dropped.
+"""
+
+[[file]]
+name = "unknown-part.docx"
+origin = "generated"
+source = "tests/corpus/fixtures.py:unknown_part_docx"
+licence = "MIT"
+sha256 = "73d5ea0f6308e49b12f5bd6b0bcab52e4d5806a579d3c7dc8c70053cf515fedd"
+size = 2012
+format = "docx"
+tags = ["has_content_types", "has_heading_styles"]
+expect = "parses-lossy"
+minimal = true
+note = """
+A w:altChunk referencing an embedded HTML part. Part 3: python-docx ignores altChunk, so a
+reader that says nothing about it silently drops a whole embedded document. Lossy is the
+generous reading; Part 3 argues extraction should fail instead, and this is the file that
+decides which behaviour ships.
+"""
+
+[[file]]
+name = "zip-slip-relative.docx"
+origin = "generated"
+source = "tests/corpus/fixtures.py:zip_slip_relative_docx"
+licence = "MIT"
+sha256 = "e13e56eafb417318319fbcf8584a9b50aa6d0f34c8bea74f4afaaa240666bd8f"
+size = 1917
+format = "docx"
+tags = ["has_content_types", "has_heading_styles", "has_unsafe_member_paths"]
+expect = "must-reject"
+minimal = true
+note = """
+A member named ../../../../tmp/jmfts-zip-slip.txt, in an otherwise valid package. The
+danger is that every DECLARED part is exactly where a reader expects, so a reader that
+extracts to a temporary directory first writes outside it and then succeeds.
+"""
+
+[[file]]
+name = "zip-slip-absolute.zip"
+origin = "generated"
+source = "tests/corpus/fixtures.py:zip_slip_absolute_zip"
+licence = "MIT"
+sha256 = "2c9b51ef35f40799fdf7f56eeffbd265e8aef11f637b74ee09b8501cecdc8f8c"
+size = 304
+format = "zip"
+tags = ["has_unsafe_member_paths"]
+expect = "must-reject"
+minimal = true
+note = """
+The other half of the same attack: /etc/cron.d/jmfts-zip-slip, an absolute path with no
+".." for a filter to catch. A path check that only rejects parent traversal passes this
+file, which is why both are here.
+"""
+
+[[file]]
+name = "duplicate-entries.docx"
+origin = "generated"
+source = "tests/corpus/fixtures.py:duplicate_entries_docx"
+licence = "MIT"
+sha256 = "6f23bcdd0be5e6fdf00c774711f32a2bb9c9cb5d1c932406f24258125394647a"
+size = 2096
+format = "docx"
+tags = ["has_content_types", "has_heading_styles", "has_duplicate_members"]
+expect = "must-reject"
+minimal = true
+note = """
+word/document.xml twice, with different text. Which copy is the document is not defined:
+zipfile resolves a name to the LAST entry, other readers take the first. A package whose
+text depends on the reader has no text, so it cannot be ingested honestly — and it must not
+be ingested as whichever copy we happened to get.
+"""
+
+[[file]]
+name = "missing-content-types.docx"
+origin = "generated"
+source = "tests/corpus/fixtures.py:missing_content_types_docx"
+licence = "MIT"
+sha256 = "8100519aa0fb2f8907752faad11ecee483769fa00f90c6577fac72d5a4a3b525"
+size = 1124
+format = "docx"
+tags = ["has_heading_styles"]
+expect = "must-reject"
+minimal = true
+note = """
+Every part except [Content_Types].xml — note the ABSENT tag, which is how this record says
+it. OPC requires that part; without it the ZIP is not an OOXML package however well-formed
+its XML. detect_format still answers docx, because it identifies from word/document.xml,
+and that divergence between "is a docx" and "is a valid package" is the fixture.
+"""
+
+[[file]]
+name = "central-directory-mismatch.docx"
+origin = "generated"
+source = "tests/corpus/fixtures.py:central_directory_mismatch_docx"
+licence = "MIT"
+sha256 = "62e2439e90088ae6a51bbeaca670298e9d6eadc3c5aae9da6b82162724036cc8"
+size = 1745
+format = "docx"
+tags = ["has_content_types", "is_damaged"]
+expect = "must-reject"
+minimal = true
+note = """
+The central directory lists word/document.xml; its local header signature has been
+overwritten. The archive opens, namelist() is complete, detect_format answers docx — and
+the file only falls apart when a part is actually read. Anything that decides a document is
+ingestible from the directory alone passes this file.
+"""
+
+[[file]]
+name = "truncated.docx"
+origin = "generated"
+source = "tests/corpus/fixtures.py:truncated_docx"
+licence = "MIT"
+sha256 = "e4feb38c2694b72f3fe847fc95810ab0989ca913425a9a07780458e3cfa0a747"
+size = 750
+format = "zip"
+tags = ["is_damaged"]
+expect = "must-reject"
+minimal = true
+note = """
+The first 60% of deflated.docx: local headers, no central directory. An upload that died in
+transit. `format` is zip, NOT docx, and that is the pinned surprise — _refine_zip cannot
+open the archive, so it reports what it can prove rather than what the name suggests.
+"""
+
+[[file]]
+name = "empty.zip"
+origin = "generated"
+source = "tests/corpus/fixtures.py:empty_zip"
+licence = "MIT"
+sha256 = "8739c76e681f900923b900c9df0ef75cf421d39cabb54650c4b9ad19b6a76d85"
+size = 22
+format = "zip"
+tags = []
+expect = "must-reject"
+minimal = true
+note = """
+A valid archive with no members: 22 bytes of end-of-central-directory. It opens, it lists
+nothing, it extracts nothing, and a pipeline that treats "no parts" as "no content" settles
+a document with zero chunks while every task reports completed. No tags, deliberately —
+there is nothing in it to have a feature.
+"""
+
+[[file]]
+name = "entity-expansion.docx"
+origin = "generated"
+source = "tests/corpus/fixtures.py:entity_expansion_docx"
+licence = "MIT"
+sha256 = "5076240e4ff105cf4827d3e487c9e149733668097a5657d90446853f718ec239"
+size = 1767
+format = "docx"
+tags = ["has_content_types", "has_entity_declaration"]
+expect = "must-reject"
+minimal = true
+note = """
+Billion laughs, three levels — ten to the third, not ten to the ninth, because the finding
+is "an entity declaration reached the parser" and a fixture that has to allocate a gigabyte
+to say so cannot run in a unit test. Measured: xml.etree.ElementTree.fromstring expands
+this quietly, which is why tests/corpus/xmlsafe.py exists.
+"""
+
+[[file]]
+name = "external-entity.docx"
+origin = "generated"
+source = "tests/corpus/fixtures.py:external_entity_docx"
+licence = "MIT"
+sha256 = "3620e8dbf1e28a4b6eacde334a5f13405ef33fc720351e37ffa103d46f19ca6a"
+size = 1695
+format = "docx"
+tags = ["has_content_types", "has_entity_declaration", "has_external_entity"]
+expect = "must-reject"
+minimal = true
+note = """
+XXE: an entity whose replacement text is file:///etc/passwd. expat happens to refuse this
+one by default, which makes it the more dangerous half of the pair to reason about — the
+half that is safe by accident, next to the half that is not.
+"""
+
+[[file]]
+name = "deep-nesting.docx"
+origin = "generated"
+source = "tests/corpus/fixtures.py:deep_nesting_docx"
+licence = "MIT"
+sha256 = "29ab288cdd9c83e191483bcc3b8328800b59a7c4bd18eae100f74156c9294681"
+size = 22097
+format = "docx"
+tags = ["has_content_types", "has_deep_nesting"]
+expect = "must-reject"
+minimal = true
+note = """
+500 nested w:tbl/w:tr/w:tc, in valid entity-free XML. No declaration to refuse and nothing
+to expand: the cost is the recursion, which a C parser pays as a stack overflow rather than
+an exception. Real Word nesting reaches the low tens.
+"""
+
+[[file]]
+name = "invalid-utf8.docx"
+origin = "generated"
+source = "tests/corpus/fixtures.py:invalid_utf8_docx"
+licence = "MIT"
+sha256 = "a5d358cd7f346434a56e741845ef02834bddac4ec34d9a365681ce08049e872a"
+size = 1746
+format = "docx"
+tags = ["has_content_types", "has_invalid_encoding"]
+expect = "must-reject"
+minimal = true
+note = """
+A part that declares UTF-8 and carries a UTF-16 BOM in the middle of a word — the shape a
+mis-transcoded file actually has, rather than one random bad byte. probe._probe_text
+decodes strictly for the same reason: UnicodeDecodeError is a ValueError, so the failure is
+classified PERMANENT and recorded once instead of retried.
+"""
+
+[[file]]
+name = "extreme-compression.zip"
+origin = "generated"
+source = "tests/corpus/fixtures.py:extreme_compression_zip"
+licence = "MIT"
+sha256 = "4668e0e4bbd3571c94174b7ea39fb963a407b7c00d5c5ab7cba3aaefa9ed6c54"
+size = 1149
+format = "zip"
+tags = ["has_extreme_compression"]
+expect = "must-reject"
+minimal = true
+note = """
+One megabyte of zeros in about a kilobyte. Not a zip bomb — a bomb is nested and unbounded
+and this repository has no business carrying one. It is the RATIO, which is the measurable
+thing: an extraction budget has to be decided from the declared uncompressed size before
+decompressing, and this file is what says whether it was.
+"""

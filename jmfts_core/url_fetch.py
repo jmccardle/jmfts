@@ -75,9 +75,7 @@ def fetch_url(
         raise UrlFetchError(f"disallowed content-type: {ctype!r}")
 
     if len(resp.content) > max_bytes:
-        raise UrlFetchError(
-            f"response too large: {len(resp.content)} bytes (cap={max_bytes})"
-        )
+        raise UrlFetchError(f"response too large: {len(resp.content)} bytes (cap={max_bytes})")
 
     return resp.text, ctype
 
@@ -101,21 +99,18 @@ def _is_private_host(host: str) -> bool:
 
 
 def html_to_markdown(html: str) -> str:
-    """HTML → markdown using ``markdownify``. Falls back to text if unavailable."""
-    try:
-        from markdownify import markdownify as _mdify
-    except ImportError:
-        # Fallback: strip tags crudely, just so the pipeline keeps working.
-        logger.warning("markdownify not installed; emitting stripped text")
-        return _strip_tags(html)
+    """HTML → markdown using ``markdownify``.
+
+    ``markdownify>=0.11`` is a BASE dependency in ``pyproject.toml``, so an ``ImportError``
+    here means the install is broken, not that a feature is optional. This used to catch it
+    and fall back to a regex that deleted every tag — leaving prose with no headings, no
+    lists and no links — which then chunked, embedded and settled looking exactly like a
+    successful ingest. A degraded document that reports success is the failure this
+    appliance is built to avoid, so the import is allowed to raise and the node records why.
+    """
+    from markdownify import markdownify as _mdify
 
     # Strip <script> and <style> first to avoid leaking JS/CSS into the body.
     html = re.sub(r"<script[\s\S]*?</script>", "", html, flags=re.IGNORECASE)
     html = re.sub(r"<style[\s\S]*?</style>", "", html, flags=re.IGNORECASE)
     return _mdify(html, heading_style="ATX")
-
-
-def _strip_tags(html: str) -> str:
-    text = re.sub(r"<[^>]+>", " ", html)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()

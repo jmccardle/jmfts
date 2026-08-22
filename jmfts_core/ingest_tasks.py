@@ -39,10 +39,10 @@ from typing import Callable, Optional, Protocol
 
 from sqlalchemy.orm import Session
 
-from jmfts_core.contracts.attempt import AttemptRecord, param_fingerprint
+from jmfts_client.contracts.attempt import AttemptRecord, param_fingerprint
 from jmfts_core.ingest_options import resolve_options
 from jmfts_core.models.document import Document
-from jmfts_core.models.task_queue import WRITE_CHILDREN, WRITE_SELF, TaskQueue
+from jmfts_core.models.task_queue import WRITE_CHILDREN, WRITE_SELF, WRITE_SUBTREE, TaskQueue
 from jmfts_core.probe import PROBERS_AVAILABLE, detect_format, probe_patterns
 from jmfts_core.repositories.blob import BlobRepository
 from jmfts_core.repositories.document import DocumentRepository
@@ -59,6 +59,17 @@ TASK_STRUCTURE_DECLARED = "structure:declared"
 TASK_STRUCTURE_INFERRED = "structure:inferred"
 TASK_EXTRACT_TABLES = "extract:tables"
 TASK_EXTRACT_IMAGES = "extract:images"
+
+#: ``OFFICE_SPEC.md`` Part 5, not ``INGEST_SPEC.md`` Part 4 — the first task in this table
+#: that belongs to the office/citation plan rather than to the original file pipeline. It
+#: puts a page and a rectangle on every chunk under a file node
+#: (:mod:`jmfts_core.citation_tasks`).
+#:
+#: The same string appears in
+#: :data:`~jmfts_core.models.task_queue.ADVISORY_TASK_TYPES`, which cannot import this
+#: module (the dependency runs the other way), and ``tests/test_citation_task.py`` pins the
+#: two spellings together.
+TASK_CITATION = "citation"
 
 #: The two rollup tasks, which are NOT in :data:`TASK_ROWS`. Part 4 lists
 #: ``structure:semantic`` under structuring, and 11.4 moves it here for the reason 5.4
@@ -230,6 +241,36 @@ DECLARED_STRUCTURE_PATTERN: dict[str, str] = {
 #: satisfied, so an unknown format gets the inferred rung rather than neither rung.
 DECLARED_STRUCTURE = "@declared_structure"
 
+#: Which pattern, per format, means "this file has a per-page geometry a rectangle can be
+#: expressed in". The condition ``OFFICE_SPEC.md`` Part 5's ``citation`` row is predicated
+#: on, and the same shape as :data:`DECLARED_STRUCTURE_PATTERN` for the same reason: it is a
+#: fact about the FORMAT, and a row that named a bare pattern could not express it.
+#:
+#: PDF is the only entry, and the absence of the others is the schedule. Part 11 orders
+#: citation-for-PDF (step 2) before any office format is read, because for a source PDF the
+#: source anchor and the rendition anchor are the same object — the geometry is already
+#: computed during extraction — while ``docx``, ``pptx`` and ``xlsx`` have no pages at all
+#: until LibreOffice paginates them (step 7's ``render:pdf``). An office format therefore
+#: reaches this row only once it can carry a rendition, and until then the row is reported
+#: as impossible for it rather than as a condition that happened to be false.
+PAGE_GEOMETRY_PATTERN: dict[str, str] = {
+    "pdf": "has_text_layer",
+}
+
+#: Stands in a row's ``requires``/``forbids`` for "whatever pattern says THIS format carries
+#: a page geometry", resolved through the dict above.
+PAGE_GEOMETRY = "@page_geometry"
+
+#: Every sentinel, and the per-format dict that resolves it. A registry rather than a chain
+#: of ``if name == ...`` so that :func:`_resolve_pattern` and the ``EXPLAIN`` path cannot
+#: come to know different numbers of sentinels — an unresolved sentinel silently read as a
+#: literal pattern name would make a row impossible-for-every-format with no reason anybody
+#: could read.
+SENTINEL_PATTERNS: dict[str, dict[str, str]] = {
+    DECLARED_STRUCTURE: DECLARED_STRUCTURE_PATTERN,
+    PAGE_GEOMETRY: PAGE_GEOMETRY_PATTERN,
+}
+
 #: Why a task whose Part 4 condition HOLDS is nevertheless not enqueued: its handler
 #: belongs to a later phasing step. Kept as data rather than as a comment because it is
 #: written into the node's attempt log, where it is the answer to "why did nothing happen
@@ -275,10 +316,28 @@ class TaskRow:
     #: refuses a row that could be enqueued without one, rather than defaulting to a mode
     #: that would reserve a region the task never writes.
     write_mode: Optional[str] = None
-    #: Rows — earlier in :data:`TASK_ROWS` — that must be eligible before this one is.
+    #: Rows — earlier in :data:`TASK_ROWS` — that must ALL be eligible before this one is.
     #: Resolved to real queue dependencies by ``enqueue_batch`` (spec 5.5).
     after: tuple[str, ...] = ()
-    #: Every named pattern must be truthy. :data:`DECLARED_STRUCTURE` resolves per format.
+    #: Rows — earlier in :data:`TASK_ROWS` — of which AT LEAST ONE must be eligible. This
+    #: row is then ordered after every one of them that is.
+    #:
+    #: A second field rather than a looser reading of ``after``, because the two express
+    #: different dependencies and a row needs to be able to state either. ``after`` is a
+    #: conjunction: ``structure:declared`` needs ``extract:text`` and there is no
+    #: alternative to it. ``after_any`` is a disjunction over rows that are ALTERNATIVES to
+    #: each other — the two structure rungs, of which exactly one is ever eligible for a
+    #: document (they read the same sentinel with opposite signs). ``citation`` comes after
+    #: whichever of them wrote the chunks, and expressing that as ``after`` would name two
+    #: rows that can never both be eligible, so the row would never fire and the table would
+    #: say the opposite of what it meant.
+    #:
+    #: The disjunction is resolved to real queue dependencies exactly like ``after``: the
+    #: names that came out eligible become this task's ``dependencies``, so the queue still
+    #: gates the claim on those rows being ``completed`` rather than merely enqueued.
+    after_any: tuple[str, ...] = ()
+    #: Every named pattern must be truthy. A name in :data:`SENTINEL_PATTERNS` resolves per
+    #: format first, and a format with no entry makes the row impossible rather than false.
     #:
     #: A row may name a pattern its predecessor already requires — ``has_text_layer`` on
     #: the rows that come after ``extract:text`` — and that repetition is deliberate. It
@@ -316,19 +375,24 @@ TASK_ROWS: tuple[TaskRow, ...] = (
     # node's own `content` and `extraction` block and creates nothing. The nodes are made
     # by the structure task that follows it, which is the one that declares `children`.
     #
-    # `has_markup` is a statement about what the extractors this appliance has can do, and
-    # it is a `forbids` rather than a deferral because it is decided per FILE and not per
-    # format: HTML arrives as `text` (11.3's measurement), so the row that handles prose
-    # and the row that would handle markup are the same row seen from two files. The text
-    # extractor is a decoder; decoding HTML yields HTML, which would then be chunked with
-    # its tags intact and settle looking exactly like a success. No format reports the
-    # pattern except `text`, so this constrains nothing else — an absent pattern is falsy
-    # and the prohibition is satisfied.
+    # `has_markup` USED TO BE a `forbids` here, and is not one any more. The reasoning it
+    # carried was sound and is still true: HTML arrives as `text` (11.3's measurement), and
+    # the text extractor is a decoder, so decoding HTML yields HTML — which would chunk with
+    # its tags intact and settle looking exactly like a success. What was missing was not
+    # the prohibition but the reader. An appliance with no HTML reader had only one way to
+    # refuse, and refusing produced a document with no content and no children while the
+    # upload returned 200 and every task reported "completed".
+    #
+    # `structure_tasks.MARKUP_EXTRACTOR` is that reader now, so the pattern SELECTS a
+    # reader instead of blocking the row, and the hazard the prohibition guarded against is
+    # answered by conversion rather than by refusal. The pattern is still measured, still
+    # reported, and still the thing that decides — it just decides which reader rather than
+    # whether. This row therefore has no `forbids` at all: every file with a text layer
+    # gets an extractor, and a format with no reader still fails loudly inside the handler.
     TaskRow(
         TASK_EXTRACT_TEXT,
         write_mode=WRITE_SELF,
         requires=("has_text_layer",),
-        forbids=("has_markup",),
     ),
     # Part 4 marks ocr "out of scope for v1, recorded as skipped", so it is the one task
     # the spec itself says to log as never-attempted rather than to enqueue.
@@ -366,13 +430,57 @@ TASK_ROWS: tuple[TaskRow, ...] = (
         forbids=(DECLARED_STRUCTURE,),
         params_key="structure",
     ),
+    # `pages_with_tables` is a LIST of page numbers, and this row reads it for TRUTHINESS
+    # exactly as it read the `has_tables` boolean it replaced: an empty list blocks the
+    # row, a non-empty one satisfies it. The list is carried rather than a flag because
+    # the task this row schedules wants to be one task per page that has tables, and a
+    # boolean threw away an answer the scan had already produced.
+    #
+    # PROBE DOES NOT REPORT THIS PATTERN. `extract:text` does, because the pass that
+    # renders tables into the markdown is the only one that must find them anyway (see
+    # `jmfts_core.probe._probe_pdf` for the scan that removed, and
+    # `pdf_to_markdown`'s `pages_with_tables` for where it went). So this row is NOT
+    # decidable at probe time, and at probe time `plan_after_probe` says exactly that —
+    # "patterns.pages_with_tables was not measured" — rather than claiming the document
+    # has no tables. It is the same shape as the lower structure rungs, which Part 4
+    # predicates on a measurement the rung above produces: the row declares what the task
+    # needs, and the task that learns the answer is the one that can act on it.
+    #
+    # The row stays here rather than moving out of the table with `structure:semantic`,
+    # because this is where a task's requirement is DECLARED, and deleting the row would
+    # leave `extract:tables` with its condition written nowhere. Passing a pattern set
+    # that has the key — a caller's hypothesis to `explain_plan`, or a node's own
+    # `extraction` record read back — decides the row normally.
     TaskRow(
         TASK_EXTRACT_TABLES,
         write_mode=WRITE_CHILDREN,
         after=(TASK_EXTRACT_TEXT,),
-        requires=("has_text_layer", "has_tables"),
+        requires=("has_text_layer", "pages_with_tables"),
     ),
     TaskRow(TASK_EXTRACT_IMAGES, write_mode=WRITE_CHILDREN, requires=("has_images",)),
+    # OFFICE_SPEC.md Part 5. Last in the table because it is the only row that runs after
+    # the tree exists rather than in order to build it, and because `after_any` may only
+    # name rows above.
+    #
+    # `subtree`, NOT the `children` Part 5's table writes, and this is the one place where
+    # meeting the code contradicted the spec. `children` is "this node, plus nodes that have
+    # no children of their own" — the node's OWN children. The chunks citation annotates are
+    # its children only when a region had no title; under a titled section they are
+    # grandchildren, and the same document routinely has both. `subtree` is the mode that
+    # actually describes what this task writes, and declaring the narrower one would have
+    # let citation run concurrently with the `embed` task on a chunk it is writing to.
+    #
+    # The cost is real and is worth stating: `subtree` reserves the whole file, so citation
+    # cannot be claimed while any chunk below is embedding, and no chunk can embed while it
+    # runs. It waits for the embeds to drain, then runs once over an in-memory block map
+    # with no model and no network. That is the right side of the trade — the alternative is
+    # a reservation that does not cover the writes it is for.
+    TaskRow(
+        TASK_CITATION,
+        write_mode=WRITE_SUBTREE,
+        after_any=(TASK_STRUCTURE_DECLARED, TASK_STRUCTURE_INFERRED),
+        requires=(PAGE_GEOMETRY,),
+    ),
 )
 
 
@@ -383,9 +491,10 @@ def _resolve_pattern(name: str, fmt: str) -> Optional[str]:
     no pattern for this format" — which is what lets the caller phrase that case as the
     different thing it is, rather than as a pattern that happened to be false.
     """
-    if name != DECLARED_STRUCTURE:
+    per_format = SENTINEL_PATTERNS.get(name)
+    if per_format is None:
         return name
-    return DECLARED_STRUCTURE_PATTERN.get(fmt)
+    return per_format.get(fmt)
 
 
 def _dependency_reason(task: str, dependency: str) -> str:
@@ -397,6 +506,16 @@ def _dependency_reason(task: str, dependency: str) -> str:
     return f"{dependency} is not eligible, and {task} depends on it"
 
 
+def _alternative_dependency_reason(task: str, alternatives: tuple[str, ...]) -> str:
+    """Why a row whose ``after_any`` set came out empty is not applicable either.
+
+    A different sentence from :func:`_dependency_reason` because it is a different fact:
+    not "this one predecessor did not fire" but "none of the alternatives did", and naming
+    only one of them would read as though the others had been ignored.
+    """
+    return f"none of {list(alternatives)} is eligible, and {task} runs after whichever does"
+
+
 def _no_declared_structure_reason(fmt: str) -> str:
     """Why a row requiring :data:`DECLARED_STRUCTURE` can never fire for this format.
 
@@ -406,6 +525,37 @@ def _no_declared_structure_reason(fmt: str) -> str:
     sentence for the reason.
     """
     return f"format {fmt!r} declares no structure pattern this spec knows about"
+
+
+def _no_page_geometry_reason(fmt: str) -> str:
+    """Why a row requiring :data:`PAGE_GEOMETRY` can never fire for this format.
+
+    The same fact as above about a different sentinel: :data:`PAGE_GEOMETRY_PATTERN` has no
+    entry, so no bytes of this format can report a page a rectangle could sit on.
+    """
+    return f"format {fmt!r} carries no page geometry a citation rectangle could address"
+
+
+#: sentinel -> the sentence explaining why a row requiring it is impossible for a format.
+#: Beside :data:`SENTINEL_PATTERNS` and keyed the same way, so a sentinel cannot be added to
+#: one without the other: a requirement that no format can satisfy and no sentence to say
+#: why is a row that vanishes from every plan with an empty reason.
+SENTINEL_REASONS: dict[str, Callable[[str], str]] = {
+    DECLARED_STRUCTURE: _no_declared_structure_reason,
+    PAGE_GEOMETRY: _no_page_geometry_reason,
+}
+
+
+def _unsatisfiable_sentinel(row: TaskRow, fmt: str) -> Optional[str]:
+    """The sentinel in ``row.requires`` that this format has no pattern for, if any.
+
+    Only ``requires`` can make a row impossible: a sentinel in ``forbids`` with no entry
+    prohibits nothing and is always satisfied (see :data:`DECLARED_STRUCTURE`).
+    """
+    for name in row.requires:
+        if _resolve_pattern(name, fmt) is None:
+            return name
+    return None
 
 
 def _blocking_reason(row: TaskRow, fmt: str, patterns: dict, eligible: set[str]) -> Optional[str]:
@@ -421,12 +571,25 @@ def _blocking_reason(row: TaskRow, fmt: str, patterns: dict, eligible: set[str])
         if dependency not in eligible:
             return _dependency_reason(row.task, dependency)
 
+    if row.after_any and not any(name in eligible for name in row.after_any):
+        return _alternative_dependency_reason(row.task, row.after_any)
+
     for name in row.requires:
         pattern = _resolve_pattern(name, fmt)
         if pattern is None:
-            return _no_declared_structure_reason(fmt)
-        if not patterns.get(pattern):
-            return f"patterns.{pattern} is false or absent"
+            return SENTINEL_REASONS[name](fmt)
+        # ABSENT AND FALSE ARE DIFFERENT ANSWERS, and collapsing them into one sentence
+        # was survivable only while every pattern a row named was one probe always
+        # reported. `pages_with_tables` is not: probe stopped measuring it (see
+        # `jmfts_core.probe._probe_pdf`), so at probe time the key is missing, and
+        # "no tables were found in this document" would be a confident wrong answer to
+        # "nobody has looked yet". 11.2 draws the same line for `probe_failed`: a plan
+        # built on a pattern set that could not be measured must say so rather than read
+        # as a measurement that came back empty.
+        if pattern not in patterns:
+            return f"patterns.{pattern} was not measured"
+        if not patterns[pattern]:
+            return f"patterns.{pattern} is false"
 
     for name in row.forbids:
         pattern = _resolve_pattern(name, fmt)
@@ -508,7 +671,10 @@ def plan_after_probe(fmt: str, patterns: dict, options: Optional[dict] = None) -
                 # Copied, not shared: `resolved` is about to be read again by the next row
                 # naming the same group, and this dict is going onto a queue row's params.
                 params=dict(resolved[row.params_key]) if row.params_key else {},
-                after=row.after,
+                # `after_any` collapses to the alternatives that actually came out eligible.
+                # In table order, because `enqueue_batch` resolves a name to the id of a
+                # spec EARLIER in the same batch and `eligible_names` is unordered.
+                after=row.after + tuple(name for name in row.after_any if name in eligible_names),
             )
         )
         eligible_names.add(row.task)
@@ -577,7 +743,7 @@ PATTERNS_UNKNOWN = "unknown"
 @dataclass(frozen=True)
 class ExplainedTask:
     """One row of Part 4's table as an ``EXPLAIN`` answer. Transport-neutral, like
-    :class:`DownstreamPlan`; ``jmfts_core.contracts.explain`` is the wire form.
+    :class:`DownstreamPlan`; ``jmfts_client.contracts.explain`` is the wire form.
 
     ``requires``/``forbids`` are RESOLVED for the format being explained — the
     :data:`DECLARED_STRUCTURE` sentinel is replaced by the pattern it names, and a sentinel
@@ -598,6 +764,10 @@ class ExplainedTask:
     reason: Optional[str] = None
     write_mode: Optional[str] = None
     after: tuple[str, ...] = ()
+    #: Alternatives, of which one suffices — see :attr:`TaskRow.after_any`. Kept apart from
+    #: :attr:`after` here for the reason it is kept apart there: a reader who saw both
+    #: structure rungs in one ``after`` list would conclude the row can never fire.
+    after_any: tuple[str, ...] = ()
     requires: tuple[str, ...] = ()
     forbids: tuple[str, ...] = ()
     #: The resolved options for the row's ``params_key``; ``{}`` for a row that takes none.
@@ -648,15 +818,16 @@ def _consulted_patterns(fmt: str) -> set[str]:
     return consulted
 
 
-def _is_impossible(row: TaskRow, fmt: str) -> bool:
-    """Whether ``row``'s condition can never hold for ``fmt``, whatever the bytes are.
+def _impossible_after(row: TaskRow, impossible: set[str]) -> bool:
+    """Whether ``row``'s ordering alone makes it impossible.
 
-    Only ``requires`` can make a row impossible. A :data:`DECLARED_STRUCTURE` sentinel with
-    no entry for the format names a pattern that does not exist, so no probe of any file of
-    this format can report it true; the same sentinel in ``forbids`` prohibits nothing and
-    is always satisfied (see :data:`DECLARED_STRUCTURE`).
+    ``after`` is a conjunction, so ONE impossible predecessor is enough. ``after_any`` is a
+    disjunction, so it takes ALL of them — a row whose alternatives include one that can
+    still fire is not impossible, it is merely undecided.
     """
-    return any(_resolve_pattern(name, fmt) is None for name in row.requires)
+    if any(name in impossible for name in row.after):
+        return True
+    return bool(row.after_any) and all(name in impossible for name in row.after_any)
 
 
 def _explained_row(row: TaskRow, fmt: str, resolved: dict, outcome: str, **kwargs) -> ExplainedTask:
@@ -666,6 +837,7 @@ def _explained_row(row: TaskRow, fmt: str, resolved: dict, outcome: str, **kwarg
         outcome=outcome,
         write_mode=row.write_mode,
         after=row.after,
+        after_any=row.after_any,
         requires=_resolved_names(row.requires, fmt),
         forbids=_resolved_names(row.forbids, fmt),
         params=dict(resolved[row.params_key]) if row.params_key else {},
@@ -702,10 +874,11 @@ def _explain_concrete(
             # `_blocking_reason`'s order. Both are true of `structure:declared` on a format
             # with no declared-structure pattern and no text layer; only one of them is why
             # the answer is `impossible` rather than "not this time".
-            if _is_impossible(row, fmt):
+            sentinel = _unsatisfiable_sentinel(row, fmt)
+            if sentinel is not None:
                 impossible.add(row.task)
-                reason = _no_declared_structure_reason(fmt)
-            elif any(name in impossible for name in row.after):
+                reason = SENTINEL_REASONS[sentinel](fmt)
+            elif _impossible_after(row, impossible):
                 impossible.add(row.task)
                 reason = blocked
             else:
@@ -753,15 +926,20 @@ def _explain_conditional(fmt: str, resolved: dict) -> tuple[ExplainedTask, ...]:
     for row in TASK_ROWS:
         # Same precedence as `_explain_concrete`: the row's own unsatisfiable requirement
         # first, a dependency that can never fire second.
-        if _is_impossible(row, fmt):
+        sentinel = _unsatisfiable_sentinel(row, fmt)
+        if sentinel is not None:
             impossible.add(row.task)
-            reason = _no_declared_structure_reason(fmt)
+            reason = SENTINEL_REASONS[sentinel](fmt)
             tasks.append(_explained_row(row, fmt, resolved, OUTCOME_IMPOSSIBLE, reason=reason))
             continue
-        blocking = next((name for name in row.after if name in impossible), None)
-        if blocking is not None:
+        if _impossible_after(row, impossible):
             impossible.add(row.task)
-            reason = _dependency_reason(row.task, blocking)
+            blocking = next((name for name in row.after if name in impossible), None)
+            reason = (
+                _dependency_reason(row.task, blocking)
+                if blocking is not None
+                else _alternative_dependency_reason(row.task, row.after_any)
+            )
             tasks.append(_explained_row(row, fmt, resolved, OUTCOME_IMPOSSIBLE, reason=reason))
             continue
 
@@ -785,8 +963,15 @@ def _explain_conditional(fmt: str, resolved: dict) -> tuple[ExplainedTask, ...]:
             reason = DEFERRED_REASON.get(row.task, "no handler is registered for this task type")
             tasks.append(_explained_row(row, fmt, resolved, OUTCOME_DEFERRED, reason=reason))
             continue
-        blocking = next((name for name in row.after if name in deferred), None)
-        if blocking is not None:
+        # Same conjunction/disjunction split as `_impossible_after`: one deferred `after`
+        # defers the row, but an `after_any` alternative that still has a handler keeps it
+        # alive.
+        blocked_on: Optional[list[str]] = None
+        if any(name in deferred for name in row.after):
+            blocked_on = [name for name in row.after if name in deferred]
+        elif row.after_any and all(name in deferred for name in row.after_any):
+            blocked_on = list(row.after_any)
+        if blocked_on is not None:
             deferred.add(row.task)
             tasks.append(
                 _explained_row(
@@ -795,7 +980,7 @@ def _explain_conditional(fmt: str, resolved: dict) -> tuple[ExplainedTask, ...]:
                     resolved,
                     OUTCOME_DEFERRED,
                     reason=(
-                        f"depends on {blocking!r}, which is deferred; a task cannot be "
+                        f"depends on {blocked_on!r}, which is deferred; a task cannot be "
                         "ordered after work that was never queued"
                     ),
                 )
@@ -1040,3 +1225,8 @@ def utc_now_iso() -> str:
 from jmfts_core import embed_tasks  # noqa: E402,F401  (side effect: registration)
 from jmfts_core import rollup_tasks  # noqa: E402,F401  (side effect: registration)
 from jmfts_core import structure_tasks  # noqa: E402,F401  (side effect: registration)
+
+# AFTER `structure_tasks`, and not by accident: `citation_tasks` reads that module's
+# `EXTRACTION_PDF_TEXT_LAYER` and `USETYPE_CHUNK`, which is the contract between the task
+# that wrote the text and the task that addresses it.
+from jmfts_core import citation_tasks  # noqa: E402,F401  (side effect: registration)

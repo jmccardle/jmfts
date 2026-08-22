@@ -1,0 +1,205 @@
+# Release pipeline. docs/RELEASING.md step 5 — the step that, when this file landed, had
+# never run.
+#
+# Shape: gate -> build -> publish. The publish job consumes ONLY the artifacts `build`
+# produced; it never sees the source tree and never builds anything, so what reaches PyPI
+# is exactly what `twine check --strict` passed.
+#
+# Authentication is PyPI Trusted Publishing (OIDC). There is no API token in repository
+# secrets and none is wanted: the publish job asks GitHub for an identity token
+# (`permissions: id-token: write`) and pypa/gh-action-pypi-publish exchanges it for a
+# short-lived, project-scoped upload token. That identity is (owner, repository, workflow
+# filename, environment) — which is why this workflow only works in the PUBLIC repository,
+# `github.com/jmccardle/jmfts`. Run from the internal git remote it has no identity to
+# exchange, and no amount of configuration here changes that.
+#
+# THE BOOTSTRAP, before anyone points this at a new name. Trusted Publishing cannot create
+# a project that has never been published. A new project is registered as a *pending*
+# publisher, and PyPI allows exactly one pending row per configuration, so the second name
+# registered against this same (owner, repo, workflow, environment) is refused with "A
+# pending trusted publisher matching this configuration has already been registered for a
+# different project name." Each distribution therefore needs ONE hand upload with an
+# account-scoped token before this file can ever publish it. `jmfts` and `jmfts-client`
+# were both unregistered on 2026-08-21. docs/RELEASING.md step 5 is the long version; read
+# it before adding a second entry to the `dist` matrix below.
+#
+# "Fail Early" (CLAUDE.md): no `continue-on-error`, no `|| true`, no `skip-existing`. A
+# half-finished release must fail loudly, because a PyPI version number cannot be reused
+# once it is taken.
+
+name: Publish JMFTS to PyPI
+
+on:
+  push:
+    # Release tags only, and a tag push always targets real PyPI. docs/RELEASING.md
+    # commits and tags in step 3 but holds the tag back until step 5 precisely so that
+    # this is the moment a release becomes irreversible.
+    tags:
+      - "v*"
+  # Deliberately NOT `release: published`. Cutting a GitHub Release from a tag that was
+  # pushed normally would fire BOTH events, and the second run would try to upload files
+  # PyPI already has — failing, loudly, on a release that had in fact succeeded. One
+  # trigger, one upload. Cut the GitHub Release afterwards, for the notes.
+  workflow_dispatch:
+
+# Never let two releases upload concurrently. `cancel-in-progress: false` is deliberate:
+# cancelling a run mid-upload is exactly the half-published state this pipeline exists to
+# avoid.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DIST_DIR: dist
+
+jobs:
+  # The whole of CI, as a dependency. Nothing is built until the suite, the release guards
+  # on four interpreters, black and ruff have all passed on this exact commit — so "the
+  # tests were run at some point" cannot be the evidence behind an upload that can never
+  # be taken back.
+  gate:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build ${{ matrix.dist.name }}
+    needs: [gate]
+    runs-on: ubuntu-latest
+    strategy:
+      # A release is atomic. If one distribution cannot be built there is nothing to
+      # publish, so stop the others rather than half-fill the artifact set.
+      fail-fast: true
+      matrix:
+        # THE LIST OF DISTRIBUTIONS THIS REPOSITORY RELEASES.
+        #
+        # Two entries, and they are list entries rather than copied jobs so that the two
+        # can never drift into being built, checked or uploaded differently.
+        #
+        # THE TWO RELEASE IN LOCKSTEP: one number, two wheels, one `v*` tag. That is what
+        # makes the version check below correct as written — it compares the tag against
+        # EVERY entry, which is only honest if every entry carries the same number.
+        # `./bump-version.sh` sets both, and
+        # tests/test_packaging.py::test_the_two_distributions_release_in_lockstep fails if
+        # they drift. If a future distribution in this tree needs its own cadence, that
+        # needs a tag namespace per distribution and a filter here — not a loosened check.
+        #
+        # STILL UNBOOTSTRAPPED: neither name exists on PyPI, so neither has a trusted
+        # publisher yet and this workflow cannot be what first creates them. See the note
+        # at the top of this file, and docs/RELEASING.md step 5.
+        dist:
+          - name: jmfts
+            # Directory holding the pyproject.toml to build. The repository root, for now.
+            path: .
+            # Where the single version literal lives. pyproject.toml reads the same line
+            # through [tool.setuptools.dynamic], so this is not a second copy — it is the
+            # only copy, and the check below compares the tag against it.
+            version_file: jmfts_core/__init__.py
+          - name: jmfts-client
+            path: jmfts-client
+            version_file: jmfts-client/jmfts_client/__init__.py
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Build on the floor interpreter. The wheel is pure Python and py3-none-any, so
+          # one build serves every version the classifiers claim.
+          python-version: "3.11"
+
+      - name: Install build tooling
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: The tag and the package agree on the version
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^__version__ = "\([^"]*\)"/\1/p' "${{ matrix.dist.version_file }}")"
+          if [ -z "$VERSION" ]; then
+            echo "could not read __version__ from ${{ matrix.dist.version_file }}" >&2
+            exit 1
+          fi
+          echo "${{ matrix.dist.name }} declares $VERSION"
+          # On a tag push the tag IS the release name. A mismatch publishes a version
+          # nobody asked for, under a number that can never be reused.
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+            if [ "$TAG_VERSION" != "$VERSION" ]; then
+              echo "tag ${GITHUB_REF_NAME} does not match ${{ matrix.dist.name }} ${VERSION}" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Build the sdist and the wheel
+        run: |
+          set -euo pipefail
+          mkdir -p "$DIST_DIR"
+          python -m build --sdist --wheel --outdir "$DIST_DIR" "${{ matrix.dist.path }}"
+
+      - name: Exactly one sdist and one wheel
+        run: |
+          set -euo pipefail
+          ls -la "$DIST_DIR"
+          wheels="$(find "$DIST_DIR" -maxdepth 1 -type f -name '*.whl' | wc -l)"
+          sdists="$(find "$DIST_DIR" -maxdepth 1 -type f -name '*.tar.gz' | wc -l)"
+          # Anything else means a build silently produced nothing, or produced something
+          # nobody asked for — both of which `twine check` below would happily pass.
+          if [ "$wheels" -ne 1 ] || [ "$sdists" -ne 1 ]; then
+            echo "expected 1 wheel + 1 sdist, found $wheels wheel(s) and $sdists sdist(s)" >&2
+            exit 1
+          fi
+
+      - name: twine check (strict)
+        run: |
+          set -euo pipefail
+          # --strict turns metadata and README-rendering WARNINGS into failures. A
+          # long_description that does not render is a broken PyPI page, and the version
+          # cannot be re-uploaded to fix it.
+          twine check --strict "$DIST_DIR"/*
+
+      - name: Upload the built distributions
+        uses: actions/upload-artifact@v4
+        with:
+          # One artifact per distribution, collected by pattern in the publish job below.
+          name: dist-${{ matrix.dist.name }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-pypi:
+    name: Publish to PyPI
+    # A tag push publishes. A manual run stops at `build`, which makes workflow_dispatch a
+    # full rehearsal — version check, build, twine check — that cannot upload anything.
+    if: github.event_name == 'push'
+    needs: [build]
+    runs-on: ubuntu-latest
+    environment:
+      # This name is part of the Trusted Publisher identity. It must match the
+      # "Environment name" field on the PyPI publisher form EXACTLY; leaving that field
+      # blank while setting it here is the classic "not a trusted publisher" rejection.
+      name: pypi
+      url: https://pypi.org/project/jmfts/
+    permissions:
+      # The whole point: an OIDC identity instead of a stored API token.
+      id-token: write
+    steps:
+      - name: Download every built distribution
+        uses: actions/download-artifact@v4
+        with:
+          # `dist-*` collects one artifact per matrix entry into one flat directory, so a
+          # second distribution needs no change here either.
+          pattern: dist-*
+          merge-multiple: true
+          path: dist/
+
+      - name: Publish (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          # skip-existing left at its default (false) on purpose: re-uploading a version
+          # that already exists is an error, not a quiet no-op.

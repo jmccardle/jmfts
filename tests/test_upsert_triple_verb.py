@@ -14,7 +14,7 @@ See ROADMAP §"Agent verb surface" / §A "Idempotent triple upsert".
 
 import pytest
 
-from jmfts_core.contracts.triple import TripleCreate
+from jmfts_client.contracts.triple import TripleCreate
 from jmfts_core.repositories.document import DocumentRepository
 from jmfts_core.repositories.triple import TripleRepository
 from jmfts_core.services.triple_service import InvalidFactTypeError, TripleService

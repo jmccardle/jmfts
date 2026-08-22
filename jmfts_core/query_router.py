@@ -7,27 +7,127 @@ lexical and structural signals.
 import re
 from dataclasses import dataclass
 
-
 # Common English stopwords (subset for ratio calculation)
-_STOPWORDS = frozenset({
-    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "shall", "can", "need", "dare", "ought",
-    "used", "to", "of", "in", "for", "on", "with", "at", "by", "from",
-    "as", "into", "through", "during", "before", "after", "above", "below",
-    "between", "out", "off", "over", "under", "again", "further", "then",
-    "once", "and", "but", "or", "nor", "not", "so", "yet", "both", "each",
-    "few", "more", "most", "other", "some", "such", "no", "only", "own",
-    "same", "than", "too", "very", "just", "because", "if", "when", "where",
-    "how", "what", "which", "who", "whom", "this", "that", "these", "those",
-    "i", "me", "my", "we", "our", "you", "your", "he", "him", "his", "she",
-    "her", "it", "its", "they", "them", "their", "all", "any", "every",
-})
+_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "shall",
+        "can",
+        "need",
+        "dare",
+        "ought",
+        "used",
+        "to",
+        "of",
+        "in",
+        "for",
+        "on",
+        "with",
+        "at",
+        "by",
+        "from",
+        "as",
+        "into",
+        "through",
+        "during",
+        "before",
+        "after",
+        "above",
+        "below",
+        "between",
+        "out",
+        "off",
+        "over",
+        "under",
+        "again",
+        "further",
+        "then",
+        "once",
+        "and",
+        "but",
+        "or",
+        "nor",
+        "not",
+        "so",
+        "yet",
+        "both",
+        "each",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "no",
+        "only",
+        "own",
+        "same",
+        "than",
+        "too",
+        "very",
+        "just",
+        "because",
+        "if",
+        "when",
+        "where",
+        "how",
+        "what",
+        "which",
+        "who",
+        "whom",
+        "this",
+        "that",
+        "these",
+        "those",
+        "i",
+        "me",
+        "my",
+        "we",
+        "our",
+        "you",
+        "your",
+        "he",
+        "him",
+        "his",
+        "she",
+        "her",
+        "it",
+        "its",
+        "they",
+        "them",
+        "their",
+        "all",
+        "any",
+        "every",
+    }
+)
 
 
 @dataclass
 class RoutingDecision:
     """Result of query analysis — which method to use and why."""
+
     method: str
     reason: str
     signals: dict
@@ -89,9 +189,8 @@ def route_query(query: str) -> RoutingDecision:
 
     # Question pattern
     question_words = {"how", "what", "why", "when", "where", "who", "which", "explain", "describe"}
-    is_question = (
-        stripped.rstrip().endswith("?")
-        or (len(tokens) > 0 and tokens[0] in question_words)
+    is_question = stripped.rstrip().endswith("?") or (
+        len(tokens) > 0 and tokens[0] in question_words
     )
     signals["is_question"] = is_question
 

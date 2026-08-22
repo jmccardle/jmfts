@@ -9,7 +9,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from jmfts_core.contracts.document import DocumentResponse
+from jmfts_client.contracts.document import DocumentResponse
 
 
 class HybridSearchRequest(BaseModel):

@@ -45,7 +45,7 @@ import httpx
 import numpy as np
 
 from jmfts_core.config import get_settings
-from jmfts_core.contracts.runner import (
+from jmfts_client.contracts.runner import (
     RunnerEmbedResponse,
     RunnerEmbedTokensResponse,
     RunnerInfo,

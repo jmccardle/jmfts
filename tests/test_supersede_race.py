@@ -20,7 +20,7 @@ from jmfts_core.repositories.triple import (
     TripleRepository,
 )
 from jmfts_core.services.triple_service import TripleService
-from jmfts_core.contracts.triple import TripleSupersedRequest
+from jmfts_client.contracts.triple import TripleSupersedRequest
 
 
 def _facts(db_session):

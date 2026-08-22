@@ -10,7 +10,6 @@ import math
 import igraph as ig
 import pytest
 
-
 # Skip the whole file if igraph isn't importable in the test env.
 pytest.importorskip("igraph")
 
@@ -107,9 +106,13 @@ class TestCommunities:
     def test_two_obvious_clusters_emerge_as_two_communities(self):
         # Two cliques connected by one bridge edge
         edges = [
-            (0, 1), (1, 2), (2, 0),  # cluster A
-            (3, 4), (4, 5), (5, 3),  # cluster B
-            (2, 3),                   # bridge
+            (0, 1),
+            (1, 2),
+            (2, 0),  # cluster A
+            (3, 4),
+            (4, 5),
+            (5, 3),  # cluster B
+            (2, 3),  # bridge
         ]
         build = _make_build(edges, n=6)
         comms = compute_communities(build, resolution=1.0, min_size=2)

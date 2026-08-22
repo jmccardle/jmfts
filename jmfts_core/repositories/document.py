@@ -42,7 +42,7 @@ from jmfts_core.access import (
     require_add_child,
     require_write,
 )
-from jmfts_core.contracts.attempt import TERMINAL_STATUSES, AttemptRecord
+from jmfts_client.contracts.attempt import TERMINAL_STATUSES, AttemptRecord
 from jmfts_core.models.document import (
     Document,
     DocumentLink,

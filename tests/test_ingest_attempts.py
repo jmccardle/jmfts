@@ -19,7 +19,7 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy import text as sa_text
 
-from jmfts_core.contracts.attempt import AttemptRecord, param_fingerprint
+from jmfts_client.contracts.attempt import AttemptRecord, param_fingerprint
 from jmfts_core.pipeline import execute_pipeline
 
 # ---------------------------------------------------------------------------
@@ -122,7 +122,7 @@ class TestParamFingerprint:
         """
         expected = param_fingerprint({"b": 1, "a": {"z": [1, 2], "y": "x"}, "c": None})
         code = (
-            "from jmfts_core.contracts.attempt import param_fingerprint;"
+            "from jmfts_client.contracts.attempt import param_fingerprint;"
             "print(param_fingerprint({'a': {'y': 'x', 'z': [1, 2]}, 'c': None, 'b': 1}))"
         )
         for seed in ("1", "12345"):

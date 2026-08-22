@@ -95,16 +95,23 @@ def test_all_domain_routes_are_generated():
     This makes future drift impossible: a new hand-written domain route cannot land
     without either joining the registry or being explicitly allow-listed above.
     """
-    from fastapi.routing import APIRoute
-
     import jmfts_core.rest.main as main
+    from jmfts_core.rest.wiring import iter_mounted_api_routes
 
     registry_names = {s.name for s in REGISTRY}
 
+    mounted = iter_mounted_api_routes(main.app)
+    # Vacuity guard. This assertion is "no mounted route has a property", which an empty
+    # list satisfies — and it DID, silently, under fastapi 0.141, where iterating
+    # `app.routes` yields three infra routes rather than a hundred. The straggler check
+    # inspected nothing and reported success. It cannot do that again without this line.
+    assert len(mounted) >= len(REGISTRY), (
+        f"only {len(mounted)} routes mounted against {len(REGISTRY)} registry entries; "
+        "the straggler check below would inspect almost nothing and pass"
+    )
+
     stragglers = set()
-    for route in main.app.routes:
-        if not isinstance(route, APIRoute):
-            continue  # Starlette built-ins (/openapi.json, /docs, /redoc, ...)
+    for route in mounted:
         if route.name in registry_names:
             continue  # generated from a @expose spec
         if route.path in INFRA_ALLOWLIST:
@@ -194,7 +201,7 @@ def test_hybrid_search_preserves_position_and_event_time(monkeypatch):
         "jmfts_core.services.search_service.SearchRepository",
         lambda session: _StubRepo(doc),
     )
-    from jmfts_core.contracts.search import HybridSearchRequest
+    from jmfts_client.contracts.search import HybridSearchRequest
 
     service = SearchService(session=None)
     response = service.hybrid_search(HybridSearchRequest(query="q"))

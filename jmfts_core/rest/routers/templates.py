@@ -10,7 +10,7 @@ There is no hand-written route left here, and no local ``_doc_to_doc_response`` 
 ``_doc_to_template`` converter: document serialisation flows through the single
 ``DocumentResponse.from_document`` converter (which added ``position``/``event_time`` to
 template-search results), and the template-response mapping lives once as
-``TemplateResponse.from_document`` in ``jmfts_core/contracts/template.py``.
+``TemplateResponse.from_document`` in ``jmfts-client/jmfts_client/contracts/template.py``.
 
 ``tests/test_api_parity.py`` guards that the generated routes and the registry stay in
 bijection. This module is intentionally kept (empty of routes) so that historical

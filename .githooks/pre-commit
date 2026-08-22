@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+#
+# JMFTS pre-commit gate — the same two checks CI runs, on the same scope.
+#
+#   1. black --check   (formatting)
+#   2. ruff check      (lint)
+#
+# WHY THIS EXISTS. CI is where a red build is *found*; this is where it is *avoided*.
+# The two must agree, so both read their scope from one place — the SCOPE array below
+# and the `black --check` / `ruff check` steps in .github/workflows/ci.yml. If you change
+# one, change the other; there is no configuration file that could hold it for both,
+# because a GitHub workflow cannot source a shell array.
+#
+# ONE-TIME ACTIVATION, per clone:
+#
+#     git config core.hooksPath .githooks
+#
+# It is opt-in rather than automatic because git will not run a hook from a fresh clone
+# without being told to, and a hook that silently does not run is worse than none.
+#
+# FAIL-EARLY: this hook REQUIRES black and ruff to be importable, and it does not fall
+# back to a PATH copy of either. A different version passes here and fails in CI, which
+# is the exact confusion the pin in ci.yml exists to prevent. Missing tools are an error
+# with the install command, not a skip.
+#
+# To commit anyway — a work-in-progress commit on a branch nobody has pulled — use
+# `git commit --no-verify`. That is a deliberate choice a person makes, which is the
+# point; the gate still runs in CI.
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# The gated scope: both distributions, plus the suite. Mirrors ci.yml's lint job.
+# jmfts-needle/, scripts/, benchmarks/ and analysis/ are outside it on purpose — see the
+# comment above that job for the reasoning.
+SCOPE=(jmfts_core jmfts-client tests)
+
+PY="${JMFTS_HOOK_PYTHON:-python3}"
+
+if ! "$PY" -c "import black, ruff" >/dev/null 2>&1; then
+    echo "[pre-commit] ERROR: black and ruff must be installed for '$PY'." >&2
+    echo "[pre-commit] The dev extra carries both:" >&2
+    echo "[pre-commit]   pip install -e ./jmfts-client && pip install -e '.[dev]'" >&2
+    echo "[pre-commit] Or point this hook at the interpreter that has them:" >&2
+    echo "[pre-commit]   JMFTS_HOOK_PYTHON=/path/to/venv/bin/python git commit ..." >&2
+    exit 1
+fi
+
+echo "[pre-commit] black --check…"
+"$PY" -m black --line-length 100 --check "${SCOPE[@]}"
+
+echo "[pre-commit] ruff check…"
+"$PY" -m ruff check "${SCOPE[@]}"
+
+echo "[pre-commit] formatting and lint pass ✓"

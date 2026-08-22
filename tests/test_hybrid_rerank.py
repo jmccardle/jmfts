@@ -12,7 +12,6 @@ import pytest
 from jmfts_core.models.document import Document
 from jmfts_core.repositories.search import SearchRepository
 
-
 NOW = datetime(2026, 7, 16, 12, 0, 0, tzinfo=timezone.utc)
 
 

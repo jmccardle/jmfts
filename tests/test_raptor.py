@@ -267,8 +267,10 @@ class TestSeedReproducibility:
 # TIER 2: Integration Tests — Real DB (rollback), Mocked LLM + Embedding
 # ============================================================================
 
-# Attempt DB connection at import time; skip integration tests if unavailable.
-from sqlalchemy import text as sa_text
+# Attempt DB connection at import time; skip integration tests if unavailable. The
+# import sits here rather than at the top because the try/except below decides whether
+# the rest of this file can run at all.
+from sqlalchemy import text as sa_text  # noqa: E402
 
 try:
     from jmfts_core.database import get_engine
@@ -664,14 +666,14 @@ class TestRaptorIntegrationA6:
         parent, child_ids, _ = _create_test_tree(repo, db_session, [4, 4, 4])
 
         # First RAPTOR run
-        result1 = _run(raptor_summarize(parent.id, db_session, max_depth=5, min_cluster_size=2))
+        _run(raptor_summarize(parent.id, db_session, max_depth=5, min_cluster_size=2))
         summaries_after_first = len(repo.find(usetype="summary", limit=1000))
 
         # Second RAPTOR run on same document
         # After first run, original chunks are re-parented under summaries.
         # _get_embedded_child_ids looks for immediate children of root with embed.
         # The immediate children are now the L0 summaries (which have embeddings).
-        result2 = _run(raptor_summarize(parent.id, db_session, max_depth=5, min_cluster_size=2))
+        _run(raptor_summarize(parent.id, db_session, max_depth=5, min_cluster_size=2))
         summaries_after_second = len(repo.find(usetype="summary", limit=1000))
 
         # Document the behavior: second run should either:

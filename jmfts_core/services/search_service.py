@@ -22,7 +22,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from jmfts_core.config import get_settings
-from jmfts_core.contracts.search import (
+from jmfts_client.contracts.search import (
     AutoSearchRequest,
     AutoSearchResponse,
     HybridSearchRequest,
@@ -34,7 +34,7 @@ from jmfts_core.contracts.search import (
     SynthesizeRequest,
     SynthesizeResponse,
 )
-from jmfts_core.contracts.document import DocumentResponse
+from jmfts_client.contracts.document import DocumentResponse
 from jmfts_core.query_router import route_query
 from jmfts_core.registry import expose, register_service
 from jmfts_core.reranker import get_reranker_service

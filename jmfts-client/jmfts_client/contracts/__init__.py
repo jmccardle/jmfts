@@ -1,17 +1,25 @@
 """Transport-neutral request/response contracts.
 
-These Pydantic models are the SINGLE definition of JMFTS's data shapes, shared by
-every delivery surface: the in-process Python API, the generated REST adapter, and
-(later) the needle op-catalog. They live in ``jmfts_core`` — NOT ``api`` — so the
-service layer can depend on them without importing FastAPI. ``api/schemas.py``
-re-exports every name here for backward compatibility, so existing
-``from jmfts_core.rest.schemas import X`` imports keep working.
+These Pydantic models are the SINGLE definition of JMFTS's data shapes, shared by every
+delivery surface: the in-process ``LocalJmftsClient``, the generated REST adapter, the
+OpenAPI document, and the generated ``RemoteJmftsClient`` beside this package.
 
-Rule of the house: core may import contracts; contracts may not import ``api`` or
-``fastapi``. ``tests/test_api_parity.py`` enforces this.
+They live in the CLIENT distribution, which is the far side of a move they made twice.
+First out of ``api/schemas.py`` into ``jmfts_core.contracts``, so the service layer could
+depend on them without importing FastAPI. Then out of ``jmfts_core`` entirely, so a
+consumer who only calls an appliance installs pydantic and httpx instead of sqlalchemy,
+pgvector and transformers. ``jmfts_core.rest.schemas`` still re-exports every name here,
+so ``from jmfts_core.rest.schemas import X`` keeps working for anything inside the server.
+
+Rule of the house, unchanged in substance and now enforceable by packaging: the server may
+import contracts; contracts may import neither the server nor any web framework. A model
+that needs a scheduler or prober type is not a contract — its adapter belongs in
+``jmfts_core/explain_wire.py``, which is where the ``EXPLAIN`` builders went for exactly
+this reason. ``tests/test_api_parity.py`` and
+``tests/test_client_codegen.py::test_client_package_does_not_import_the_server`` hold it.
 """
 
-from jmfts_core.contracts.document import (
+from jmfts_client.contracts.document import (
     ChunkItem,
     ChunkRequest,
     ChunkResponse,
@@ -37,33 +45,33 @@ from jmfts_core.contracts.document import (
     SubtreeResponse,
     TokenEmbeddingResponse,
 )
-from jmfts_core.contracts.conversation import (
+from jmfts_client.contracts.conversation import (
     ConversationIngestRequest,
     ConversationIngestResponse,
     ConversationMessage,
     ConversationStageResult,
 )
-from jmfts_core.contracts.attempt import (
+from jmfts_client.contracts.attempt import (
     AttemptRecord,
     param_fingerprint,
 )
-from jmfts_core.contracts.upload import (
+from jmfts_client.contracts.upload import (
     FileUploadResponse,
     IngestFrontierResponse,
     UploadedFile,
 )
-from jmfts_core.contracts.index import (
+from jmfts_client.contracts.index import (
     IndexCreate,
     IndexResponse,
 )
-from jmfts_core.contracts.ingest import (
+from jmfts_client.contracts.ingest import (
     IngestRequest,
     IngestResponse,
     IngestStageResult,
     PipelineInfo,
     PipelineStageInfo,
 )
-from jmfts_core.contracts.graph import (
+from jmfts_client.contracts.graph import (
     CentralityResponse,
     CentralityScoreItem,
     CommunityItem,
@@ -82,7 +90,7 @@ from jmfts_core.contracts.graph import (
     SubtreeAuthorityResponse,
     TopDescendantItem,
 )
-from jmfts_core.contracts.search import (
+from jmfts_client.contracts.search import (
     AutoSearchRequest,
     AutoSearchResponse,
     HybridSearchRequest,
@@ -94,12 +102,12 @@ from jmfts_core.contracts.search import (
     SynthesizeRequest,
     SynthesizeResponse,
 )
-from jmfts_core.contracts.search_context import (
+from jmfts_client.contracts.search_context import (
     SearchContextCreate,
     SearchContextResponse,
     SearchContextUpdate,
 )
-from jmfts_core.contracts.template import (
+from jmfts_client.contracts.template import (
     TemplateCreate,
     TemplateRenderRequest,
     TemplateRenderResponse,
@@ -108,7 +116,7 @@ from jmfts_core.contracts.template import (
     TemplateUpdate,
     TemplateVariable,
 )
-from jmfts_core.contracts.triple import (
+from jmfts_client.contracts.triple import (
     PathResponse,
     PathStep,
     PredicateCreate,
@@ -119,12 +127,12 @@ from jmfts_core.contracts.triple import (
     TripleResponse,
     TripleSupersedRequest,
 )
-from jmfts_core.contracts.usetype_presentation import (
+from jmfts_client.contracts.usetype_presentation import (
     UsetypePresentationCreate,
     UsetypePresentationResponse,
     UsetypePresentationUpdate,
 )
-from jmfts_core.contracts.runner import (
+from jmfts_client.contracts.runner import (
     DOC_DTYPE,
     TOKEN_DTYPE,
     RunnerEmbedRequest,
@@ -138,7 +146,7 @@ from jmfts_core.contracts.runner import (
     decode_vector,
     encode_vector,
 )
-from jmfts_core.contracts.view import (
+from jmfts_client.contracts.view import (
     BackReferenceItem,
     BackReferenceResponse,
     BreadcrumbResponse,

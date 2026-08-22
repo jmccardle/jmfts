@@ -43,6 +43,7 @@ def _make_block_embeddings(
 # Basic behaviour
 # --------------------------------------------------------------------------- #
 
+
 class TestPeltSegmentBasic:
     """Core segmentation sanity checks."""
 
@@ -90,6 +91,7 @@ class TestPeltSegmentBasic:
 # Penalty controls granularity
 # --------------------------------------------------------------------------- #
 
+
 class TestPenaltyGranularity:
     """Higher penalty → fewer segments."""
 
@@ -108,6 +110,7 @@ class TestPenaltyGranularity:
 # --------------------------------------------------------------------------- #
 # Edge cases
 # --------------------------------------------------------------------------- #
+
 
 class TestEdgeCases:
     def test_empty_raises(self):

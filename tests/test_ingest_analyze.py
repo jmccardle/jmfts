@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from jmfts_core.rest.main import app
-from jmfts_core.contracts.upload import UploadedFile
+from jmfts_client.contracts.upload import UploadedFile
 from jmfts_core.database import get_db
 from jmfts_core.ingest_options import STRUCTURE_CHUNK_PARAMS
 from jmfts_core.ingest_tasks import (
@@ -94,11 +94,25 @@ Some prose under the first heading.
 
 
 def _make_docx_like_zip() -> bytes:
-    """A ZIP carrying `word/document.xml`: detected as docx by manifest, with no prober."""
+    """A ZIP carrying `word/document.xml`: detected as docx by manifest, and now probed."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("[Content_Types].xml", "<Types/>")
         archive.writestr("word/document.xml", "<document/>")
+    return buffer.getvalue()
+
+
+def _make_epub_like_zip() -> bytes:
+    """A ZIP EPUB's `mimetype` member identifies, and which no prober can look inside.
+
+    The office probers arrived with OFFICE_SPEC.md phasing step 4, so `.docx` is no longer
+    an example of a format probe cannot open. EPUB is: its outline is an `.ncx` or a nav
+    document, and nothing reads either yet.
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("mimetype", "application/epub+zip")
+        archive.writestr("META-INF/container.xml", "<container/>")
     return buffer.getvalue()
 
 
@@ -157,8 +171,14 @@ class TestAnalyzeForecastsTheRealRun:
 
         # `probe` itself is enqueued by the upload, not by probe, so it leads the forecast
         # and is absent from probe's own `enqueued` detail.
+        #
+        # Compared as SETS, because the right-hand side came back out of a `jsonb` column
+        # and `jsonb` stores object keys sorted by length and then by bytes — the sequence
+        # there is Postgres's, not the planner's. What this test is for is that `analyze`
+        # names the same TASKS the run queues; the order the batch goes in is asserted
+        # against `plan_after_probe` directly, in tests/test_ingest_worker.py.
         assert predicted[0] == TASK_PROBE
-        assert predicted[1:] == list(probe_attempt["detail"]["enqueued"])
+        assert set(predicted[1:]) == set(probe_attempt["detail"]["enqueued"])
 
     def test_the_measured_patterns_are_the_ones_probe_writes(self, db_session, pdf_bytes):
         forecast = _analyze(db_session, pdf_bytes, "annual.pdf", "application/pdf")
@@ -261,12 +281,12 @@ class TestProvenance:
         set is empty — which is the fact a caller needs in order to tell "this file has no
         text layer" from "we cannot look inside this format".
         """
-        response = _analyze(db_session, _make_docx_like_zip(), "report.docx")
+        response = _analyze(db_session, _make_epub_like_zip(), "book.epub")
 
-        assert response.format == "docx"
+        assert response.format == "epub"
         assert response.patterns == {}
         assert response.plan.patterns_source == PATTERNS_PROBED
-        assert response.probe_detail["no_prober_for_format"] == "docx"
+        assert response.probe_detail["no_prober_for_format"] == "epub"
         assert "pdf" in response.probe_detail["probers_available"]
 
     def test_markdown_reaches_the_declared_rung(self, db_session):

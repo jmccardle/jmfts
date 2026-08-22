@@ -46,6 +46,20 @@ class RawTriple:
 
 
 @dataclass
+class ResolvedTriple:
+    """A triple after entity/predicate resolution, ready for DB insertion."""
+
+    subject_id: int
+    predicate_id: int
+    object_id: int
+    source_document_id: int
+    fact_type: FactType = FactType.atemporal
+    valid_from: Optional[datetime] = None
+    valid_until: Optional[datetime] = None
+    confidence: float = 1.0
+
+
+@dataclass
 class ExtractionResult:
     """Result of extracting facts from a single document."""
 
@@ -149,7 +163,7 @@ async def _llm_extract(text: str, settings: Settings, llm_model: str | None = No
     if content.startswith("```"):
         lines = content.split("\n")
         # Remove first and last fence lines
-        lines = [l for l in lines if not l.strip().startswith("```")]
+        lines = [line for line in lines if not line.strip().startswith("```")]
         content = "\n".join(lines).strip()
 
     try:

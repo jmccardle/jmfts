@@ -40,9 +40,10 @@ from typing import Any, Mapping, Optional, Sequence
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from jmfts_core.contracts.attempt import TERMINAL_STATUSES, AttemptRecord, param_fingerprint
+from jmfts_client.contracts.attempt import TERMINAL_STATUSES, AttemptRecord, param_fingerprint
 from jmfts_core.models.document import Document, SETTLED_FAILED, SETTLED_IN_FLIGHT
 from jmfts_core.models.task_queue import (
+    ADVISORY_TASK_TYPES,
     TASK_BATCHED,
     TASK_CLAIMED,
     TASK_COMPLETED,
@@ -698,7 +699,20 @@ class TaskQueueRepository:
         * a task that will not run again puts its node into ``settled = 'failed'``
           (spec 2.1) — without that a node whose ingestion died permanently is
           indistinguishable from one still in progress, and the settle walk would keep
-          waiting on it forever.
+          waiting on it forever;
+        * **unless the task type is advisory**
+          (:data:`~jmfts_core.models.task_queue.ADVISORY_TASK_TYPES`,
+          ``OFFICE_SPEC.md`` Part 5), in which case the attempt is recorded exactly as
+          above and the node's ``settled`` is not touched at all.
+
+        The advisory branch is one assignment wide, and it has to be: everything else about
+        the failure — the ``failed`` status, the spent retry budget, the attempt record
+        carrying the error and its classification — is the same, because the failure is
+        just as real. What differs is only whether the NODE is declared dead because of it.
+        A permanently failed task is already not "unfinished" (``_unfinished_criterion``),
+        so skipping the write does not leave the walk waiting on anything; the node settles
+        with the failure in its log and without the output the task would have added. See
+        the constant for the rule about which types may be in that set.
         """
         if task.started_at is None:
             raise ValueError(f"task {task.id} has no started_at and cannot be failed")
@@ -722,9 +736,14 @@ class TaskQueueRepository:
             task.retry_after = func.now() + func.make_interval(0, 0, 0, 0, 0, 0, delay)
         else:
             task.retry_after = None
-            doc = self.session.get(Document, task.scope_document_id)
-            if doc is not None:
-                doc.settled = SETTLED_FAILED
+            # The one place the advisory set is read. Note what is NOT conditional on it:
+            # the status, the cleared `retry_after`, and the attempt record below all
+            # happen either way, because an advisory task that failed permanently really
+            # did fail permanently and the log has to say so.
+            if task.task_type not in ADVISORY_TASK_TYPES:
+                doc = self.session.get(Document, task.scope_document_id)
+                if doc is not None:
+                    doc.settled = SETTLED_FAILED
 
         self.session.flush()
         self.session.refresh(task)

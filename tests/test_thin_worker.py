@@ -73,6 +73,21 @@ def _drop_cached_embedder():
     reset_embedder()
 
 
+def _stored_width(value) -> int:
+    """How wide a ``halfvec`` column's loaded value is, whatever type the driver used.
+
+    pgvector changed what SQLAlchemy hands back for a ``HALFVEC`` column: 0.4 returns a
+    ``HalfVector`` instance, 0.5 returns a plain list. The two share no width accessor —
+    ``HalfVector`` has ``dimensions()`` and defines neither ``__len__`` nor ``__iter__``
+    in EITHER version, so ``len()`` raises on 0.4 and ``dimensions()`` is absent on 0.5.
+
+    The assertion this serves is about the width that reached the column, not about which
+    object the driver chose to represent it with, so it asks each type its own question.
+    """
+    dimensions = getattr(value, "dimensions", None)
+    return dimensions() if callable(dimensions) else len(value)
+
+
 # ---------------------------------------------------------------------------
 # The substitution: the same vectors, over the wire
 # ---------------------------------------------------------------------------
@@ -269,7 +284,7 @@ class TestIngestingThroughARunner:
         """
         from sqlalchemy import select
 
-        from jmfts_core.contracts.upload import UploadedFile
+        from jmfts_client.contracts.upload import UploadedFile
         from jmfts_core.models.document import Document, SETTLED_SETTLED
         from jmfts_core.models.token_embedding import TokenEmbedding
         from jmfts_core.repositories.document import DocumentRepository
@@ -317,7 +332,7 @@ class TestIngestingThroughARunner:
             assert rows, f"chunk {chunk.id} got a document vector and no token vectors"
             # The column is halfvec(256); a remote row must land in it the same way a
             # local one does, whatever width it travelled at.
-            assert rows[0].embed_256.dimensions() == 256
+            assert _stored_width(rows[0].embed_256) == 256
 
         # And the attempt log says where they came from, per node.
         attempt = next(e for e in chunks[0].structured_content["attempts"] if e["task"] == "embed")

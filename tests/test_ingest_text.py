@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from jmfts_core.contracts.upload import UploadedFile
+from jmfts_client.contracts.upload import UploadedFile
 from jmfts_core.ingest_tasks import (
     TASK_EXTRACT_TEXT,
     TASK_PROBE,
@@ -32,6 +32,7 @@ from jmfts_core.repositories.document import DocumentRepository
 from jmfts_core.services.ingest_service import IngestService
 from jmfts_core.structural_splitting import find_headings, split_on_headings
 from jmfts_core.structure_tasks import (
+    EXTRACTION_HTML_MARKUP,
     EXTRACTION_UTF8_TEXT,
     RUNG_DECLARED,
     RUNG_INFERRED,
@@ -307,25 +308,67 @@ class TestPlainTextEndToEnd:
 
 
 class TestMarkupIsNotProse:
-    def test_html_is_held_back_by_the_pattern_not_by_the_format(self):
+    def test_html_selects_the_markup_reader_rather_than_blocking_the_row(self):
+        """`has_markup` chooses an extractor; it no longer cancels extraction.
+
+        It used to be a `forbids` on the `extract:text` row, which made an HTML file settle
+        with no content and no children while the upload returned 200 and every task
+        reported "completed". The prohibition was right about the hazard — decoding HTML
+        yields HTML — and wrong about the remedy, because the appliance now has a reader
+        that converts instead of one that refuses.
+        """
         patterns = _probe(HTML.encode("utf-8"), "page.html")
         assert patterns["has_markup"] is True
         assert patterns["has_text_layer"] is True
 
         plan = explain_plan("text", patterns=patterns)
         extract = next(t for t in plan.tasks if t.task == TASK_EXTRACT_TEXT)
-        assert extract.outcome == "not_applicable"
-        assert "has_markup" in extract.reason
+        assert extract.outcome == "enqueued"
 
-    def test_an_html_file_settles_with_no_children(self, db_session):
+    def test_an_html_file_produces_prose_and_children(self, db_session):
         node = _ingest(db_session, HTML, "page.html")
         assert node.settled == SETTLED_SETTLED
-        assert node.content is None
-        assert _children(db_session, node.id) == []
-        assert (
-            "has_markup"
-            in _attempt(node, TASK_PROBE)["detail"]["not_applicable"][TASK_EXTRACT_TEXT]
-        )
+        assert node.content, "an HTML file must now yield markdown, not nothing"
+        assert "<" not in node.content, "tags must not survive into the stored prose"
+        assert _children(db_session, node.id) != []
+
+        extraction = (node.structured_content or {})["extraction"]
+        assert extraction["source"] == EXTRACTION_HTML_MARKUP
+
+        # Both sides of the conversion are recorded — in the ATTEMPT detail, which is where
+        # `Extracted.detail` is merged, not in the extraction record. A collapse is then
+        # visible as two numbers that disagree rather than inferred from a ratio nobody
+        # stored. For HTML they are EXPECTED to differ: tags leave.
+        detail = _attempt(node, TASK_EXTRACT_TEXT)["detail"]
+        assert detail["html_chars"] > detail["markdown_chars"] > 0
+
+    def test_markdown_opening_with_a_comment_is_not_markup(self):
+        """The regression that cost a whole ingest run.
+
+        Markdown has no comment syntax, so `<!-- ... -->` is how a markdown file carries a
+        lint directive or a licence header above its first heading. Such a file opened with
+        `<`, was called markup, and — before the reader existed — produced zero chunks with
+        every task reporting success.
+        """
+        for opener in (
+            "<!-- markdownlint-disable MD013 -->",
+            "<!-- prettier-ignore -->",
+            "<!--\nCopyright 2026\nSPDX: MIT\n-->",
+        ):
+            document = f"{opener}\n\n# Title\n\nA paragraph of ordinary prose.\n"
+            patterns = _probe(document.encode("utf-8"))
+            assert patterns["has_markup"] is False, opener
+            assert patterns["has_headings"] is True, opener
+
+    def test_a_comment_cannot_supply_the_tags_that_prove_markup(self):
+        """Stripping comments removes them from the COUNT as well as from the opener.
+
+        A long comment full of tag-like text would otherwise out-vote the document it sits
+        above, which is the same misclassification arriving by the other door.
+        """
+        document = "<!-- <html><body><p><div><span> -->\n\n# Title\n\nProse.\n"
+        patterns = _probe(document.encode("utf-8"))
+        assert patterns["has_markup"] is False
 
     def test_prose_that_quotes_a_tag_is_still_prose(self):
         """The opening character carries the claim, not the presence of a tag anywhere.

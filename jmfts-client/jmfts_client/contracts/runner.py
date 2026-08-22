@@ -28,14 +28,52 @@ everything else in these responses is a rounding error next to it.
 
 See ``decode_vector`` and ``decode_matrix`` for the read side — callers should use those
 rather than reimplement the layout.
+
+numpy is an EXTRA, not a dependency
+-----------------------------------
+The four codec functions below are the only place in this distribution that wants numpy,
+and they are needed by the narrow set of callers that actually move vectors — a runner, or
+something storing embeddings itself. A consumer that searches and reads documents never
+calls them, and making every such consumer install numpy to import a Pydantic model would
+undo the reason this package is separate.
+
+So numpy is imported inside the functions, behind :func:`_require_numpy`, and declared as
+``jmfts-client[vectors]``. The models in this module carry the base64 strings and import
+with no numpy at all; only decoding one needs it, and asking for that without the extra
+raises a message naming the extra. This is the same shape as ``jmfts[office]`` on the
+server side, for the same reason.
 """
 
 from __future__ import annotations
 
 import base64
+from typing import TYPE_CHECKING
 
-import numpy as np
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:  # annotations only — no runtime import, so no runtime dependency
+    import numpy as np
+
+
+class VectorCodecNotInstalled(ImportError):
+    """Raised when a codec function is called in an install without numpy."""
+
+
+_INSTALL_HINT = (
+    "Encoding and decoding runner vectors needs numpy, which this client does not "
+    "install by default — most callers never move a raw vector. Install it:\n"
+    "    pip install 'jmfts-client[vectors]'"
+)
+
+
+def _require_numpy():
+    """The ``numpy`` module, or say what is missing and what to do."""
+    try:
+        import numpy
+    except ImportError as exc:
+        raise VectorCodecNotInstalled(f"{exc}\n\n{_INSTALL_HINT}") from exc
+    return numpy
+
 
 # The dtypes are fixed by the columns the numbers land in, not chosen per request, so they
 # are named here once and reported in every response rather than negotiated.
@@ -43,22 +81,24 @@ DOC_DTYPE = "float32"
 TOKEN_DTYPE = "float16"
 
 
-def encode_vector(vec: np.ndarray, dtype: str) -> str:
+def encode_vector(vec: "np.ndarray", dtype: str) -> str:
     """Base64-encode an array as little-endian ``dtype``, row-major.
 
     Byte order is pinned rather than inherited, so a big-endian host would produce the
     same bytes a little-endian one does instead of vectors that decode to noise.
     """
+    np = _require_numpy()
     arr = np.ascontiguousarray(np.asarray(vec, dtype=np.dtype(dtype).newbyteorder("<")))
     return base64.b64encode(arr.tobytes()).decode("ascii")
 
 
-def decode_vector(blob: str, dtype: str) -> np.ndarray:
+def decode_vector(blob: str, dtype: str) -> "np.ndarray":
     """Decode a base64 vector written by ``encode_vector``."""
+    np = _require_numpy()
     return np.frombuffer(base64.b64decode(blob), dtype=np.dtype(dtype).newbyteorder("<"))
 
 
-def decode_matrix(blob: str, dtype: str, dims: int) -> np.ndarray:
+def decode_matrix(blob: str, dtype: str, dims: int) -> "np.ndarray":
     """Decode a base64 row-major matrix into shape ``(-1, dims)``.
 
     Raises ``ValueError`` if the byte count is not a whole number of rows, because a

@@ -343,16 +343,62 @@ def get_config():
     }
 
 
-def run():
-    """Run the API server"""
+def run(argv: list[str] | None = None):
+    """Run the API server. The ``jmfts-server`` console script.
+
+    IT PARSES ARGUMENTS, and that is not decoration. This used to take none at all, so
+    ``jmfts-server --help`` ignored the flag and bound a port — which meant
+    ``docs/RELEASING.md`` step 4 listed it as a smoke check that in fact started a server
+    and blocked, and on a host where the port was busy it "failed" for a reason that had
+    nothing to do with the wheel being sound.
+
+    The environment still decides: every default below is read from
+    :func:`~jmfts_core.config.get_settings`, so an install with no flags behaves exactly as
+    it did before. A flag is an override for the one run, which is what makes the same
+    wheel usable from a shell, a unit file and a container CMD without three ways to
+    configure it.
+    """
+    import argparse
+
     import uvicorn
 
     settings = get_settings()
+    parser = argparse.ArgumentParser(
+        prog="jmfts-server",
+        description=(
+            "Serve the JMFTS API. Defaults come from the JMFTS_* environment "
+            "(see .env.example); a flag overrides one for this run only."
+        ),
+    )
+    parser.add_argument(
+        "--host",
+        default=settings.api_host,
+        help=f"interface to bind (JMFTS_API_HOST, {settings.api_host})",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=settings.api_port,
+        help=f"port to bind (JMFTS_API_PORT, {settings.api_port})",
+    )
+    reload_group = parser.add_mutually_exclusive_group()
+    reload_group.add_argument(
+        "--reload",
+        dest="reload",
+        action="store_true",
+        default=settings.debug,
+        help=f"reload on source change (JMFTS_DEBUG, {settings.debug})",
+    )
+    reload_group.add_argument(
+        "--no-reload", dest="reload", action="store_false", help="serve without the reloader"
+    )
+    args = parser.parse_args(argv)
+
     uvicorn.run(
         "jmfts_core.rest.main:app",
-        host=settings.api_host,
-        port=settings.api_port,
-        reload=settings.debug,
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
     )
 
 

@@ -9,7 +9,6 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from jmfts_core.database import Base
 
-
 # Allowed values — kept as plain strings so the registry stays open
 # (new renderers / handlings can be added by row insertion, no schema change).
 RENDERERS = ("markdown", "code", "json-table", "transcript", "plain")
@@ -29,9 +28,7 @@ class UsetypePresentation(Base):
     link_handling: Mapped[str] = mapped_column(String(50), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
     )

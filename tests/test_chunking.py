@@ -357,3 +357,69 @@ class TestFitsPredicate:
         chunks = chunk_text(text, strategy=ChunkStrategy.paragraph, max_chars=1800, fits=fits)
 
         assert " ".join(chunk.text for chunk in chunks).split() == text.split()
+
+
+class TestParagraphPackedRespectsTheAuthorsBoundary:
+    """``paragraph_packed`` packs to a budget WITHOUT crossing a blank line.
+
+    ``sentence_packed`` fills its budget from the section body as one stream, so the blank
+    line — the only boundary the author actually wrote — is invisible to it. These tests
+    pin the difference by asserting WHICH sentences land together, because the two
+    strategies produce chunks of similar SIZE and differ only in where they cut. No length
+    assertion can see that, which is why the defect survived a size histogram.
+    """
+
+    #: Sentence N stays identifiable in the output, so a test can name the grouping.
+    SENTENCES = {
+        letter: f"Sentence {letter} carries one idea and runs to about a dozen words here."
+        for letter in "ABCDEFGHIJKLMN"
+    }
+
+    def _document(self):
+        """Three paragraphs of five, six and three sentences."""
+        return "\n\n".join(
+            " ".join(self.SENTENCES[c] for c in letters) for letters in ("ABCDE", "FGHIJK", "LMN")
+        )
+
+    def _sentences_in(self, text):
+        return "".join(c for c in self.SENTENCES if f"Sentence {c} " in text)
+
+    def test_sentence_packed_fuses_two_paragraphs_and_splits_a_third(self):
+        """The behaviour being replaced, pinned so a change to it is deliberate."""
+        chunks = chunk_text(
+            self._document(), strategy=ChunkStrategy.sentence_packed, max_tokens=120
+        )
+
+        assert [self._sentences_in(c.text) for c in chunks] == ["ABCDEFGHI", "JKLMN"]
+
+    def test_paragraph_packed_returns_one_chunk_per_paragraph(self):
+        chunks = chunk_text(
+            self._document(), strategy=ChunkStrategy.paragraph_packed, max_tokens=120
+        )
+
+        assert [self._sentences_in(c.text) for c in chunks] == ["ABCDE", "FGHIJK", "LMN"]
+
+    def test_the_budget_still_applies_inside_an_oversized_paragraph(self):
+        """One paragraph over budget is the only case where a boundary is invented."""
+        one_long_paragraph = " ".join(self.SENTENCES[c] for c in "ABCDEFGHIJKLMN")
+
+        chunks = chunk_text(
+            one_long_paragraph, strategy=ChunkStrategy.paragraph_packed, max_tokens=40
+        )
+
+        assert len(chunks) > 1
+        assert " ".join(c.text for c in chunks).split() == one_long_paragraph.split()
+
+    def test_short_paragraphs_are_not_merged_by_the_splitter(self):
+        """Merging is ``min_chunk_length``'s decision in ``chunk_text``, not the splitter's.
+
+        Doing it in the splitter would fuse two paragraphs again by another route, which is
+        the exact thing this strategy exists to stop.
+        """
+        text = "Short one.\n\nShort two.\n\nShort three."
+
+        chunks = chunk_text(
+            text, strategy=ChunkStrategy.paragraph_packed, max_tokens=120, min_chunk_length=1
+        )
+
+        assert [c.text for c in chunks] == ["Short one.", "Short two.", "Short three."]

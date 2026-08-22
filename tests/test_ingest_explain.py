@@ -33,6 +33,7 @@ from jmfts_core.ingest_tasks import (
     PATTERNS_SUPPLIED,
     PATTERNS_UNKNOWN,
     PROBE_WRITE_MODE,
+    SENTINEL_REASONS,
     TASK_EXTRACT_IMAGES,
     TASK_EXTRACT_TABLES,
     TASK_EXTRACT_TEXT,
@@ -49,20 +50,34 @@ from jmfts_core.ingest_tasks import (
 from jmfts_core.probe import PROBERS_AVAILABLE
 from jmfts_core.services.ingest_service import IngestService
 
-# A real PDF `matched.patterns` block, of the shape `_probe_pdf` writes — every key it
-# reports, including the four no condition consults. Pasting one of these back is the
-# obvious way to ask "what would this node have done", so it is the shape under test.
+# A real PDF pattern set as a CALLER would paste one back: `_probe_pdf`'s keys plus the
+# one `extract:text` measures. Pasting a node's patterns back is the obvious way to ask
+# "what would this node have done", and after extraction has run the node knows all of
+# them — so this is the shape under test.
+#
+# `probe` alone reports every key here EXCEPT `pages_with_tables`; that one is measured by
+# `extract:text` (INGEST_SPEC.md 3.3) and reaches the node in its `extraction` record. The
+# probe-time set is `PROBE_ONLY_PDF_PATTERNS` below, and the difference between the two is
+# exactly the window in which `extract:tables` is undecidable.
 REAL_PDF_PATTERNS = {
     "has_text_layer": True,
     "has_outline": True,
     "outline_depth": 2,
-    "has_tables": False,
+    # Empty, not absent: this document was measured and has no tables. It is the falsy
+    # half of the list pattern, and it must block `extract:tables` exactly as the
+    # `has_tables: false` it replaces did.
+    "pages_with_tables": [],
     "has_images": True,
     "image_count": 4,
     "page_count": 12,
     "is_scanned": False,
     "is_damaged": False,
 }
+
+#: What `_probe_pdf` ACTUALLY writes today: the set above minus `pages_with_tables`. This
+#: is the pattern set `run_probe` plans from on every real PDF, so `explain` and the queue
+#: have to agree on it — including on the fact that `extract:tables` is undecidable here.
+PROBE_ONLY_PDF_PATTERNS = {k: v for k, v in REAL_PDF_PATTERNS.items() if k != "pages_with_tables"}
 
 #: Formats and pattern sets whose explanation must match what the queue would really do.
 #: `pdf` several ways because it is the one format with a prober; `pptx` and `zip` because
@@ -71,9 +86,13 @@ AGREEMENT_GRID = [
     ("pdf", {}),
     ("pdf", {"has_text_layer": True}),
     ("pdf", {"has_text_layer": True, "has_outline": True}),
-    ("pdf", {"has_text_layer": True, "has_tables": True, "has_images": True}),
+    ("pdf", {"has_text_layer": True, "pages_with_tables": [0, 4], "has_images": True}),
+    # The empty list beside the populated one above: same key, opposite truthiness, and
+    # `explain` must agree with the queue on both.
+    ("pdf", {"has_text_layer": True, "pages_with_tables": [], "has_images": True}),
     ("pdf", {"is_scanned": True, "has_images": True}),
     ("pdf", REAL_PDF_PATTERNS),
+    ("pdf", PROBE_ONLY_PDF_PATTERNS),
     ("pptx", {}),
     ("pptx", {"has_text_layer": True, "has_slides": True}),
     ("pptx", {"has_text_layer": True}),
@@ -134,7 +153,12 @@ class TestExplainAgreesWithThePlanner:
                 # `impossible` refines not-applicable. Its reason is either the one the run
                 # records or the sentence naming the requirement no file of this format can
                 # satisfy — never a third wording invented by the explainer.
-                assert task.reason in {reason, _no_declared_structure_reason(fmt)}
+                #
+                # Built from SENTINEL_REASONS rather than from a hand-written list, so a
+                # new sentinel arrives here with its own sentence instead of failing this
+                # test into a wider allowance.
+                sentinel_reasons = {builder(fmt) for builder in SENTINEL_REASONS.values()}
+                assert task.reason in {reason} | sentinel_reasons
 
     @pytest.mark.parametrize("fmt,patterns", AGREEMENT_GRID)
     def test_no_task_is_explained_as_something_the_plan_did_not_decide(self, fmt, patterns):
@@ -263,11 +287,15 @@ class TestConditionalAnswer:
 
 
 class TestNoProberIsConcrete:
-    def test_pptx_is_answered_concretely_and_nothing_but_probe_is_enqueued(self):
-        """11.2's own example: "what would a `.pptx` do?" Today — probe identifies it and
-        nothing downstream can become eligible, because nothing reports a pattern."""
-        assert "pptx" not in PROBERS_AVAILABLE
-        plan = explain_plan("pptx")
+    def test_epub_is_answered_concretely_and_nothing_but_probe_is_enqueued(self):
+        """11.2's own example, moved to the format it is still true of.
+
+        It was written about `.pptx`. OFFICE_SPEC.md phasing step 4 gave `pptx` a prober,
+        so its answer is now conditional (see below) — EPUB is the remaining ZIP container
+        probe identifies and cannot look inside.
+        """
+        assert "epub" not in PROBERS_AVAILABLE
+        plan = explain_plan("epub")
 
         assert plan.prober_available is False
         assert plan.patterns_known is True
@@ -277,13 +305,32 @@ class TestNoProberIsConcrete:
         assert enqueued == [TASK_PROBE]
         assert not any(task.outcome == OUTCOME_CONDITIONAL for task in plan.tasks)
 
-    def test_pptx_declared_structure_keeps_its_real_condition(self):
-        """`pptx` HAS a declared-structure pattern — its slide list. It is not applicable
+    def test_epub_declared_structure_keeps_its_real_condition(self):
+        """`epub` HAS a declared-structure pattern — its outline. It is not applicable
         because nothing measures it today, which is a different fact from impossible."""
-        assert DECLARED_STRUCTURE_PATTERN["pptx"] == "has_slides"
-        task = _by_task(explain_plan("pptx"))[TASK_STRUCTURE_DECLARED]
+        assert DECLARED_STRUCTURE_PATTERN["epub"] == "has_outline"
+        task = _by_task(explain_plan("epub"))[TASK_STRUCTURE_DECLARED]
         assert task.outcome == OUTCOME_NOT_APPLICABLE
-        assert "has_slides" in task.requires
+        assert "has_outline" in task.requires
+
+    def test_pptx_now_has_a_prober_and_so_answers_conditionally(self):
+        """The state change phasing step 4 made, from EXPLAIN's side.
+
+        `pptx` moved out of this section: a format with a prober cannot be answered
+        concretely without bytes, because what the prober will find is exactly what is
+        unknown. `has_slides` is now a condition that MIGHT hold rather than one nothing
+        will ever report.
+        """
+        assert "pptx" in PROBERS_AVAILABLE
+        plan = explain_plan("pptx")
+
+        assert plan.prober_available is True
+        assert plan.patterns_known is False
+        assert plan.patterns_source == PATTERNS_UNKNOWN
+
+        declared = _by_task(plan)[TASK_STRUCTURE_DECLARED]
+        assert declared.outcome == OUTCOME_CONDITIONAL
+        assert declared.requires == ("has_text_layer", "has_slides")
 
     def test_a_format_with_no_declared_structure_pattern_is_impossible_not_merely_false(self):
         assert "zip" not in DECLARED_STRUCTURE_PATTERN
@@ -390,7 +437,7 @@ class TestOptions:
 
     def test_params_are_reported_even_for_a_row_that_will_not_run(self):
         """What the queue row WOULD carry is part of the answer either way."""
-        tasks = _by_task(explain_plan("pptx", options={"structure": {"max_tokens": 60}}))
+        tasks = _by_task(explain_plan("epub", options={"structure": {"max_tokens": 60}}))
         assert tasks[TASK_STRUCTURE_DECLARED].outcome == OUTCOME_NOT_APPLICABLE
         assert tasks[TASK_STRUCTURE_DECLARED].params["max_tokens"] == 60
 
@@ -455,9 +502,9 @@ class TestExplainEndpoint:
         assert response.status_code == 200, response.text
         over_http = response.json()
 
-        from jmfts_core.contracts.explain import ExplainIngestResponse
+        from jmfts_core.explain_wire import explain_response_from_plan
 
-        in_process = ExplainIngestResponse.from_plan(
+        in_process = explain_response_from_plan(
             explain_plan(body["format"], body["options"], body["patterns"])
         )
         assert over_http == in_process.model_dump()
@@ -479,7 +526,7 @@ class TestExplainEndpoint:
         assert by_task[TASK_EXTRACT_TEXT]["requires"] == ["has_text_layer"]
 
     def test_a_no_prober_format_answers_concretely_over_http(self, client_with_db):
-        response = client_with_db.post("/ingest/explain", json={"format": "pptx"})
+        response = client_with_db.post("/ingest/explain", json={"format": "epub"})
         assert response.status_code == 200, response.text
         payload = response.json()
         assert payload["patterns_known"] is True

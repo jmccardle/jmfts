@@ -3,7 +3,16 @@
 import enum
 from datetime import datetime, timezone
 from typing import Optional, Any
-from sqlalchemy import String, Text, Integer, ForeignKey, DateTime, UniqueConstraint, Index, Enum
+from sqlalchemy import (
+    String,
+    Text,
+    Integer,
+    ForeignKey,
+    DateTime,
+    UniqueConstraint,
+    Index,
+    Enum,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from jmfts_core.database import Base
@@ -76,12 +85,8 @@ class Triple(Base):
     )
 
     # Temporal validity window
-    valid_from: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    valid_until: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    valid_from: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -152,5 +157,5 @@ class Triple(Base):
         )
 
 
-# Avoid circular import
-from jmfts_core.models.document import Document
+# Avoid circular import: document imports this module, so this cannot move to the top.
+from jmfts_core.models.document import Document  # noqa: E402

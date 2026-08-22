@@ -29,6 +29,9 @@ class SearchContextRepository:
             select(SearchContext).where(SearchContext.name == name)
         ).scalar_one_or_none()
 
+    def get_by_id(self, context_id: int) -> Optional[SearchContext]:
+        return self.session.get(SearchContext, context_id)
+
     def list_all(self) -> list[SearchContext]:
         return list(self.session.execute(select(SearchContext)).scalars().all())
 

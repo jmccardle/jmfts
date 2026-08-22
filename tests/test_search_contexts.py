@@ -7,7 +7,6 @@ which has a pre-existing pgvector compat issue in .venv.
 
 import fnmatch
 
-
 # ============================================================================
 # Inline copies of the pure functions from search.py for testability.
 # The canonical implementations live in jmfts_core/repositories/search.py.

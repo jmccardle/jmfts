@@ -76,7 +76,10 @@ caps how deep to traverse.
 
 ## When NOT to use this skill
 
+- "Read this document with full context" → **jmfts-read** (single-call
+  composite, includes children + links + triples in one shot).
 - "Find documents about X" → **jmfts-search**.
+- "Which documents are most important / hubs" → **jmfts-analyze**.
 
 ## Common patterns
 

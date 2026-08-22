@@ -49,7 +49,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from jmfts_core.config import Settings, get_settings
-from jmfts_core.contracts.attempt import param_fingerprint
+from jmfts_client.contracts.attempt import param_fingerprint
 from jmfts_core.embedder import get_embedder
 from jmfts_core.embedding import get_embedding_service
 from jmfts_core.ingest_options import resolve_options

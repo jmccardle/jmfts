@@ -2,7 +2,6 @@
 
 from jmfts_core.view_renderer import build_children_stubs, resolve_references
 
-
 # ---------------------------------------------------------------------------
 # resolve_references
 # ---------------------------------------------------------------------------

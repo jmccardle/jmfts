@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from jmfts_core.contracts.search_context import (
+from jmfts_client.contracts.search_context import (
     SearchContextCreate,
     SearchContextResponse,
     SearchContextUpdate,

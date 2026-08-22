@@ -25,7 +25,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from jmfts_core.contracts.view import (
+from jmfts_client.contracts.view import (
     BackReferenceItem,
     BackReferenceResponse,
     BreadcrumbResponse,

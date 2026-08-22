@@ -31,23 +31,23 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from jmfts_core.access import require_add_child
-from jmfts_core.contracts.attempt import AttemptRecord
-from jmfts_core.contracts.explain import (
+from jmfts_client.contracts.attempt import AttemptRecord
+from jmfts_client.contracts.explain import (
     AlreadyStored,
-    AnalyzedFile,
     AnalyzeIngestResponse,
     ExplainIngestRequest,
     ExplainIngestResponse,
     ProbeFailure,
 )
-from jmfts_core.contracts.ingest import (
+from jmfts_core.explain_wire import analyzed_file_from_detection, explain_response_from_plan
+from jmfts_client.contracts.ingest import (
     IngestRequest,
     IngestResponse,
     IngestStageResult,
     PipelineInfo,
     PipelineStageInfo,
 )
-from jmfts_core.contracts.upload import FileUploadResponse, IngestFrontierResponse, UploadedFile
+from jmfts_client.contracts.upload import FileUploadResponse, IngestFrontierResponse, UploadedFile
 from jmfts_core.ingest_options import resolve_options
 from jmfts_core.ingest_tasks import (
     OPTIONS_KEY,
@@ -632,7 +632,7 @@ class IngestService:
         plan under options the run would reject would be the wrong answer this endpoint
         exists to prevent.
         """
-        return ExplainIngestResponse.from_plan(
+        return explain_response_from_plan(
             explain_plan(request.format, request.options, request.patterns)
         )
 
@@ -703,7 +703,7 @@ class IngestService:
         detection = detect_format(data, filename=filename, declared_mime=declared_mime)
         digest = hashlib.sha256(data).hexdigest()
 
-        analyzed = AnalyzedFile.from_detection(
+        analyzed = analyzed_file_from_detection(
             detection,
             filename=filename,
             byte_size=len(data),
@@ -736,7 +736,7 @@ class IngestService:
             format=detection.format,
             patterns=patterns,
             probe_detail=probe_detail,
-            plan=ExplainIngestResponse.from_plan(plan),
+            plan=explain_response_from_plan(plan),
             already_stored=self._already_stored(digest, private),
         )
 

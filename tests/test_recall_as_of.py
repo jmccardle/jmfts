@@ -73,7 +73,7 @@ class TestAsOfFulltext:
         after = {r.document.id for r in repo.fulltext_search(TERM, as_of=NOW - timedelta(days=10))}
 
         assert no_event.id not in before  # created 30d ago, cutoff at 40d ago → excluded
-        assert no_event.id in after       # cutoff at 10d ago → visible
+        assert no_event.id in after  # cutoff at 10d ago → visible
 
     def test_naive_cutoff_is_read_as_utc(self, db_session):
         """The ORM writes naive utcnow() into TIMESTAMPTZ, so a naive as_of means UTC —

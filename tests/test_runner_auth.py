@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 import jmfts_core.rest.main as main
 from jmfts_core.config import get_settings
 from jmfts_core.rest.auth import RUNNER_PREFIX, require_runner
+from jmfts_core.rest.wiring import iter_mounted_api_routes
 from tests.conftest import AUTH_HEADERS
 
 RUNNER_KEY = "test-runner-key-shared-secret"
@@ -50,9 +51,7 @@ def without_runner_key(monkeypatch):
 
 
 def _runner_routes() -> list[APIRoute]:
-    return [
-        r for r in main.app.routes if isinstance(r, APIRoute) and r.path.startswith(RUNNER_PREFIX)
-    ]
+    return [r for r in iter_mounted_api_routes(main.app) if r.path.startswith(RUNNER_PREFIX)]
 
 
 def test_runner_prefix_is_actually_populated():
@@ -83,12 +82,14 @@ def test_no_route_outside_the_prefix_declares_require_runner():
     If it were accepted anywhere a principal is expected, it would be a second owner token
     that skips the grant checks — which is the coupling this whole split exists to avoid.
     """
+    outside = [r for r in iter_mounted_api_routes(main.app) if not r.path.startswith(RUNNER_PREFIX)]
+    # Vacuity guard, for the same reason test_runner_prefix_is_actually_populated has one:
+    # this assertion is "no route in a set has a property", which an empty set satisfies.
+    assert outside, "no routes mounted outside the runner prefix; this test proves nothing"
     strays = [
         (r.path, r.name)
-        for r in main.app.routes
-        if isinstance(r, APIRoute)
-        and not r.path.startswith(RUNNER_PREFIX)
-        and any(d.call is require_runner for d in r.dependant.dependencies)
+        for r in outside
+        if any(d.call is require_runner for d in r.dependant.dependencies)
     ]
     assert not strays, f"require_runner declared outside {RUNNER_PREFIX}: {strays}"
 

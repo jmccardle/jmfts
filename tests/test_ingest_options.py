@@ -21,7 +21,7 @@ import json
 import pytest
 from sqlalchemy import select
 
-from jmfts_core.contracts.upload import UploadedFile
+from jmfts_client.contracts.upload import UploadedFile
 from jmfts_core.ingest_options import (
     ROLLUP_PARAMS,
     INGEST_PROFILES,

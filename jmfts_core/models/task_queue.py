@@ -96,6 +96,45 @@ TASK_RESERVING_STATUSES: tuple[str, ...] = (TASK_CLAIMED, TASK_RUNNING, TASK_BAT
 #: make its stall detectable at all.
 TASK_REAPABLE_STATUSES: tuple[str, ...] = (TASK_CLAIMED, TASK_RUNNING)
 
+#: Task types whose PERMANENT failure must not fail the node they are scoped to.
+#: ``OFFICE_SPEC.md`` Part 5.
+#:
+#: Ordinarily a task that will not run again puts its scope node into ``settled='failed'``
+#: (:meth:`~jmfts_core.repositories.task_queue.TaskQueueRepository.fail`), and a failed node
+#: is terminal — the settle walk refuses to build on top of a hole
+#: (``jmfts_core/settling.py``). That is right for ``extract:text`` and wrong for
+#: ``citation``: a document whose rectangles could not be recovered is a perfectly good
+#: searchable document, and failing it would throw away the extraction, the chunks and the
+#: vectors over a missing convenience.
+#:
+#: The change this set makes is exactly one assignment wide, because a permanently failed
+#: task is ALREADY not counted as unfinished — see ``_unfinished_criterion`` in the
+#: repository, which treats "failed, not retryable or out of retries" as finished, so such a
+#: task never blocks the walk by itself. The only thing that blocks is the ``settled``
+#: write, and that is what an advisory type skips. Everything else about the failure is
+#: unchanged: the queue row is ``failed``, the retry budget was spent, and the attempt
+#: record on the node carries the error and its classification.
+#:
+#: DATA, IN ONE PLACE, for the reason ``TASK_ROWS`` is data: "advisory" is a property of the
+#: task TYPE, not of the call site. A boolean argument on ``fail`` would let two callers
+#: disagree about the same task, and the disagreement would show up as a node that settled
+#: on Tuesday and failed on Wednesday over the same missing anchor.
+#:
+#: **THE RULE FOR WHAT MAY BE ADDED HERE.** A task may be advisory only if a node without
+#: its output is still correct AND still says so. ``citation`` qualifies: a chunk with no
+#: anchor is a chunk, it retrieves and reads exactly as it did before anchors existed, and
+#: the absence is visible on the node (the handler records why it could not be resolved).
+#: ``extract:text`` does not qualify: a file node with no text is not a document, it is a
+#: lie — it settles, it enters the indexes, and it answers no query while looking finished.
+#: Adding a type here is therefore a decision about what a settled node MEANS, not a
+#: convenience for a task that fails too often. A task that fails too often needs its
+#: failure fixed.
+#:
+#: Spelled as a literal rather than imported from :mod:`jmfts_core.ingest_tasks`, which is
+#: where every task NAME is spelled: that module imports this one, so the dependency cannot
+#: run the other way. ``tests/test_citation_task.py`` pins the two spellings together.
+ADVISORY_TASK_TYPES: frozenset[str] = frozenset({"citation"})
+
 #: Declared write modes, spec 5.3. See ``TaskQueueRepository.claim_next`` for the
 #: conflict matrix these drive.
 WRITE_SELF = "self"

@@ -446,7 +446,7 @@ class TestGhostPredicateFilter:
         triple_repo = TripleRepository(db_session)
 
         # Create a ghost predicate (no triples)
-        ghost = triple_repo.create_predicate(name="ghost_pred_no_triples")
+        triple_repo.create_predicate(name="ghost_pred_no_triples")
         db_session.flush()
 
         # Create an active predicate with a triple
@@ -471,7 +471,7 @@ class TestGhostPredicateFilter:
         """with_triples_only=False (default) returns all predicates including ghosts."""
         triple_repo = TripleRepository(db_session)
 
-        ghost = triple_repo.create_predicate(name="ghost_pred_no_triples_2")
+        triple_repo.create_predicate(name="ghost_pred_no_triples_2")
         db_session.flush()
 
         results_all = triple_repo.list_predicates(with_triples_only=False)
@@ -483,7 +483,7 @@ class TestGhostPredicateFilter:
 
     def test_with_triples_only_returns_all_active_predicates(self, db_session, mock_embedding):
         """with_triples_only=True returns every predicate that has ≥1 triple."""
-        graph = _setup_graph(db_session, mock_embedding)
+        _setup_graph(db_session, mock_embedding)
         triple_repo = TripleRepository(db_session)
 
         # Add a ghost predicate that should not appear

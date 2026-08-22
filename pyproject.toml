@@ -1,9 +1,50 @@
 [project]
 name = "jmfts"
-version = "0.1.1"
+# The version is not a literal here. It is read from ``jmfts_core.__version__``, so the
+# wheel metadata and what the code reports can never disagree — they are the same line.
+# Bump that line to cut a release. NEVER add a ``version = "..."`` literal back to fix a
+# mismatch; tests/test_packaging.py forbids the second copy.
+dynamic = ["version"]
 description = "John McCardle's Fusion Tree Search - A focused retrieval appliance with matryoshka embeddings and late interaction"
 requires-python = ">=3.11"
+readme = "README.md"
+# SPDX expression + the file itself (PEP 639), which is why build-system below needs
+# setuptools >= 77.0.3: earlier versions ignore `license-files` and the wheel ships
+# without the licence text.
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Fight Fire with Fire Robotics, LLC" }]
+keywords = ["retrieval", "embeddings", "colbert", "bm25", "pgvector", "rag"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Database :: Database Engines/Servers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing :: Indexing",
+]
 dependencies = [
+    # The wire contracts, and the HTTP client generated from them. The dependency runs
+    # SERVER → CLIENT, which looks inverted and is deliberate: `jmfts_client.contracts` is
+    # the single definition of every request and response shape, and both `LocalJmftsClient`
+    # (in-process) and `RemoteJmftsClient` (HTTP) must validate against the SAME classes.
+    # Shipping a copy to each side would make them equal by value and unequal by
+    # `isinstance` — a bug that only appears when one process holds both, which is exactly
+    # what `JMFTS_RUNNER_URL` does when one appliance embeds against another.
+    #
+    # PINNED WITH `==`, not `>=`, because the two distributions release in lockstep and
+    # `_verbs.py` is generated from this server's route table. A client from a different
+    # release was generated from a different surface, and the mismatch would show up as a
+    # verb that is missing or whose parameters moved — at call time, on the wire, not at
+    # install time. `./bump-version.sh` moves this line and both `__version__` literals
+    # together, and tests/test_packaging.py fails if they disagree.
+    "jmfts-client==0.2.0",
     "fastapi>=0.109.0",
     # Required by the multipart upload route (POST /ingest/file). NOT optional and NOT
     # lazy: FastAPI checks for it while the ROUTE IS BUILT, i.e. at
@@ -32,6 +73,27 @@ dependencies = [
     "markdown-it-py>=3.0.0",
     "pymupdf>=1.24",
     "markdownify>=0.11",
+    # Reads an OLE2 compound file's directory. In BASE rather than in the `office` extra
+    # below, and the reason is that `probe` runs on every install and has to schedule
+    # from what it finds (INGEST_SPEC.md Part 4).
+    #
+    # Two completely different things arrive as OLE2, and `detect_format` cannot tell
+    # them apart from magic bytes because they share the same eight: a legacy
+    # `.doc`/`.xls`/`.ppt`, and an ENCRYPTED OOXML package — an encrypted `.docx` is not
+    # a ZIP at all, it is an OLE2 file holding `EncryptionInfo` and `EncryptedPackage`
+    # streams. The first should be converted (see the `convert` extra); the second must
+    # fail probe with a named reason. Sending the second down the first's path means a
+    # converter failing on bytes it was never going to read, which is a confusing error
+    # a long way from its cause.
+    #
+    # Telling them apart is one directory listing. olefile is a single pure-Python module
+    # with no dependencies of its own, so carrying it in base costs the storage-side
+    # worker nothing measurable and makes `ole2` an answer instead of a dead end.
+    #
+    # No code imports it yet. docs/OFFICE_SPEC.md Part 11 step 4 is the prober that does;
+    # it is declared here now because WHICH TIER it belongs to is the packaging decision,
+    # and tests/test_office_packaging.py holds it.
+    "olefile>=0.47",
 ]
 
 [project.scripts]
@@ -82,19 +144,100 @@ embed = [
     "sentence-transformers>=2.2.2",
 ]
 
+# READING AND WRITING OOXML PACKAGES. docs/OFFICE_SPEC.md Part 1.
+#
+# The same split as `embed`, for the same reason and at a much smaller scale. Base JMFTS
+# already DETECTS `.docx`/`.pptx`/`.xlsx` — `probe.detect_format` reads the ZIP manifest
+# and needs nothing but `zipfile` — and it already measures what they declare. Opening
+# one to get its text is the part that needs a reader, and a fleet is mostly workers that
+# never will.
+#
+# MEASURED, 2026-08-22, in an empty venv against the 0.2.0 wheels: base is 585 MB and
+# `[office]` is 629 MB, so this extra costs 44 MB — nothing like `embed`'s 4.6 GB, and
+# four times what the three named packages weigh on their own (docx 2.9, pptx 3.1,
+# openpyxl 3.0). The difference is transitive and is NOT pure Python: python-docx and
+# python-pptx both pull `lxml` (12 MB, C extension), python-pptx also pulls `Pillow`
+# (7.1 MB, C extension) and `XlsxWriter` (1.9 MB). Do not describe this extra as pure
+# Python — on a platform with no wheel for lxml or Pillow it needs a build toolchain,
+# which is exactly the failure a "pure Python" claim tells an operator not to plan for.
+#
+# It is separate anyway because the alternative is putting three readers into the base
+# install to serve the installs that ingest office files, which on most fleets is one
+# worker out of N.
+#
+# `jmfts_core.office` is the ONLY place these may be imported, and only through the
+# `require_*` guards there — see the module docstring, and
+# tests/test_office_packaging.py, which fails if an office library reaches the app's
+# import path.
+#
+# Deliberately NOT here: msoffcrypto-tool. It DECRYPTS a password-protected package, and
+# JMFTS has no path by which a caller could supply a password. DETECTING encryption is
+# `olefile`, which is a base dependency for that reason.
+office = [
+    "python-docx>=1.1.0",
+    "python-pptx>=0.6.23",
+    "openpyxl>=3.1.0",
+]
+
+# DRIVING LIBREOFFICE. docs/OFFICE_SPEC.md Parts 1 and 6.
+#
+# The third tier, and the reason it is a worker rather than an extra: `pip install
+# libreoffice` is not a thing. LibreOffice is a system package of several hundred MB, so
+# what ships is a badged worker image that has it, and this extra is only the Python
+# client that talks to it.
+#
+# `unoserver` and not `unoconv` (unmaintained), and not `soffice --headless --convert-to`
+# per file: that pays a cold start per document, and two concurrent invocations fight
+# over the same user profile directory. unoserver keeps one process warm and serialises.
+#
+# Two jobs, one dependency:
+#
+#   * convert a legacy `.doc`/`.xls`/`.ppt` to OOXML so the `office` readers above can
+#     open it — the alternative was three more binary-format readers in `office`, and
+#     LibreOffice is better at those formats than any of them;
+#   * render any document to PDF once, at ingest, so that serving a citation image is
+#     `pymupdf` over a stored rendition and needs NO tier-3 dependency on the query path.
+#
+# NOT implied by `dev`: the pip package installs cleanly with no LibreOffice present and
+# is useless without it, so a suite that installed it would be testing a configuration
+# nobody runs. The conversion path is exercised in its own CI job, on an image that has
+# the system package.
+#
+# No code imports this yet. docs/OFFICE_SPEC.md Part 11 step 7 is where it lands.
+convert = [
+    "unoserver>=3.0",
+]
+
 # The suite embeds for real — it ingests documents and asserts on the vectors — so dev
-# implies the model stack rather than testing a configuration nobody ships.
+# implies the model stack rather than testing a configuration nobody ships. `office` is
+# implied for the same reason: the office tests open real packages. `convert` is NOT,
+# because unoserver without LibreOffice underneath it is a configuration nobody runs.
 dev = [
     "jmfts[embed]",
+    "jmfts[office]",
     "pytest>=7.4.0",
     "pytest-asyncio>=0.23.0",
     "black>=24.1.0",
     "ruff>=0.1.0",
 ]
 
+# The PUBLIC repository only. This tree has a second, internal git remote whose history is
+# unfiltered; its hostname must never reach this file or a README, because both are
+# uploaded verbatim (pyproject.toml ships inside the sdist).
+# tests/test_no_host_addresses.py enforces that.
+[project.urls]
+Homepage = "https://github.com/jmccardle/jmfts"
+Repository = "https://github.com/jmccardle/jmfts"
+Issues = "https://github.com/jmccardle/jmfts/issues"
+
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+# >= 77.0.3 for PEP 639 `license-files`. Below that, setuptools ignores the key and the
+# wheel ships with no licence text at all.
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = { attr = "jmfts_core.__version__" }
 
 [tool.setuptools.packages.find]
 # EVERY top-level name here is claimed globally in the installing environment's
@@ -115,9 +258,44 @@ include = ["jmfts_core*", "jmfts_batch*"]
 # models but nothing that could create the tables they map to.
 "jmfts_core.sql" = ["*.sql", "migrations/*.sql"]
 
+# Not runtime data — documentation that lives inside the package because it describes
+# that package. Declared so `pip show -f jmfts` and an unpacked wheel carry it, and so
+# tests/test_packaging.py can hold "every non-.py file under a package is declared"
+# without an exception for markdown.
+"jmfts_batch" = ["README.md"]
+
+[tool.pytest.ini_options]
+# The suite is `tests/`, and only `tests/`. Without this, pytest's rootdir scan also
+# collects `scripts/test_summarization.py`, `scripts/test_embedding.py` and
+# `scripts/test_all_gguf.sh` — research scripts whose names happen to start with
+# `test_`. The first of them imports `datasets`, which is in no extra, so a bare
+# `pytest` on a correct install died during COLLECTION with ModuleNotFoundError and
+# ran nothing at all.
+testpaths = ["tests"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
+# THE RULE SET IS STATED, NOT INHERITED, and that is the whole point of this block.
+#
+# Leaving it implicit means "whatever this ruff version calls a default", and that moves:
+# measured on the tau monorepo, ruff 0.15.17 reported 0 findings and 0.16.4 reported 293
+# on the same unchanged tree, because 0.16 widened the default set (I, S, DTZ, FURB, PERF,
+# TRY, ...). A contributor whose install date differed by a few weeks would go red on code
+# they never touched.
+#
+# `.github/workflows/ci.yml` currently pins `ruff==0.15.9` to hold that still. Naming the
+# categories is the better fix, because it says what we check rather than freezing when we
+# checked it: pyflakes (F) plus the pycodestyle subsets that are real errors rather than
+# layout opinions. E1/E2/E3 stay out because black owns whitespace and wrapping, and two
+# tools with opinions about the same characters is a fight, not a gate. Import sorting (I)
+# is deferred deliberately rather than by accident of a version.
+#
+# Measured on the gated scope, this set reports the same findings the inherited default
+# did, so it narrows nothing that was catching anything.
+select = ["E4", "E7", "E9", "F"]
 
 [tool.black]
 line-length = 100

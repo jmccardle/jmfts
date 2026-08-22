@@ -11,7 +11,7 @@ import inspect
 import pytest
 
 from jmfts_core.client import LocalJmftsClient
-from jmfts_core.contracts.document import DocumentCreate
+from jmfts_client.contracts.document import DocumentCreate
 from jmfts_core.registry import REGISTRY
 from jmfts_core.repositories.document import DocumentRepository
 

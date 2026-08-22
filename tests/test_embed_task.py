@@ -17,7 +17,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from jmfts_core.contracts.upload import UploadedFile
+from jmfts_client.contracts.upload import UploadedFile
 from jmfts_core.ingest_tasks import TASK_EMBED, TASK_SUMMARIZE
 from jmfts_core.ingest_worker import IngestWorker
 from jmfts_core.models.document import (

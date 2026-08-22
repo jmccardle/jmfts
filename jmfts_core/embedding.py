@@ -307,6 +307,10 @@ class EmbeddingService:
             )
         return embedding
 
+    # `embed_texts` used to sit here — a document-vector-only batch path with no caller
+    # anywhere in the tree. `embed_batch_with_tokens` below is the batch method that is
+    # actually used (scripts/reembed_corpus.py), and it returns tokens as well.
+
     def truncate_embedding(
         self,
         embedding: np.ndarray,

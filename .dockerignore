@@ -7,10 +7,12 @@ __pycache__
 *.egg-info
 .pytest_cache
 tests
+benchmarks
 analysis
 test_reports
 scripts
 plugin
+docs
 *.md
 .env
 data

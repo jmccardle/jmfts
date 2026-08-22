@@ -33,9 +33,9 @@ from sqlalchemy import select, text
 
 from jmfts_core.rest.main import app
 from jmfts_core.access import AccessDeniedError, can_read, can_write
-from jmfts_core.contracts.attempt import AttemptRecord
-from jmfts_core.contracts.document import DocumentUpdate
-from jmfts_core.contracts.upload import UploadedFile
+from jmfts_client.contracts.attempt import AttemptRecord
+from jmfts_client.contracts.document import DocumentUpdate
+from jmfts_client.contracts.upload import UploadedFile
 from jmfts_core.database import get_db
 from jmfts_core.models.document import SETTLED_IN_FLIGHT, DocumentLink
 from jmfts_core.models.principal import AccessGrant, Principal as PrincipalModel
@@ -86,13 +86,29 @@ def pdf_bytes() -> bytes:
 def _make_docx_like_zip() -> bytes:
     """A ZIP carrying `word/document.xml` — enough for the manifest refinement.
 
-    Not a valid .docx (no prober opens it; that is phasing step 6). It exists to prove
-    that ZIP-container detection reads the archive's own directory rather than the name.
+    It exists to prove that ZIP-container detection reads the archive's own directory
+    rather than the name. The docx PROBER now opens this too (OFFICE_SPEC.md phasing step
+    4), so it is no longer the fixture for "a format probe cannot look inside" — see
+    `_make_epub_like_zip`.
     """
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("[Content_Types].xml", "<Types/>")
         archive.writestr("word/document.xml", "<document/>")
+    return buffer.getvalue()
+
+
+def _make_epub_like_zip() -> bytes:
+    """A ZIP that EPUB's own `mimetype` member identifies, and nothing here can look into.
+
+    EPUB is the remaining ZIP container with no prober: its outline lives in an `.ncx` or
+    a nav document and nothing reads either yet. That makes it the honest fixture for the
+    empty-pattern path, which used to be a `.docx`.
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("mimetype", "application/epub+zip")
+        archive.writestr("META-INF/container.xml", "<container/>")
     return buffer.getvalue()
 
 
@@ -417,14 +433,26 @@ class TestProbePatterns:
         assert patterns["has_text_layer"] is True
 
     def test_a_format_with_no_prober_returns_empty_patterns_and_says_why(self):
-        data = _make_docx_like_zip()
-        detection = detect_format(data, filename="report.docx")
+        data = _make_epub_like_zip()
+        detection = detect_format(data, filename="book.epub")
 
         patterns, detail = probe_patterns(data, detection)
 
         assert patterns == {}
-        assert detail["no_prober_for_format"] == "docx"
+        assert detail["no_prober_for_format"] == "epub"
         assert "pdf" in detail["probers_available"]
+
+    def test_the_office_formats_are_no_longer_on_that_path(self):
+        """The change phasing step 4 made, asserted from the outside.
+
+        A `.docx` used to take the branch above. It now gets a real pattern set, which is
+        what `DECLARED_STRUCTURE_PATTERN` has been waiting for.
+        """
+        data = _make_docx_like_zip()
+        patterns, detail = probe_patterns(data, detect_format(data, filename="report.docx"))
+
+        assert "no_prober_for_format" not in detail
+        assert patterns["part_count"] == 2
 
     def test_a_healthy_pdf_is_not_damaged(self, pdf_bytes):
         patterns, _ = probe_patterns(pdf_bytes, detect_format(pdf_bytes, filename="doc.pdf"))
@@ -540,15 +568,15 @@ class TestUploadFile:
         """Spec 3.4: `skipped` means never attempted. probe ran — it named the format."""
         _, node, attempts = _upload_and_run_probe(
             db_session,
-            _make_docx_like_zip(),
-            "report.docx",
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            _make_epub_like_zip(),
+            "book.epub",
+            "application/epub+zip",
         )
 
         probe = attempts[0]
         assert probe.status == "completed"
-        assert probe.detail["no_prober_for_format"] == "docx"
-        assert node.structured_content["matched"]["format"] == "docx"
+        assert probe.detail["no_prober_for_format"] == "epub"
+        assert node.structured_content["matched"]["format"] == "epub"
 
     def test_a_mime_disagreement_is_recorded_on_both_sides(self, db_session, pdf_bytes):
         """Spec 3.1: record both, do not silently trust one."""

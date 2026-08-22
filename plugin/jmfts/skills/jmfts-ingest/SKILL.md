@@ -10,31 +10,30 @@ description: Use when adding durable content to the knowledgebase — a URL, PDF
 ```
 What's the source?
 
-URL (article, blog, wiki page)        → jmfts_ingest --usetype wiki:url
-arXiv paper (any URL form or ID)      → jmfts_ingest --usetype wiki:arxiv
-PDF on local disk                     → jmfts_ingest --usetype wiki:pdf
+URL (article, blog, wiki page)        → wiki_ingest_url
+arXiv paper (any URL form or ID)      → wiki_ingest_arxiv
+PDF on local disk                     → wiki_ingest_pdf
 Markdown / plain text in hand         → jmfts_ingest --usetype markdown
 Conversation JSONL or messages        → jmfts_ingest --usetype conversation
 Voice transcript                      → jmfts_ingest --usetype transcript
 Raw text (no structure)               → jmfts_ingest --usetype raw
+Append a dated entry to a log doc     → wiki_log_append
 ```
-
-`--usetype` names the pipeline; the content it receives on stdin (or via
-`--content-file`) is whatever that pipeline takes as its source. For the
-source-fetch pipelines that source is a URL, an arXiv ID, or a local path
-— the server does the fetching.
 
 ## Canonical invocations
 
 ```bash
 # Source-fetch pipelines (server fetches & converts)
-echo 'https://example.com/article' | python -m scripts.jmfts_ingest --usetype wiki:url --parent-id 0 --pretty
-echo '2310.06770' | python -m scripts.jmfts_ingest --usetype wiki:arxiv --parent-id 0 --pretty
-echo './paper.pdf' | python -m scripts.jmfts_ingest --usetype wiki:pdf --parent-id 0 --pretty
+python -m scripts.wiki_ingest_url https://example.com/article --parent-id 0 --pretty
+python -m scripts.wiki_ingest_arxiv 2310.06770 --parent-id 0 --pretty
+python -m scripts.wiki_ingest_pdf ./paper.pdf --parent-id 0 --pretty
 
 # Direct content ingest
 python -m scripts.jmfts_ingest --content-file notes.md --usetype markdown --title "Notes" --parent-id 0
 echo '## Finding\n\nBody.' | python -m scripts.jmfts_ingest --usetype markdown --title "Finding"
+
+# Append-only log
+python -m scripts.wiki_log_append --doc-id 1234 "investigated X, found Y"
 ```
 
 ## Idempotency
@@ -61,8 +60,7 @@ Defaults vary by pipeline. Source-fetch pipelines (`wiki:url`,
 ingested content first. Override with flags:
 
 ```bash
-echo URL | python -m scripts.jmfts_ingest --usetype wiki:url \
-  --pipeline-config '{"summarize":{"enabled":true},"extract_facts":{"enabled":true}}'
+python -m scripts.wiki_ingest_url URL --summarize --extract-facts
 ```
 
 Or with a JSON config:
@@ -104,5 +102,6 @@ Agents can pass additional metadata via `--structured-content '{...}'`
 
 ## After ingestion
 
-`POST /ingest` returns `source_document_id`. To read it back, or to verify
-embeddings landed, use **jmfts-explore** action `get`.
+`POST /ingest` returns `source_document_id`. To read it back with
+context, use the **jmfts-read** skill. To verify embeddings landed, use
+**jmfts-explore** action `get`.

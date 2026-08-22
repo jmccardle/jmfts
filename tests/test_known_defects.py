@@ -14,7 +14,6 @@ import pytest
 from jmfts_core.chunking import ChunkStrategy, chunk_text
 from jmfts_core.config import get_settings
 
-
 # --------------------------------------------------------------------------- #
 # Test data — the exact inputs that reproduced each defect
 # --------------------------------------------------------------------------- #
@@ -22,8 +21,7 @@ from jmfts_core.config import get_settings
 # ~90 sentences averaging ~75 chars, none of which reaches min_chunk_length=100.
 # Pre-fix, the merge loop glued all 90 into a single 6,840-char chunk.
 MANY_SHORT_SENTENCES = " ".join(
-    f"Sentence number {i} is short and carries a little payload of text."
-    for i in range(90)
+    f"Sentence number {i} is short and carries a little payload of text." for i in range(90)
 )
 
 # A single unbroken "word" — a base64 blob, a minified JS line, a data URI.
@@ -38,6 +36,7 @@ ONE_LONG_PARAGRAPH = "This is a clause that just keeps going and going " * 200
 # --------------------------------------------------------------------------- #
 # D1 — the embedder truncated at 512 tokens and said nothing
 # --------------------------------------------------------------------------- #
+
 
 class TestD1EmbedderTruncation:
     """The token-selection window is a memory budget, not a secret.
@@ -87,6 +86,7 @@ def settings_window() -> int:
 # D2 — the chunker did not bound chunk size on either default path
 # --------------------------------------------------------------------------- #
 
+
 class TestD2ChunkerDoesNotBoundSize:
     def test_merge_loop_does_not_grow_without_bound(self):
         """Reproduces the headline case: 90 short sentences -> ONE 6,840-char chunk.
@@ -107,9 +107,9 @@ class TestD2ChunkerDoesNotBoundSize:
             f"{len(chunks[0].text)} chars — the merge loop is unbounded"
         )
         for c in chunks:
-            assert len(c.text) <= max_chars, (
-                f"chunk {c.index} is {len(c.text)} chars, over the {max_chars} cap"
-            )
+            assert (
+                len(c.text) <= max_chars
+            ), f"chunk {c.index} is {len(c.text)} chars, over the {max_chars} cap"
 
     def test_sentence_strategy_bounds_a_long_paragraph(self):
         """`max_tokens` was honoured by token_count only; sentence/paragraph ignored it.
@@ -169,6 +169,7 @@ class TestD2ChunkerDoesNotBoundSize:
 # D4 — a word-based chunker cannot split text with no word boundaries
 # --------------------------------------------------------------------------- #
 
+
 class TestD4NoWordBoundaries:
     def test_unbroken_token_is_hard_split(self):
         """A 15,000-char base64 blob is one 'word'. Whitespace splitting cannot touch it.
@@ -189,9 +190,7 @@ class TestD4NoWordBoundaries:
             assert len(c.text) <= max_chars
 
     def test_unbroken_token_loses_no_characters(self):
-        chunks = chunk_text(
-            UNBROKEN_TOKEN, strategy=ChunkStrategy.token_count, max_chars=1800
-        )
+        chunks = chunk_text(UNBROKEN_TOKEN, strategy=ChunkStrategy.token_count, max_chars=1800)
         assert "".join(c.text for c in chunks) == UNBROKEN_TOKEN
 
     def test_mixed_prose_and_blob(self):
@@ -208,6 +207,7 @@ class TestD4NoWordBoundaries:
 # --------------------------------------------------------------------------- #
 # D3 — index-document double-counted, corrupting BM25 permanently
 # --------------------------------------------------------------------------- #
+
 
 @pytest.fixture
 def db_session():
@@ -289,12 +289,10 @@ class TestD3IndexDocumentIsIdempotent:
             "total_docs was incremented unconditionally — BM25 length normalisation "
             "is now derived from a corpus size that does not exist"
         )
-        assert after_second["avg_doc_length"] == pytest.approx(
-            after_first["avg_doc_length"]
-        )
-        assert after_second["doc_freqs"] == after_first["doc_freqs"], (
-            "doc_freq was incremented unconditionally — every term's IDF is now wrong"
-        )
+        assert after_second["avg_doc_length"] == pytest.approx(after_first["avg_doc_length"])
+        assert (
+            after_second["doc_freqs"] == after_first["doc_freqs"]
+        ), "doc_freq was incremented unconditionally — every term's IDF is now wrong"
 
     def test_reindexing_updates_stats_when_content_changes(self, db_session):
         """Idempotent must not mean inert: new terms count, dropped terms decount."""

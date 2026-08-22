@@ -59,7 +59,7 @@ from typing import Callable, Iterable, Literal, Optional, Protocol, Sequence
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from jmfts_core.contracts.attempt import param_fingerprint
+from jmfts_client.contracts.attempt import param_fingerprint
 from jmfts_core.database import get_session
 from jmfts_core.models.document import (
     Document,

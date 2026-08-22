@@ -6,7 +6,7 @@ model this process holds; the two POSTs return vectors for text handed to them.
 Why this exists as a separate surface rather than as more of the document API: embedding is
 the only step in ingestion that wants a GPU, and the only one that holds no state. Splitting
 it out lets one accelerator serve several isolated JMFTS databases, and lets a storage-side
-worker run with a tokenizer and no model weights at all. See jmfts_core/contracts/runner.py
+worker run with a tokenizer and no model weights at all. See jmfts-client/jmfts_client/contracts/runner.py
 for the wire format and jmfts_core/rest/auth.py::require_runner for the credential.
 
 Every route here declares `require_runner` through the router's `dependencies`, and the
@@ -20,7 +20,7 @@ import numpy as np
 from fastapi import APIRouter, Depends, HTTPException
 
 from jmfts_core.config import get_settings
-from jmfts_core.contracts.runner import (
+from jmfts_client.contracts.runner import (
     DOC_DTYPE,
     TOKEN_DTYPE,
     RunnerEmbedRequest,

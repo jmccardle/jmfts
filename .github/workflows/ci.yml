@@ -1,0 +1,295 @@
+# The gate: everything docs/RELEASING.md step 2 tells you to run by hand, run on every
+# push and every pull request — and reusable, so publish.yml can *require* it instead of
+# trusting that somebody remembered.
+#
+# Three jobs, because they fail for three different reasons and cost three different
+# amounts:
+#
+#   suite      the whole test suite against a real pgvector, on the floor interpreter.
+#              Slow — it embeds for real — and the only one that catches a code defect.
+#   packaging  the release guards, on every interpreter pyproject.toml claims. Needs no
+#              database, no model and no torch, which is what makes four of them cheap.
+#   lint       black and ruff, exactly as the runbook states them.
+#
+# "Fail Early" (CLAUDE.md): there is no `continue-on-error`, no `|| true`, and no step
+# anywhere in this file that turns a failure into a warning. Shell steps run under
+# `set -euo pipefail`. Watch particularly for the *green* failure — a run that passes
+# having tested nothing — which is why the suite job asserts its database exists before
+# and after provisioning rather than letting conftest.py's skip path stand.
+#
+# This file lives in `.github/`, which is published (tests/test_readme_links.py::PUBLISHED)
+# and therefore may not name the internal git remote. Refer to it as "the internal git
+# remote", as docs/RELEASING.md does.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  # publish.yml calls this file as its gate. A tag that has not passed this is not a
+  # release; making it a job dependency is what stops "the tests were run at some point"
+  # from being the only evidence behind an upload that can never be taken back.
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One run per ref. Cancelling a superseded CI run is safe and saves a runner — unlike
+  # publish.yml, where cancel-in-progress is deliberately false because cancelling
+  # mid-upload is the half-published state that pipeline exists to avoid.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    name: Test suite (py3.11, pgvector)
+    runs-on: ubuntu-latest
+
+    services:
+      # The same image scripts/run_tests_docker.sh starts, with the same credentials, so
+      # the local gate and this one are the same run in two places. `jmfts` is a superuser
+      # in this image — that is the CREATEDB tests/conftest.py's docstring requires in
+      # order to drop and recreate `jmfts_test`.
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: jmfts
+          POSTGRES_PASSWORD: jmfts
+          POSTGRES_DB: jmfts
+        ports:
+          - 5432:5432
+        # Without a health check the job races the database: the first psql lands while
+        # postgres is still initialising and conftest.py falls into its skip path, which
+        # is a GREEN run that tested nothing.
+        options: >-
+          --health-cmd "pg_isready -U jmfts -d jmfts"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # conftest.py reads these through jmfts_core.config.Settings, derives `jmfts_test`
+      # from db_name, drops and recreates it, loads jmfts_core/sql/schema.sql into it, and
+      # repoints the app there. Same five variables scripts/run_tests_docker.sh exports.
+      JMFTS_DB_HOST: localhost
+      JMFTS_DB_PORT: "5432"
+      JMFTS_DB_USER: jmfts
+      JMFTS_DB_PASSWORD: jmfts
+      JMFTS_DB_NAME: jmfts
+      # A hosted runner has no GPU. Sixth variable from the same script.
+      JMFTS_EMBEDDING_DEVICE: cpu
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # The floor `requires-python = ">=3.11"` declares. The suite runs here and only
+          # here: it needs a database and a model, and running that four times would cost
+          # more than it tells you. Version *compatibility* is the packaging job's claim.
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Cache the Hugging Face model directory
+        uses: actions/cache@v4
+        with:
+          # HF's own default location, not overridden, so the path cached here and the
+          # path the model actually lands in cannot drift apart.
+          path: ~/.cache/huggingface
+          # jmfts_core/config.py is where the model names live (embedding_model,
+          # reranker_model). Change one and this key misses, which is correct — the old
+          # cache holds the wrong weights. restore-keys still seeds it with the rest, so
+          # a rename costs one download and not all of them.
+          key: hf-${{ runner.os }}-${{ hashFiles('jmfts_core/config.py') }}
+          restore-keys: |
+            hf-${{ runner.os }}-
+
+      - name: Install (CPU torch first, then the dev extra)
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          # The two steps the `embed` extra's comment in pyproject.toml describes, and the
+          # two the Dockerfile takes. The ORDER is load-bearing: with torch>=2.1.0 already
+          # satisfied from the CPU index, the install below never reaches for the default
+          # PyPI wheel, which drags several GB of nvidia-* CUDA runtime onto a runner that
+          # has no GPU to use it with.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          # `jmfts` declares `jmfts-client>=0.1.0`, and that name is not on PyPI yet, so
+          # the install below would fail resolving it. Install the copy in this tree first
+          # and the requirement is already satisfied when pip reads it. This is also the
+          # only correct thing to test: CI must exercise the client this commit carries,
+          # never whatever version an index happens to hold.
+          pip install -e ./jmfts-client
+          pip install -e ".[dev]"
+
+      - name: The database is reachable, and it is really pgvector
+        run: |
+          set -euo pipefail
+          # Three failures this catches, and every one of them would otherwise produce a
+          # green run: no psql on PATH (conftest prints and skips), a service container
+          # that is up but unreachable (same), and a plain `postgres` image that answers
+          # SELECT and then fails deep inside the schema load, where the cause is a long
+          # way from the symptom. CREATE EXTENSION is the only one of the three that
+          # actually proves the image. The GitHub-hosted Ubuntu image ships the postgres
+          # client; if a future image stops doing so this line is where it says so, and
+          # the fix is `sudo apt-get install -y postgresql-client` here — not a softer
+          # check, and not letting conftest's skip path stand.
+          psql --version
+          PGPASSWORD=jmfts psql -h localhost -p 5432 -U jmfts -d jmfts -Xq \
+            -v ON_ERROR_STOP=1 \
+            -c "SELECT version()" \
+            -c "CREATE EXTENSION IF NOT EXISTS vector"
+
+      - name: The test database really got provisioned
+        run: |
+          set -euo pipefail
+          # conftest.py deliberately does NOT abort collection when provisioning fails: it
+          # prints, leaves DB_READY False, and lets every DB-backed test skip. That is the
+          # right call on a laptop with no postgres and the wrong one in a gate, where it
+          # turns a broken schema load into ~1400 silent skips and a green check mark.
+          # Importing it here runs the same provisioning and makes the answer a failure.
+          python - <<'PY'
+          import sys
+
+          from tests.conftest import DB_READY
+
+          if not DB_READY:
+              sys.exit(
+                  "conftest could not provision jmfts_test — the suite would have run "
+                  "with every database test SKIPPED. The message above says why."
+              )
+          print("jmfts_test provisioned; DB-backed tests will actually run")
+          PY
+
+      - name: pytest
+        run: |
+          set -euo pipefail
+          pytest tests/ -q
+
+  packaging:
+    name: Release guards (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      # NOT fail-fast. This is a compatibility matrix, and "3.14 alone fails" and "all
+      # four fail" are different findings that lead to different fixes. Cancelling the
+      # other three throws that away to save four minutes.
+      fail-fast: false
+      matrix:
+        # Every version pyproject.toml's classifiers claim. A classifier is a promise on
+        # the PyPI page; leaving a hole here would ship the promise without the evidence.
+        # Quoted, always: unquoted 3.10 is the float 3.1.
+        #
+        # These legs install the BASE dependency set, which includes four compiled
+        # packages (psycopg2-binary, numpy, python-igraph, leidenalg). If the newest leg
+        # fails because one of them has no wheel for that interpreter yet, that is the
+        # finding: the classifier claims a version the dependency tree cannot yet install.
+        # Fix the classifier, or wait for the wheel. Do not delete the leg.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install base JMFTS and pytest — no model stack, no office readers
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          # NOT `.[dev]`. dev implies `embed`, and installing torch four more times would
+          # dominate this workflow to prove nothing these tests assert. pytest is named
+          # directly for the same reason; it is the only part of dev this job runs.
+          #
+          # `office` is left out too, which costs one skip:
+          # test_the_guards_return_the_real_module_when_it_is_installed importorskips
+          # `docx`. Its other half — that a MISSING reader is a named permanent error —
+          # runs here, and the installed half runs in the suite job, which does install
+          # dev. Both halves are covered; neither is covered four times.
+          #
+          # A side effect worth naming: this IS a base install, so
+          # test_starting_the_app_imports_no_office_reader's subprocess proves on four
+          # interpreters that the API, the worker and the task registry import with no
+          # torch and no readers present. That is most of what
+          # scripts/check_base_install.sh asserts, for the price of a `pip install .`.
+          #
+          # The client comes first for the reason the suite job gives: `jmfts` depends on
+          # a name PyPI does not carry yet, and the version under test is this one.
+          pip install -e ./jmfts-client
+          pip install -e .
+          pip install pytest
+
+      - name: The release guards
+        run: |
+          set -euo pipefail
+          # The four files docs/RELEASING.md step 2 calls out as failing on a RELEASE
+          # defect rather than a code defect, plus the office tier split. None of them
+          # touch the database: conftest.py will report that it could not provision
+          # jmfts_test and that is expected here — nothing in these files uses db_session.
+          #
+          # test_no_host_addresses.py shells out to `git ls-files`, so it needs a work
+          # tree. actions/checkout gives one; a source tarball would not.
+          pytest \
+            tests/test_packaging.py \
+            tests/test_office_packaging.py \
+            tests/test_readme_links.py \
+            tests/test_no_host_addresses.py \
+            -q
+
+  lint:
+    name: black + ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the formatter and the linter, pinned
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          # PINNED, not `>=` as in the dev extra. A formatter that floats reformats
+          # untouched code the day it releases, and the next unrelated pull request goes
+          # red for a reason its author cannot see in their own diff. These two versions
+          # are what the developer's venv runs today; bump them in a commit that also runs
+          # the new black over the gated scope, never as a drive-by.
+          #
+          # ruff's pin is now belt-and-braces rather than the whole belt: pyproject.toml's
+          # [tool.ruff.lint] STATES the rule set, so a newer ruff widening its defaults no
+          # longer turns clean code red. See the comment there.
+          pip install black==26.3.1 ruff==0.15.9
+
+      # WHAT THIS GATE COVERS, and why it is not the whole tree.
+      #
+      # The scope is the two distributions plus the suite that proves them: everything
+      # that goes into a wheel, and everything that decides whether the wheel is right.
+      # It was green when this scope was set — 27 files formatted and 26 findings fixed
+      # in one commit, of which five were genuinely dead code in jmfts_core/.
+      #
+      # Outside it are jmfts-needle/, scripts/, benchmarks/ and analysis/: research code
+      # that is not in tests/test_readme_links.py::PUBLISHED and never reaches a user.
+      # Gating those would have cost 84 more files and 102 more findings, and would hold
+      # exploratory code to the standard of shipped code — which is how a gate stops being
+      # run rather than how code gets better. The τ monorepo draws the same line for the
+      # same reason and says so in its own RELEASING.md.
+      #
+      # This is a scope, not an exemption: the excluded trees still fail the suite if they
+      # break, and moving a file INTO jmfts_core/ moves it into the gate. Do not widen the
+      # exclusion to make a red build green — add the path to the gate or fix the file.
+      - name: black --check
+        run: |
+          set -euo pipefail
+          black --line-length 100 --check jmfts_core jmfts-client tests
+
+      - name: ruff check
+        run: |
+          set -euo pipefail
+          ruff check jmfts_core jmfts-client tests

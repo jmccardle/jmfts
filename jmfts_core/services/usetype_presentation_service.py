@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from jmfts_core.contracts.usetype_presentation import (
+from jmfts_client.contracts.usetype_presentation import (
     UsetypePresentationCreate,
     UsetypePresentationResponse,
     UsetypePresentationUpdate,

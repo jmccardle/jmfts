@@ -30,12 +30,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 
 from jmfts_core.rest.main import app
-from jmfts_core.contracts.ingest import IngestRequest
-from jmfts_core.contracts.upload import UploadedFile
+from jmfts_client.contracts.ingest import IngestRequest
+from jmfts_client.contracts.upload import UploadedFile
 from jmfts_core.database import get_db, get_session
 from jmfts_core.ingest_options import OPTION_CHECKS, STRUCTURE_CHUNK_PARAMS
 from jmfts_core.ingest_tasks import (
-    DECLARED_STRUCTURE,
+    SENTINEL_PATTERNS,
+    TASK_CITATION,
     TASK_EMBED,
     TASK_EXTRACT_IMAGES,
     TASK_EXTRACT_TABLES,
@@ -49,6 +50,7 @@ from jmfts_core.ingest_tasks import (
     TaskOutcome,
     TaskRow,
     UnknownTaskError,
+    _split_by_handler,
     get_task_handler,
     plan_after_probe,
     register_task_handler,
@@ -176,11 +178,28 @@ class TestEnqueueConditions:
         plan = plan_after_probe("pdf", {"has_text_layer": True, "has_outline": True})
 
         names = [spec.task_type for spec in plan.eligible]
-        assert names == [TASK_EXTRACT_TEXT, TASK_STRUCTURE_DECLARED]
+        assert names == [TASK_EXTRACT_TEXT, TASK_STRUCTURE_DECLARED, TASK_CITATION]
+        after = dict((s.task_type, s.after) for s in plan.eligible)
         # 5.5's within-node ordering: structure:declared depends on extract:text.
-        assert dict((s.task_type, s.after) for s in plan.eligible)[TASK_STRUCTURE_DECLARED] == (
-            TASK_EXTRACT_TEXT,
-        )
+        assert after[TASK_STRUCTURE_DECLARED] == (TASK_EXTRACT_TEXT,)
+        # OFFICE_SPEC.md Part 5: citation's `after_any` collapses to the rung that actually
+        # came out eligible, so the queue gates it on THAT row being completed. Naming both
+        # rungs in `after` would name two rows that can never both fire.
+        assert after[TASK_CITATION] == (TASK_STRUCTURE_DECLARED,)
+
+    def test_citation_follows_whichever_structure_rung_ran(self):
+        inferred = plan_after_probe("pdf", {"has_text_layer": True})
+
+        after = dict((s.task_type, s.after) for s in inferred.eligible)
+        assert after[TASK_CITATION] == (TASK_STRUCTURE_INFERRED,)
+
+    def test_citation_is_impossible_for_a_format_with_no_page_geometry(self):
+        """A `.txt` has no page a rectangle could sit on, and that is a fact about the
+        FORMAT — so the row can never fire for it, whatever the bytes turn out to be."""
+        plan = plan_after_probe("text", {"has_text_layer": True, "has_headings": True})
+
+        assert TASK_CITATION not in [spec.task_type for spec in plan.eligible]
+        assert "page geometry" in plan.not_applicable[TASK_CITATION]
 
     def test_no_text_layer_makes_extract_text_not_applicable(self):
         plan = plan_after_probe("pdf", {"has_text_layer": False, "has_outline": True})
@@ -197,11 +216,59 @@ class TestEnqueueConditions:
 
     def test_tables_and_images_follow_their_own_patterns(self):
         plan = plan_after_probe(
-            "pdf", {"has_text_layer": True, "has_tables": True, "has_images": True}
+            "pdf", {"has_text_layer": True, "pages_with_tables": [0, 7], "has_images": True}
         )
 
         names = [spec.task_type for spec in plan.eligible]
         assert TASK_EXTRACT_TABLES in names and TASK_EXTRACT_IMAGES in names
+
+    def test_an_empty_page_list_blocks_the_tables_row(self):
+        """A LIST pattern decides the row by truthiness, so [] must read as `false`.
+
+        The pattern used to be a boolean. Nothing about the row changed when it became a
+        list, and that is the property worth pinning: a document measured to have no tables
+        is not-applicable for `extract:tables`, not eligible-with-nothing-to-do.
+        """
+        plan = plan_after_probe("pdf", {"has_text_layer": True, "pages_with_tables": []})
+
+        assert TASK_EXTRACT_TABLES not in [spec.task_type for spec in plan.eligible]
+        assert "pages_with_tables" in plan.not_applicable[TASK_EXTRACT_TABLES]
+        assert plan.not_applicable[TASK_EXTRACT_TABLES].endswith("is false")
+
+    def test_an_unmeasured_pattern_does_not_read_as_a_measured_false(self):
+        """ "Nobody looked" and "we looked and found none" are different answers.
+
+        This stopped being academic when `probe` stopped scanning for tables: at probe
+        time the key is genuinely absent for every PDF, so a reason that said
+        `is false or absent` would report "this document has no tables" about a document
+        nothing had examined. 11.2 refuses the same conflation for `probe_failed`.
+        """
+        absent = plan_after_probe("pdf", {"has_text_layer": True})
+        measured_false = plan_after_probe("pdf", {"has_text_layer": True, "pages_with_tables": []})
+
+        assert absent.not_applicable[TASK_EXTRACT_TABLES] == (
+            "patterns.pages_with_tables was not measured"
+        )
+        assert measured_false.not_applicable[TASK_EXTRACT_TABLES] == (
+            "patterns.pages_with_tables is false"
+        )
+        assert (
+            absent.not_applicable[TASK_EXTRACT_TABLES]
+            != measured_false.not_applicable[TASK_EXTRACT_TABLES]
+        )
+
+    def test_a_populated_page_list_reaches_the_deferred_path(self):
+        """The condition holds, and `extract:tables` still has no handler.
+
+        Two different facts (spec 3.4), and this is the one that says the CONDITION is
+        satisfied — so when the handler lands, nothing about the schedule has to change.
+        """
+        plan = plan_after_probe("pdf", {"has_text_layer": True, "pages_with_tables": [2]})
+        runnable, deferred = _split_by_handler(plan.eligible)
+
+        assert TASK_EXTRACT_TABLES in [spec.task_type for spec in plan.eligible]
+        assert TASK_EXTRACT_TABLES not in [spec.task_type for spec in runnable]
+        assert "no handler" in deferred[TASK_EXTRACT_TABLES]
 
     def test_a_scanned_document_records_ocr_as_skipped_with_a_reason(self):
         """Part 4 marks `ocr` out of scope for v1 and says to record it as skipped."""
@@ -224,6 +291,7 @@ class TestEnqueueConditions:
             TASK_STRUCTURE_INFERRED,
             TASK_EXTRACT_TABLES,
             TASK_EXTRACT_IMAGES,
+            TASK_CITATION,
         }
 
     def test_an_unknown_format_says_it_declares_no_structure_pattern(self):
@@ -252,7 +320,8 @@ class TestTaskTable:
         ("pdf", {}),
         ("pdf", {"has_text_layer": True}),
         ("pdf", {"has_text_layer": True, "has_outline": True}),
-        ("pdf", {"has_text_layer": True, "has_tables": True, "has_images": True}),
+        ("pdf", {"has_text_layer": True, "pages_with_tables": [1], "has_images": True}),
+        ("pdf", {"has_text_layer": True, "pages_with_tables": [], "has_images": True}),
         ("pdf", {"is_scanned": True}),
         ("docx", {"has_text_layer": True, "has_heading_styles": True}),
         ("wat", {"has_text_layer": True}),
@@ -276,13 +345,15 @@ class TestTaskTable:
         itself could make. This is 11.2's constraint, and it is checkable structurally."""
         seen: set[str] = set()
         for row in TASK_ROWS:
-            for dependency in row.after:
+            for dependency in row.after + row.after_any:
                 assert dependency in seen, f"{row.task} comes after a row below it"
             for name in row.requires + row.forbids:
-                # Either a pattern probe writes, or the one sentinel the planner resolves.
-                # A second, unresolvable "@..." would be evaluated as a literal pattern
-                # name, which is always absent — a condition that silently never holds.
-                assert name and (name == DECLARED_STRUCTURE or not name.startswith("@")), name
+                # Either a pattern probe writes, or a sentinel the planner resolves. An
+                # unregistered "@..." would be evaluated as a literal pattern name, which is
+                # always absent — a condition that silently never holds. Checked against
+                # SENTINEL_PATTERNS rather than against a list spelled here, so adding a
+                # sentinel to the planner is what makes it legal in a row.
+                assert name and (name in SENTINEL_PATTERNS or not name.startswith("@")), name
             seen.add(row.task)
         assert len(seen) == len(TASK_ROWS), "a task is declared twice"
 
@@ -379,7 +450,8 @@ class TestWorkerDrainsTheQueue:
     def test_draining_runs_the_whole_file_pipeline_and_settles_the_file_node(
         self, db_session, pdf_bytes
     ):
-        """probe, extract:text, the rung probe's patterns chose, and an embed per chunk.
+        """probe, extract:text, the rung probe's patterns chose, citation, and an embed
+        per chunk.
 
         The count is derived from the tree rather than written down: this fixture is one
         page and produces one chunk today, and a chunking change that made it two would
@@ -397,6 +469,10 @@ class TestWorkerDrainsTheQueue:
             TASK_PROBE,
             TASK_EXTRACT_TEXT,
             TASK_STRUCTURE_DECLARED,
+            # OFFICE_SPEC.md Part 5. Last, and it has to be: its `subtree` reservation
+            # conflicts with every `embed` under this node, so it is the only task in the
+            # file's pipeline that cannot be claimed until the chunks have finished.
+            TASK_CITATION,
         ]
 
         chunks = (
@@ -409,7 +485,7 @@ class TestWorkerDrainsTheQueue:
             .all()
         )
         assert chunks, "the declared rung wrote no chunks"
-        assert ran == 3 + len(chunks)
+        assert ran == 4 + len(chunks)  # probe, extract:text, the rung, citation
         for chunk in chunks:
             assert [e["task"] for e in chunk.structured_content["attempts"]] == [TASK_EMBED]
             assert chunk.embed is not None, "the embed task did not write a vector"
@@ -442,8 +518,20 @@ class TestWorkerDrainsTheQueue:
 
         node = DocumentRepository(db_session).get(response.document_id)
         detail = node.structured_content["attempts"][0]["detail"]
-        # What it enqueued, in order, with the real queue ids.
-        assert list(detail["enqueued"]) == [TASK_EXTRACT_TEXT, TASK_STRUCTURE_DECLARED]
+        # What it enqueued, with the real queue ids. A SET: this dict came back out of a
+        # `jsonb` column, and `jsonb` stores object keys sorted by length and then by bytes
+        # rather than in insertion order, so the sequence here is Postgres's and not the
+        # planner's. The order the batch was enqueued in is asserted where it is real —
+        # against `plan_after_probe`, in TestEnqueueConditions.
+        assert set(detail["enqueued"]) == {
+            TASK_EXTRACT_TEXT,
+            TASK_STRUCTURE_DECLARED,
+            TASK_CITATION,
+        }
+        # The ids are the queue's own, and citation's row must be gated on the rung that
+        # wrote the chunks rather than merely enqueued after it.
+        citation = TaskQueueRepository(db_session).get(detail["enqueued"][TASK_CITATION])
+        assert citation.dependencies == [detail["enqueued"][TASK_STRUCTURE_DECLARED]]
         # And what it decided NOT to enqueue, with the pattern that was false. This
         # document has no images, and the inferred rung is not the one that runs when the
         # file declares an outline.

@@ -20,7 +20,7 @@ import logging
 
 from sqlalchemy.orm import Session
 
-from jmfts_core.contracts.conversation import (
+from jmfts_client.contracts.conversation import (
     ConversationIngestRequest,
     ConversationIngestResponse,
     ConversationStageResult,

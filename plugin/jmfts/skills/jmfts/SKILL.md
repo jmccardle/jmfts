@@ -1,6 +1,6 @@
 ---
 name: jmfts
-description: Use whenever the user references the knowledgebase, JMFTS, durable memory across sessions, or prior accumulated knowledge that may have been ingested. Provides orientation about a tree-structured document store with typed cross-references and a temporal knowledge graph; routes to more specific skills for searching, ingesting, and exploring.
+description: Use whenever the user references the knowledgebase, JMFTS, durable memory across sessions, or prior accumulated knowledge that may have been ingested. Provides orientation about a tree-structured document store with typed cross-references and a temporal knowledge graph; routes to more specific skills for searching, ingesting, reading, exploring, and analyzing.
 ---
 
 # JMFTS — the agent's knowledgebase
@@ -27,9 +27,9 @@ task, and as a place to file conclusions worth keeping.
 ## Connection
 
 - `JMFTS_API_BASE_URL` — which instance (default `http://localhost:8100`).
-- Scripts live in `scripts/` inside the JMFTS checkout; `cd` there and
-  invoke with `python -m scripts.<name>`. If you don't know where the
-  checkout is, ask — there is no default location.
+- Scripts live under `$JMFTS_HOME/scripts/` (default
+  `~/Development/jmfts/scripts/`); invoke with `python -m scripts.<name>`
+  from that directory.
 
 ## Working scope (convention, not a feature)
 
@@ -52,11 +52,19 @@ Don't assume `parent_id=0` exists.
 |---|---|
 | "Find / look up / recall …" | **jmfts-search** |
 | "Add / save / remember …" | **jmfts-ingest** |
-| "Read this / what's near / cites / connects to …" | **jmfts-explore** |
+| "Read this document properly" | **jmfts-read** |
+| "What's near / cites / connects to …" | **jmfts-explore** |
+| "What's important here / lint / health-check" | **jmfts-analyze** |
 
 The capability skills are auto-discovered too — Claude will load whichever
 matches the task. Multiple may load if the work spans intents (e.g. read
 something, then ingest a derived analysis).
+
+## Architectural reference
+
+`docs/AGENTIC_KNOWLEDGEBASE.md` is the design document (status: shipped).
+Read it when the user asks why JMFTS is shaped a particular way, or when
+deciding whether new functionality belongs server-side or client-side.
 
 ## Operating principles
 

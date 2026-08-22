@@ -15,7 +15,7 @@ The three properties proved:
 
 import pytest
 
-from jmfts_core.contracts.search_context import SearchContextCreate
+from jmfts_client.contracts.search_context import SearchContextCreate
 from jmfts_core.repositories.document import DocumentRepository
 from jmfts_core.repositories.search_context import SearchContextRepository
 from jmfts_core.services.search_context_service import SearchContextService

@@ -7,8 +7,8 @@ returns the existing row rather than raising. Both are best-effort replay idempo
 concurrency guards — see ROADMAP §A/§C. Service-level tests: they exercise the exposed flag.
 """
 
-from jmfts_core.contracts.document import DocumentCreate
-from jmfts_core.contracts.triple import TripleCreate
+from jmfts_client.contracts.document import DocumentCreate
+from jmfts_client.contracts.triple import TripleCreate
 from jmfts_core.repositories.document import DocumentRepository
 from jmfts_core.repositories.triple import TripleRepository
 from jmfts_core.services.document_service import DocumentService

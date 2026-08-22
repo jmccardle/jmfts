@@ -13,18 +13,19 @@ Both modes live here because they are one answer with two ways of reaching it:
 them across two modules would put the containing shape and the contained one in different
 files for no gain.
 
-The dataclasses in ``jmfts_core.ingest_tasks`` are the answer; these are the shapes it
-travels in. They are kept apart for the reason every contract module here is: an in-process
-caller gets :class:`~jmfts_core.ingest_tasks.ExplainedPlan` with tuples and enum-ish string
-constants, and only a request that crossed HTTP pays for the Pydantic round trip.
+The scheduler's dataclasses are the answer; these are the shapes it travels in. They are
+kept apart for the reason every contract module here is: an in-process caller gets the
+dataclass with tuples and enum-ish string constants, and only a request that crossed HTTP
+pays for the Pydantic round trip.
+
+The functions that BUILD these models from those dataclasses live server-side, in
+``jmfts_core/explain_wire.py``. They cannot live here: they take scheduler and prober
+types, and this package is installed by consumers who have neither.
 """
 
 from typing import Optional
 
 from pydantic import BaseModel, Field
-
-from jmfts_core.ingest_tasks import ExplainedPlan, ExplainedTask
-from jmfts_core.probe import FormatDetection
 
 
 class ExplainIngestRequest(BaseModel):
@@ -98,7 +99,16 @@ class ExplainedTaskResponse(BaseModel):
             "that is always recorded rather than queued, which claims nothing."
         ),
     )
-    after: list[str] = Field(description="Tasks that must be eligible before this one is")
+    after: list[str] = Field(description="Tasks that must ALL be eligible before this one is")
+    after_any: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Tasks of which AT LEAST ONE must be eligible; this task is ordered after "
+            "whichever of them are. Kept apart from `after` because they are alternatives "
+            "to each other — the two structure rungs, of which exactly one ever fires — so "
+            "a reader who saw them in `after` would conclude the task can never run."
+        ),
+    )
     requires: list[str] = Field(
         description=(
             "Patterns that must be true, RESOLVED for this format — the declared-structure "
@@ -150,19 +160,6 @@ class ExplainIngestResponse(BaseModel):
         description="`probe` first, then every Part 4 row in table order. None is omitted."
     )
 
-    @classmethod
-    def from_plan(cls, plan: ExplainedPlan) -> "ExplainIngestResponse":
-        """The wire form of what :func:`~jmfts_core.ingest_tasks.explain_plan` decided."""
-        return cls(
-            format=plan.format,
-            prober_available=plan.prober_available,
-            patterns_known=plan.patterns_known,
-            patterns_source=plan.patterns_source,
-            patterns_ignored=list(plan.patterns_ignored),
-            options=plan.options,
-            tasks=[_task_response(task) for task in plan.tasks],
-        )
-
 
 class AnalyzedFile(BaseModel):
     """What the bytes are, what the client said they were, and how we know.
@@ -186,20 +183,6 @@ class AnalyzedFile(BaseModel):
             "because one of them is unknown — which is a different answer from `false`."
         )
     )
-
-    @classmethod
-    def from_detection(
-        cls, detection: FormatDetection, *, filename: str, byte_size: int, content_hash: str
-    ) -> "AnalyzedFile":
-        return cls(
-            filename=filename,
-            byte_size=byte_size,
-            content_hash=content_hash,
-            declared_mime=detection.declared_mime,
-            detected_mime=detection.detected_mime,
-            detected_by=detection.detected_by,
-            mime_agrees=detection.mime_agrees,
-        )
 
 
 class ProbeFailure(BaseModel):
@@ -283,18 +266,4 @@ class AnalyzeIngestResponse(BaseModel):
             "Set when these bytes are already stored in a file node this caller may read. "
             "An upload would resolve to it and run no plan at all."
         ),
-    )
-
-
-def _task_response(task: ExplainedTask) -> ExplainedTaskResponse:
-    return ExplainedTaskResponse(
-        task=task.task,
-        outcome=task.outcome,
-        if_condition_holds=task.if_condition_holds,
-        reason=task.reason,
-        write_mode=task.write_mode,
-        after=list(task.after),
-        requires=list(task.requires),
-        forbids=list(task.forbids),
-        params=task.params,
     )

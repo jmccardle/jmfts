@@ -1,7 +1,7 @@
 """File-upload contracts — the framework-neutral upload marker and the 5.7 response.
 
 ``UploadedFile`` exists to solve one specific problem. ``tests/test_api_parity.py``
-forbids ``jmfts_core/services`` and ``jmfts_core/contracts`` from importing FastAPI or
+forbids ``jmfts_core/services`` and this contracts package from importing FastAPI or
 Starlette, and ``UploadFile`` is a Starlette name — so a service method cannot annotate a
 multipart part directly without breaking the core-purity seal. The alternative of
 hand-writing the route in ``api/routers/`` would break the *other* seal
@@ -25,7 +25,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from jmfts_core.contracts.attempt import AttemptRecord
+from jmfts_client.contracts.attempt import AttemptRecord
 
 
 @dataclass(frozen=True)

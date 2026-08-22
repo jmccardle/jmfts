@@ -1,0 +1,94 @@
+[project]
+name = "jmfts-client"
+# Same rule as the server distribution: the version is not a literal here, it is read from
+# ``jmfts_client.__version__``. tests/test_packaging.py forbids a second copy.
+dynamic = ["version"]
+description = "Wire contracts and a generated HTTP client for a JMFTS retrieval appliance"
+requires-python = ">=3.11"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Fight Fire with Fire Robotics, LLC" }]
+keywords = ["jmfts", "retrieval", "client", "api"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+# The whole point of this distribution. Two dependencies: a consumer that needs to CALL a
+# JMFTS appliance should not install sqlalchemy, psycopg2, pgvector, transformers or
+# pymupdf to do it. Anything added here is paid for by every such consumer, so the bar is
+# that the client cannot make a request without it.
+#
+# MEASURED, 2026-08-22, in an empty venv against the 0.2.0 wheel: 37 MB and 12 packages,
+# against the server's 585 MB and 61. Note that this is not a pure-Python install —
+# `pydantic_core` is a compiled Rust extension and is 4.9 MB of the 37. It ships wheels
+# for every platform this project targets, so it is not a build-toolchain risk the way
+# the office extra's lxml is; it is recorded here so the number is not mistaken for one.
+dependencies = [
+    "httpx>=0.26.0",
+    "pydantic>=2.5.0",
+]
+
+# DECODING RUNNER VECTORS. `jmfts_client/contracts/runner.py`.
+#
+# The runner protocol carries embeddings as base64 in the dtype they will be stored in.
+# Reading one back into an array is numpy; carrying the string is not. A consumer that
+# searches and reads documents never calls the codec, and numpy is ~20 MB, so requiring it
+# of everyone to import a Pydantic model would undo the reason this distribution exists.
+#
+# The models import with no numpy at all. Only `encode_vector` / `decode_vector` /
+# `decode_matrix` need it, and they ask through `_require_numpy()`, which raises a message
+# naming this extra rather than an unexplained ModuleNotFoundError.
+[project.optional-dependencies]
+vectors = ["numpy>=1.26.0"]
+
+[project.urls]
+Homepage = "https://github.com/jmccardle/jmfts"
+Repository = "https://github.com/jmccardle/jmfts"
+
+[build-system]
+# >= 77.0.3 for PEP 639 `license-files`, exactly as the server distribution requires.
+requires = ["setuptools>=77.0.3", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = { attr = "jmfts_client.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["jmfts_client*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# THE SAME RULE SET THE ROOT pyproject.toml NAMES, AND IT HAS TO BE REPEATED HERE.
+#
+# ruff resolves configuration per FILE, to the nearest pyproject.toml above it. A second
+# distribution means a second pyproject.toml, so this directory got its own config the
+# moment `jmfts-client/` existed — and a `[tool.ruff]` block with no `lint.select` does
+# not fall back to the root's list. It falls back to ruff's DEFAULT set, which is the one
+# thing the root config exists to avoid depending on.
+#
+# Measured 2026-08-22, on the same unchanged tree: `ruff check jmfts_core jmfts-client
+# tests` reports 0 findings under ruff 0.15.9 and 268 under 0.16.4, every one of them in
+# this directory (257 UP045, plus UP035/UP037/UP017, I001, RUF022, PYI034). Rule counts
+# for one file: 59 enabled under the root config, 413 here without this block. 0.15.9 hid
+# it because its default set was narrow enough to look like the root's.
+#
+# The consequence was that `.github/workflows/ci.yml`'s `ruff==0.15.9` pin had become
+# load-bearing, which is exactly what the root's comment says naming the categories buys
+# you out of. It only bought it for `jmfts_core` and `tests`.
+select = ["E4", "E7", "E9", "F"]

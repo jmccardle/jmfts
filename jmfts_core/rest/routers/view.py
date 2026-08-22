@@ -2,7 +2,7 @@
 
 All `/view/*` routes are now generated from the `@expose` registry over
 `jmfts_core/services/view_service.py::ViewService`. The hand-written routes were deleted;
-the response models moved to `jmfts_core/contracts/view.py` (re-exported from
+the response models moved to `jmfts-client/jmfts_client/contracts/view.py` (re-exported from
 `api/schemas.py`). No document is serialised through `DocumentResponse` on this surface,
 so there was no local converter to fold in.
 
