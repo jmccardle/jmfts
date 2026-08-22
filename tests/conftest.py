@@ -204,6 +204,32 @@ import pytest  # noqa: E402
 requires_db = pytest.mark.skipif(not DB_READY, reason="test database not provisioned")
 
 
+#: True in the development tree, False in a public checkout.
+#:
+#: ``docs/`` is the marker because it is definitional rather than incidental: it is the
+#: one top-level directory that ``tests/test_readme_links.py::PUBLISHED`` will never
+#: name, so its absence *is* "this is the published subset".
+IS_INTERNAL_TREE = (_REPO_ROOT / "docs").is_dir()
+
+#: Marker for a test that reads a file the release does not copy.
+#:
+#: ``tests/`` IS published, so every test in this suite runs again in the public
+#: repository, against a tree that is missing `docs/`, `ROADMAP.md`, `benchmarks/` and
+#: whatever ``NOT_PUBLISHED`` carves out. A test that reads one of those does not fail
+#: there because anything is wrong; it fails because it was asked a question that tree
+#: cannot answer.
+#:
+#: This is not a way to excuse a test from the public gate. It is for the narrow case
+#: where the SUBJECT of the test is internal — the office spec's pattern tables, the
+#: exclusion list's own entries. A test of shipped behaviour must run in both trees, and
+#: the first public CI run found four tests that had quietly never been checked against
+#: the tree they ship into.
+internal_tree_only = pytest.mark.skipif(
+    not IS_INTERNAL_TREE,
+    reason="reads a path the release does not publish; see conftest.IS_INTERNAL_TREE",
+)
+
+
 @pytest.fixture
 def db_session():
     """A transactional session whose writes are always rolled back.

@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests.conftest import internal_tree_only
 from tests.corpus.vocabulary import (
     Kind,
     Status,
@@ -86,6 +87,7 @@ def test_no_probed_term_describes_a_pattern_probe_stopped_emitting():
     )
 
 
+@internal_tree_only
 def test_every_pattern_the_spec_names_is_in_the_vocabulary():
     """``OFFICE_SPEC.md`` Part 2's tables, parsed, against the table."""
     named = spec_patterns()
@@ -97,6 +99,7 @@ def test_every_pattern_the_spec_names_is_in_the_vocabulary():
     )
 
 
+@internal_tree_only
 def test_every_planned_term_is_named_by_the_spec():
     """A planned term with no spec row is an invention, which is the drift itself."""
     named = spec_patterns()
@@ -112,6 +115,7 @@ def test_every_planned_term_is_named_by_the_spec():
     )
 
 
+@internal_tree_only
 def test_proposed_terms_are_the_gap_and_are_named_as_such():
     """PROPOSED means: this corpus can label the file, and no shipped code can measure it.
 

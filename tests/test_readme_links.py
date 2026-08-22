@@ -20,6 +20,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from tests.conftest import internal_tree_only
+
 REPO = Path(__file__).resolve().parents[1]
 README = (REPO / "README.md").read_text(encoding="utf-8")
 
@@ -167,6 +169,7 @@ def test_published_paths_all_exist():
     )
 
 
+@internal_tree_only
 def test_excluded_paths_still_exist_and_sit_inside_a_published_one():
     """An exclusion that stopped matching is an exclusion that silently stopped working.
 
@@ -174,6 +177,12 @@ def test_excluded_paths_still_exist_and_sit_inside_a_published_one():
     so the next release publishes whatever took its place. Both halves are asserted: the
     path is real, and it is genuinely inside something ``PUBLISHED`` copies — because an
     entry that excludes nothing is a note pretending to be a rule.
+
+    Internal tree only, and the reason is the rule working. In a public checkout every
+    ``NOT_PUBLISHED`` path is absent BY CONSTRUCTION, so asserting it exists there asks
+    the release to prove it did not do the thing it was told to do. The first public CI
+    run failed on exactly that, which is a better demonstration of the mechanism than the
+    test was.
     """
     for path in NOT_PUBLISHED:
         assert (REPO / path).exists(), (
