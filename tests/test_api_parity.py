@@ -53,12 +53,13 @@ def test_hybrid_search_is_exposed_once():
     assert hits[0].service_cls is SearchService
 
 
-def test_generated_route_not_also_hand_written():
-    """The pilot must have DELETED the hand-written route, not shadowed it."""
-    src = (REPO_ROOT / "jmfts_core" / "rest" / "routers" / "search.py").read_text()
-    assert (
-        '"/hybrid"' not in src and "'/hybrid'" not in src
-    ), "a hand-written /hybrid route still exists in search.py; it should be generated"
+# `test_generated_route_not_also_hand_written` used to sit here. It read
+# jmfts_core/rest/routers/search.py as text and asserted no "/hybrid" literal was in it.
+# That file was a docstring and nothing else, so the assertion could not fail for any
+# reason that mattered — and the file has now been deleted along with the other nine
+# route-less tombstones. `test_all_domain_routes_are_generated` below is the seal that
+# actually holds: it walks the live app and classifies every mounted APIRoute, so it
+# catches a hand-written domain route wherever it is written.
 
 
 # --- 1b. Phase E seal: no hand-written domain route escapes generation ----------

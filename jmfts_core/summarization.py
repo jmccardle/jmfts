@@ -8,14 +8,13 @@ producing fine-grained clusters at the leaves and broad clusters near the root.
 import logging
 from dataclasses import dataclass, field
 
-import httpx
 import igraph as ig
 import leidenalg
 import numpy as np
 from sqlalchemy.orm import Session
 
 from jmfts_core.config import get_settings, Settings
-from jmfts_core.llm_utils import extract_llm_text
+from jmfts_core.llm_client import complete
 from jmfts_core.repositories.document import DocumentRepository
 
 logger = logging.getLogger(__name__)
@@ -230,24 +229,23 @@ async def _llm_summarize(texts: list[str], settings: Settings, llm_model: str | 
         f"{context}"
     )
 
-    payload = {
-        "model": model,
-        "messages": [
+    extra_body = {}
+    if settings.summarization_disable_thinking:
+        extra_body["chat_template_kwargs"] = {"enable_thinking": False}
+
+    result = await complete(
+        settings=settings,
+        base_url=base_url,
+        model=model,
+        messages=[
             {"role": "system", "content": SUMMARIZE_SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
         ],
-        "temperature": settings.summarization_temperature,
-        "max_tokens": settings.raptor_max_summary_tokens,
-    }
-    if settings.summarization_disable_thinking:
-        payload["chat_template_kwargs"] = {"enable_thinking": False}
-
-    async with httpx.AsyncClient(timeout=settings.effective_llm_timeout) as client:
-        resp = await client.post(f"{base_url}/v1/chat/completions", json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-
-    return extract_llm_text(data["choices"][0])
+        max_tokens=settings.raptor_max_summary_tokens,
+        temperature=settings.summarization_temperature,
+        extra_body=extra_body,
+    )
+    return result.text
 
 
 async def raptor_summarize(

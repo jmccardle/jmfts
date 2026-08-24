@@ -69,6 +69,15 @@ def test_the_convert_extra_is_the_libreoffice_client_only():
     assert declared == {"unoserver"}, declared
 
 
+def test_the_sketch_extra_carries_the_one_package():
+    """``INGEST_SPEC.md`` 8.6's containment search, and nothing else.
+
+    numpy is deliberately absent: it is already a base dependency, and a second
+    declaration would be free to pin a version the embeddings were never tested against.
+    """
+    assert _requirement_names(EXTRAS["sketch"]) == {"datasketch"}
+
+
 def test_dev_implies_office_but_not_convert():
     """The suite opens real packages, so it must install the readers it tests.
 
@@ -78,6 +87,9 @@ def test_dev_implies_office_but_not_convert():
     """
     dev = _requirement_names(EXTRAS["dev"])
     assert "jmfts[office]" in [s.strip() for s in EXTRAS["dev"]]
+    # `sketch` too: `profile:sheet` sketches every column by default, so a suite without
+    # it would only ever exercise the way out of that default.
+    assert "jmfts[sketch]" in [s.strip() for s in EXTRAS["dev"]]
     assert "unoserver" not in dev
 
 
@@ -120,8 +132,10 @@ import jmfts_core.worker          # the CLI and the loop
 import jmfts_core.ingest_tasks    # every registered task handler
 import jmfts_core.probe           # format detection, which must stay tier 1
 import jmfts_core.office          # the seam itself: importing it imports no reader
+import jmfts_core.sketch          # the other seam, same rule
+import jmfts_core.office.sheets   # 8.3's measurer, which reaches for BOTH at call time
 
-loaded = sorted(m for m in ("docx", "pptx", "openpyxl") if m in sys.modules)
+loaded = sorted(m for m in ("docx", "pptx", "openpyxl", "datasketch") if m in sys.modules)
 print(",".join(loaded))
 """
 
@@ -142,8 +156,8 @@ def test_starting_the_app_imports_no_office_reader():
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "", (
         f"starting the app imported {result.stdout.strip()}; something on the import "
-        "path has grown an eager office import. Move it behind a require_* guard in "
-        "jmfts_core/office/__init__.py."
+        "path has grown an eager optional import. Move it behind a require_* guard in "
+        "jmfts_core/office/__init__.py or jmfts_core/sketch.py."
     )
 
 
@@ -196,6 +210,43 @@ print("ok")
 def test_a_missing_office_stack_is_a_named_permanent_error():
     result = subprocess.run(
         [sys.executable, "-c", MISSING_STACK_PROBE], capture_output=True, text=True, timeout=180
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok", result.stdout
+
+
+MISSING_SKETCH_PROBE = """
+import sys
+
+from jmfts_core.sketch import SketchStackNotInstalled, require_datasketch
+from jmfts_core.task_errors import ErrorType, classify_exception
+
+sys.modules["datasketch"] = None
+
+try:
+    require_datasketch()
+except SketchStackNotInstalled as exc:
+    assert "jmfts[sketch]" in str(exc), "the message does not name the extra"
+    assert "sketch_columns" in str(exc), "the message does not name the other way out"
+    assert classify_exception(exc) is ErrorType.PERMANENT, "not PERMANENT"
+else:
+    raise AssertionError("the guard returned a module that is not there")
+
+print("ok")
+"""
+
+
+def test_a_missing_sketch_stack_is_a_named_permanent_error():
+    """The same contract the office guards have, for the same reason.
+
+    An install with no ``datasketch`` can still probe, extract, chunk, embed and search;
+    what it cannot do is make a high-cardinality column findable by ``propose:links``. The
+    message has to say which of those two deployments you are in, and it names BOTH ways
+    out — the extra, and the ``sketch_columns`` parameter that measures the sheet without
+    sketching it.
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", MISSING_SKETCH_PROBE], capture_output=True, text=True, timeout=180
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "ok", result.stdout

@@ -12,14 +12,19 @@ JMFTS (John McCardle's Fusion Tree Search) is a research-focused retrieval appli
 # Install (editable mode). Base does NOT include torch — the model stack is the `embed`
 # extra, because the only step that needs it is producing vectors and a worker can ask
 # another JMFTS for those (JMFTS_RUNNER_URL). See the `embed` extra in pyproject.toml.
-# jmfts-client FIRST, always, from this tree. `jmfts` depends on it, and the name is not
-# on PyPI yet, so any of the lines below fails on its own.
+# jmfts-client FIRST, always, from this tree. `jmfts` depends on it with `==`, so an
+# editable server install would otherwise resolve the PINNED version from PyPI and shadow
+# the tree you are working in. (0.2.0 is on PyPI; earlier wording here said the name was
+# not published, which stopped being true when step 5 of docs/RELEASING.md first ran.)
 pip install -e ./jmfts-client
 
-pip install -e .            # base: 584 MB, tokenizer only, cannot embed by itself
+pip install -e .            # base: 586 MB, tokenizer only, cannot embed by itself
 pip install -e ".[embed]"   # + torch and sentence-transformers (5.2 GB total)
 pip install -e ".[office]"  # + python-docx/python-pptx/openpyxl (44 MB, pulls lxml+Pillow)
-pip install -e ".[dev]"     # + pytest/black/ruff; implies [embed] and [office]
+pip install -e ".[rdf]"     # + rdflib/pyshacl; Turtle in, Turtle out, SHACL shapes
+pip install -e ".[sketch]"  # + datasketch; MinHash per column, for propose:links
+pip install -e ".[convert]" # + the unoserver CLIENT only; the LibreOffice tier is an image
+pip install -e ".[dev]"     # + pytest/black/ruff; implies [embed] [office] [rdf] [sketch]
 
 # Database setup
 jmfts-init-db
@@ -185,7 +190,7 @@ Large ingests do not run inline. `jmfts_core/ingest_tasks.py` defines the task t
 
 | Tier | What | Installed cost | Where it lives |
 |---|---|---|---|
-| 1 | `zipfile`, `xml.etree`, `olefile` | in base (585 MB) | base install, in `jmfts_core/probe.py` |
+| 1 | `zipfile`, `xml.etree`, `olefile` | in base (586 MB) | base install, in `jmfts_core/probe.py` |
 | 2 | `python-docx`, `python-pptx`, `openpyxl` | +44 MB | the `office` extra, behind `jmfts_core/office/` |
 | 3 | LibreOffice driven by `unoserver` | ~500 MB system package | a badged worker image; the `convert` extra is the client only |
 
@@ -266,8 +271,16 @@ pytest tests/corpus -q             # no database, no optional dependency
 `tests/test_readme_links.py::PUBLISHED`, and `docs/RELEASING.md` cites that constant
 rather than repeating it.
 
-Many source comments cite `INGEST_SPEC.md`, `KNOWN-DEFECTS.md` (D1–D4 anchors, all
-resolved), `ROADMAP.md`, `RERANKER_CRITIQUE.md`, `OFFICE_SPEC.md` and
-`API_UNIFICATION_CONTRACT_NOTES.md` by section. In the public tree those documents are
-absent by design. **Do not treat the citations as broken links to fix, and do not delete
-them** — they are the anchors the documents will be republished against.
+Roughly three hundred source comments cite a `docs/` file by part and section. Counted at
+0.2.1: `INGEST_SPEC.md` 117, `OFFICE_SPEC.md` 81, `SPRINT_0_3_0.md` 52, `CORPUS.md` 14,
+`RELEASING.md` 13, `KNOWN-DEFECTS.md` 9 (D1–D4 anchors, all resolved), `ROADMAP.md` 4,
+`AGENTIC_KNOWLEDGEBASE.md` 4, `RERANKER_CRITIQUE.md` 2,
+`API_UNIFICATION_CONTRACT_NOTES.md` 1, `research/INTERMEDIATE_FORMATS.md` 1. In the public
+tree every one of those documents is absent by design. **Do not treat the citations as
+broken links to fix, and do not delete them** — they are the anchors the documents will be
+republished against.
+
+The public README's "A note on documentation" names the same list in prose, so a reader
+who follows a citation finds out why it goes nowhere. A release that adds a new `docs/`
+file which source comments cite adds its name there too; that is the redaction step, and
+it is the only one — no shipped file is rewritten at release time.

@@ -59,6 +59,7 @@ does not install or manage it.
 ```bash
 pip install jmfts                # base: no torch, cannot embed by itself
 pip install 'jmfts[embed]'       # + the model stack, for a single appliance
+pip install 'jmfts[rdf]'         # + Turtle in and out, and SHACL shapes
 jmfts-init-db                    # create the database and load the schema
 jmfts-server                     # serve on 0.0.0.0:8100
 jmfts-server --port 9000         # ...or override one setting for this run
@@ -76,17 +77,18 @@ From a checkout, for development:
 
 ```bash
 pip install -e ./jmfts-client    # the client distribution; jmfts depends on it
-pip install -e ".[dev]"          # editable, with pytest/black/ruff; implies [embed]
+pip install -e ".[dev]"          # editable, with pytest/black/ruff; implies [embed],
+                                 # [office], [rdf] and [sketch] — the suite exercises all four
 uvicorn jmfts_core.rest.main:app --host 0.0.0.0 --port 8100 --reload
 ```
 
 This tree builds two distributions, and the first line is not optional. `jmfts` declares
-`jmfts-client==0.2.0`, which is not on PyPI yet, so the second line alone fails to
-resolve it.
+`jmfts-client==0.2.1` with `==`, so the second line alone resolves that exact version
+from PyPI and shadows the checkout you meant to work in.
 
 ### Reading and driving the API
 
-`/docs` is Swagger UI over the live route table — 100 operations, grouped by tag, with the
+`/docs` is Swagger UI over the live route table — 109 operations, grouped by tag, with the
 request and response schemas. `/redoc` is the same document laid out for reading, and
 `/openapi.json` is the document itself.
 
@@ -142,8 +144,8 @@ environment.
 
 **`pip install jmfts` does not install torch.** Base JMFTS is storage, retrieval, the
 tree, BM25, the queue and the whole ingest pipeline; the only step that needs an
-accelerator is producing vectors, and that step can be somebody else's. Measured:
-584 MB installed, against 5.2 GB with the model stack.
+accelerator is producing vectors, and that step can be somebody else's. Measured against
+the 0.2.1 wheels: 586 MB of site-packages, against 5.2 GB with the model stack.
 
 Add `[embed]` when *this* process should run the model — because it serves `/search`,
 because it serves `/runner` for others, or because it is a single appliance doing both:
@@ -220,11 +222,14 @@ tests/             pytest suite against an ephemeral database, plus the fidelity
 ## A note on documentation
 
 The design documents this code was written against — most importantly the
-ingest specification that dozens of source comments cite by section number —
+ingest specification that a hundred source comments cite by section number —
 are not in this release. They are being refined for publication separately.
-Comments referring to INGEST_SPEC.md, OFFICE_SPEC.md, CORPUS.md,
-KNOWN-DEFECTS.md and ROADMAP.md point at documents that will land later; the
-code stands on its own in the meantime.
+The whole working record is held back, not a chosen few files, so a comment
+naming any of INGEST_SPEC.md, OFFICE_SPEC.md, SPRINT_0_3_0.md, CORPUS.md,
+RELEASING.md, KNOWN-DEFECTS.md, ROADMAP.md, AGENTIC_KNOWLEDGEBASE.md,
+RERANKER_CRITIQUE.md, API_UNIFICATION_CONTRACT_NOTES.md or
+research/INTERMEDIATE_FORMATS.md points at a document that will land later.
+The code stands on its own in the meantime.
 
 Those names are deliberately not written as links. There is nothing in this
 tree for them to point at, and marking them up as paths would promise

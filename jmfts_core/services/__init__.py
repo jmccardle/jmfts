@@ -13,6 +13,8 @@ from jmfts_core.services.document_service import DocumentService
 from jmfts_core.services.graph_service import GraphService
 from jmfts_core.services.index_service import IndexService
 from jmfts_core.services.ingest_service import IngestService
+from jmfts_core.services.ontology_service import OntologyService
+from jmfts_core.services.rdf_service import RdfService
 from jmfts_core.services.search_context_service import SearchContextService
 from jmfts_core.services.search_service import SearchService
 from jmfts_core.services.template_service import TemplateService
@@ -27,6 +29,8 @@ __all__ = [
     "GraphService",
     "IndexService",
     "IngestService",
+    "OntologyService",
+    "RdfService",
     "SearchContextService",
     "SearchService",
     "TemplateService",

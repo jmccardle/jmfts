@@ -25,6 +25,7 @@ from jmfts_client.contracts.conversation import ConversationIngestRequest
 from jmfts_client.contracts.conversation import ConversationIngestResponse
 from jmfts_client.contracts.document import ChunkRequest
 from jmfts_client.contracts.document import ChunkResponse
+from jmfts_client.contracts.document import DocumentCellsResponse
 from jmfts_client.contracts.document import DocumentCreate
 from jmfts_client.contracts.document import DocumentResponse
 from jmfts_client.contracts.document import DocumentTokensResponse
@@ -58,6 +59,11 @@ from jmfts_client.contracts.index import IndexResponse
 from jmfts_client.contracts.ingest import IngestRequest
 from jmfts_client.contracts.ingest import IngestResponse
 from jmfts_client.contracts.ingest import PipelineInfo
+from jmfts_client.contracts.rdf import OntologyImportResponse
+from jmfts_client.contracts.rdf import OntologyResponse
+from jmfts_client.contracts.rdf import ShapeBindingCreate
+from jmfts_client.contracts.rdf import ShapeBindingResponse
+from jmfts_client.contracts.rdf import TurtleExportResponse
 from jmfts_client.contracts.search import AutoSearchRequest
 from jmfts_client.contracts.search import AutoSearchResponse
 from jmfts_client.contracts.search import HybridSearchRequest
@@ -480,6 +486,30 @@ class _GeneratedVerbs(_VerbTransport):
             path={"document_id": document_id},
             query={"include_embed": include_embed},
             response=DocumentResponse,
+        )
+
+    def get_document_cells(
+        self,
+        document_id: int,
+        *,
+        ref: Optional[str] = None,
+    ) -> DocumentCellsResponse:
+        """Read a region of a spreadsheet from the sheet node's source workbook
+
+        ``GET /documents/{document_id}/cells`` — DocumentService.get_document_cells
+
+        Raises on 400 (server: BadCellRef, ValueError).
+        Raises on 404 (server: LookupError).
+        Raises on 409 (server: NotASheetNode, SheetSourceUnavailable).
+        Raises on 413 (server: TooManyCells).
+        Raises on 501 (server: OfficeStackNotInstalled).
+        """
+        return self._call(
+            "GET",
+            "/documents/{document_id}/cells",
+            path={"document_id": document_id},
+            query={"ref": ref},
+            response=DocumentCellsResponse,
         )
 
     def get_document_tokens(
@@ -1167,6 +1197,174 @@ class _GeneratedVerbs(_VerbTransport):
             response=FileUploadResponse,
         )
 
+    def create_binding(
+        self,
+        name: str,
+        request: ShapeBindingCreate,
+    ) -> ShapeBindingResponse:
+        """Bind one of this vocabulary's shapes to a scope of documents
+
+        ``POST /ontologies/{name}/bindings`` — OntologyService.create_binding
+
+        Raises on 404 (server: LookupError, ShapeNotDeclaredError).
+        Raises on 409 (server: BindingConflictError).
+        Raises on 422 (server: ValueError).
+        """
+        return self._call(
+            "POST",
+            "/ontologies/{name}/bindings",
+            path={"name": name},
+            body=request,
+            response=ShapeBindingResponse,
+        )
+
+    def delete_binding(
+        self,
+        binding_id: int,
+    ) -> Any:
+        """Delete a shape binding
+
+        ``DELETE /shape-bindings/{binding_id}`` — OntologyService.delete_binding
+
+        Raises on 404 (server: LookupError).
+
+        The route declares no response model, so the parsed JSON is returned.
+        """
+        return self._call(
+            "DELETE",
+            "/shape-bindings/{binding_id}",
+            path={"binding_id": binding_id},
+            response=None,
+        )
+
+    def delete_ontology(
+        self,
+        name: str,
+    ) -> Any:
+        """Delete a vocabulary and its bindings
+
+        ``DELETE /ontologies/{name}`` — OntologyService.delete_ontology
+
+        Raises on 404 (server: LookupError).
+
+        The route declares no response model, so the parsed JSON is returned.
+        """
+        return self._call(
+            "DELETE",
+            "/ontologies/{name}",
+            path={"name": name},
+            response=None,
+        )
+
+    def get_ontology(
+        self,
+        name: str,
+    ) -> OntologyResponse:
+        """Get one vocabulary by name
+
+        ``GET /ontologies/{name}`` — OntologyService.get_ontology
+
+        Raises on 404 (server: LookupError).
+        """
+        return self._call(
+            "GET",
+            "/ontologies/{name}",
+            path={"name": name},
+            response=OntologyResponse,
+        )
+
+    def import_ontology(
+        self,
+        turtle: str,
+        name: str,
+        base_iri: str,
+        *,
+        description: Optional[str] = None,
+    ) -> OntologyImportResponse:
+        """Import a vocabulary from a text/turtle document
+
+        ``POST /ontologies`` — OntologyService.import_ontology
+
+        Raises on 422 (server: ValueError).
+        Raises on 501 (server: RdfStackNotInstalled).
+        """
+        return self._call(
+            "POST",
+            "/ontologies",
+            query={"name": name, "base_iri": base_iri, "description": description},
+            content=turtle,
+            content_type="text/turtle",
+            response=OntologyImportResponse,
+        )
+
+    def list_bindings(
+        self,
+        *,
+        ontology: Optional[str] = None,
+    ) -> list[ShapeBindingResponse]:
+        """List shape bindings
+
+        ``GET /shape-bindings`` — OntologyService.list_bindings
+        """
+        return self._call(
+            "GET",
+            "/shape-bindings",
+            query={"ontology": ontology},
+            response=list[ShapeBindingResponse],
+        )
+
+    def list_ontologies(
+        self,
+    ) -> list[OntologyResponse]:
+        """List stored vocabularies
+
+        ``GET /ontologies`` — OntologyService.list_ontologies
+        """
+        return self._call(
+            "GET",
+            "/ontologies",
+            response=list[OntologyResponse],
+        )
+
+    def export_turtle(
+        self,
+        *,
+        entity_id: Optional[int] = None,
+        predicate_id: Optional[int] = None,
+        predicate: Optional[str] = None,
+        direction: str = "both",
+        coreferent: bool = False,
+        provenance: str = "any",
+        limit: int = 200,
+        offset: int = 0,
+        base_iri: str = "urn:jmfts:",
+        include_labels: bool = True,
+    ) -> TurtleExportResponse:
+        """Export the live triples as a Turtle document
+
+        ``GET /rdf/turtle`` — RdfService.export_turtle
+
+        Raises on 422 (server: ValueError).
+        Raises on 501 (server: RdfStackNotInstalled).
+        """
+        return self._call(
+            "GET",
+            "/rdf/turtle",
+            query={
+                "entity_id": entity_id,
+                "predicate_id": predicate_id,
+                "predicate": predicate,
+                "direction": direction,
+                "coreferent": coreferent,
+                "provenance": provenance,
+                "limit": limit,
+                "offset": offset,
+                "base_iri": base_iri,
+                "include_labels": include_labels,
+            },
+            response=TurtleExportResponse,
+        )
+
     def create_context(
         self,
         request: SearchContextCreate,
@@ -1714,7 +1912,7 @@ class _GeneratedVerbs(_VerbTransport):
     def list_predicates(
         self,
         *,
-        domain: Optional[str] = None,
+        namespace: Optional[str] = None,
         with_triples_only: bool = True,
     ) -> list[PredicateResponse]:
         """List predicates
@@ -1724,7 +1922,7 @@ class _GeneratedVerbs(_VerbTransport):
         return self._call(
             "GET",
             "/triples/predicates",
-            query={"domain": domain, "with_triples_only": with_triples_only},
+            query={"namespace": namespace, "with_triples_only": with_triples_only},
             response=list[PredicateResponse],
         )
 

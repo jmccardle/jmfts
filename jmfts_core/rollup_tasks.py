@@ -43,7 +43,6 @@ import logging
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-import httpx
 import numpy as np
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -61,7 +60,7 @@ from jmfts_core.ingest_tasks import (
     TaskOutcome,
     register_task_handler,
 )
-from jmfts_core.llm_utils import extract_llm_text
+from jmfts_core.llm_client import complete_sync
 from jmfts_core.models.document import SETTLED_IN_FLIGHT, Document
 from jmfts_core.models.task_queue import WRITE_SELF, WRITE_SUBTREE, TaskQueue
 from jmfts_core.repositories.document import DocumentRepository
@@ -738,34 +737,37 @@ def summarize_span(text: str, settings: Settings, model: str) -> str:
     not to send less and call the result a summary.
 
     A module-level function so a test can replace it without a live model.
+
+    Synchronous, and the only one of JMFTS's four LLM call sites that is: it runs inside
+    the ingest worker, which is a plain thread driving synchronous task handlers. τ's
+    client is async-only, so this goes through ``llm_client.complete_sync``, which owns an
+    event loop for the duration of the call and closes τ's provider pool before tearing it
+    down. See that function for why nesting is refused rather than accommodated.
+
+    The bearer is now always sent — ``JMFTS_LLM_API_KEY`` when set, τ's ``"not-needed"``
+    sentinel when not. It used to be omitted entirely in the second case. A llama-server
+    on the LAN that wants no auth ignores the header either way, and the same worker image
+    still serves a local model and a metered API without a code path for each.
     """
-    payload = {
-        "model": model,
-        "messages": [
+    base_url, _ = settings.require_llm("Span summarization", model)
+
+    extra_body = {}
+    if settings.summarization_disable_thinking:
+        extra_body["chat_template_kwargs"] = {"enable_thinking": False}
+
+    result = complete_sync(
+        settings=settings,
+        base_url=base_url,
+        model=model,
+        messages=[
             {"role": "system", "content": SUMMARIZE_SYSTEM_PROMPT},
             {"role": "user", "content": text},
         ],
-        "temperature": settings.summarization_temperature,
-        "max_tokens": settings.raptor_max_summary_tokens,
-    }
-    if settings.summarization_disable_thinking:
-        payload["chat_template_kwargs"] = {"enable_thinking": False}
-
-    base_url, _ = settings.require_llm("Span summarization", model)
-    # No key, no header. A llama-server on the LAN wants none, and sending an empty bearer
-    # to one is a header it has to ignore; a metered web API wants one and refuses without
-    # it. Sending the header only when a key is configured is what lets the SAME worker
-    # image serve both — which is the whole premise of naming the badge `llm` after the
-    # resource rather than after the hardware.
-    headers = {}
-    if settings.llm_api_key:
-        headers["Authorization"] = f"Bearer {settings.llm_api_key}"
-
-    with httpx.Client(timeout=settings.effective_llm_timeout) as client:
-        response = client.post(f"{base_url}/v1/chat/completions", json=payload, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-    return extract_llm_text(data["choices"][0])
+        max_tokens=settings.raptor_max_summary_tokens,
+        temperature=settings.summarization_temperature,
+        extra_body=extra_body,
+    )
+    return result.text
 
 
 def _scope_node(session: Session, task: TaskQueue) -> Document:

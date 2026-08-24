@@ -13,7 +13,13 @@ Two layers:
    cluster; default off is byte-identical to a single-entity query (canary).
 """
 
-from jmfts_core.graph_analysis import SAME_AS_LINK_TYPE, resolve_coreferent_ids
+import pytest
+
+from jmfts_core.graph_analysis import (
+    SAME_AS_LINK_TYPE,
+    GraphWalkTruncated,
+    resolve_coreferent_ids,
+)
 from jmfts_core.repositories.document import DocumentRepository
 from jmfts_core.repositories.triple import TripleRepository
 from jmfts_core.services.triple_service import TripleService
@@ -60,6 +66,52 @@ class TestResolveCoreferentCluster:
         docs.create_link(a.id, b.id, link_type="bridge")
         db_session.flush()
         assert resolve_coreferent_ids(db_session, a.id) == [a.id]
+
+
+class TestACutClusterRaises:
+    """SPRINT_0_3_0.md 7.3, first half. A truncated cluster used to return silently.
+
+    These are the two bounds, exercised one at a time by lowering it rather than by
+    building a 201-node graph. Step 10 materializes the component and both must then
+    become unreachable — that is the test the sequencing buys.
+    """
+
+    def test_a_chain_deeper_than_max_depth_raises(self, db_session):
+        docs = DocumentRepository(db_session)
+        chain = [_entity(docs, f"alias {i}") for i in range(5)]
+        db_session.flush()
+        for left, right in zip(chain, chain[1:]):
+            docs.create_link(left.id, right.id, link_type=SAME_AS_LINK_TYPE)
+        db_session.flush()
+
+        # Four hops end to end; three is not enough and the far end is invisible.
+        with pytest.raises(GraphWalkTruncated, match="depth cap"):
+            resolve_coreferent_ids(db_session, chain[0].id, max_depth=3)
+
+        assert len(resolve_coreferent_ids(db_session, chain[0].id, max_depth=4)) == 5
+
+    def test_a_cluster_wider_than_limit_raises(self, db_session):
+        docs = DocumentRepository(db_session)
+        hub = _entity(docs, "John")
+        spokes = [_entity(docs, f"John {i}") for i in range(4)]
+        db_session.flush()
+        for spoke in spokes:
+            docs.create_link(hub.id, spoke.id, link_type=SAME_AS_LINK_TYPE)
+        db_session.flush()
+
+        with pytest.raises(GraphWalkTruncated, match="node cap"):
+            resolve_coreferent_ids(db_session, hub.id, limit=2)
+
+        assert len(resolve_coreferent_ids(db_session, hub.id, limit=4)) == 5
+
+    def test_a_complete_cluster_at_exactly_the_bound_does_not_raise(self, db_session):
+        """The guard fires on a CUT walk, not on a full one that used its whole budget."""
+        docs = DocumentRepository(db_session)
+        a, b = _entity(docs, "John"), _entity(docs, "John McCardle")
+        db_session.flush()
+        docs.create_link(a.id, b.id, link_type=SAME_AS_LINK_TYPE)
+        db_session.flush()
+        assert set(resolve_coreferent_ids(db_session, a.id, max_depth=1)) == {a.id, b.id}
 
 
 class TestCoreferentFactUnion:

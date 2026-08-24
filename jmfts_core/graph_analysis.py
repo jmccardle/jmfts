@@ -714,6 +714,17 @@ def compute_stats(session: Session) -> GraphStats:
 # ---------------------------------------------------------------------------
 
 
+class GraphWalkTruncated(RuntimeError):
+    """A bounded walk stopped with reachable nodes unvisited, for a caller needing all.
+
+    The bounds on ``compute_neighbors`` are right for browsing and wrong for any caller
+    whose question is "what is the WHOLE set". A cut cluster returns a partial fact set
+    that reads exactly like a complete one, which is the failure the appliance is built
+    not to have. Raising is the current answer; ``SPRINT_0_3_0.md`` 7.3 replaces it with a
+    materialized component at step 10, and this error must become unreachable then.
+    """
+
+
 @dataclass
 class NeighborNode:
     """One document reached while traversing the ``DocumentLink`` graph from a root.
@@ -743,6 +754,7 @@ def compute_neighbors(
     direction: str = "both",
     link_types: Optional[Iterable[str]] = None,
     limit: int = 200,
+    raise_on_truncation: bool = False,
 ) -> list[NeighborNode]:
     """Breadth-first walk of the ``DocumentLink`` graph outward from ``root_id``.
 
@@ -758,11 +770,20 @@ def compute_neighbors(
             (target→source), or ``both``.
         link_types: if given, only traverse edges whose ``link_type`` is in this set.
         limit: stop once this many distinct neighbors have been collected.
+        raise_on_truncation: raise :class:`GraphWalkTruncated` instead of returning a
+            partial walk. A browse endpoint wants the partial list and a "there is more"
+            flag; a caller that needs the WHOLE reachable set — coreference, per
+            ``SPRINT_0_3_0.md`` 7.3 — cannot tell a complete cluster from a cut one and
+            must not be handed the cut one silently.
 
     Returns:
         Neighbors ordered by (depth, discovery), each carrying the first edge that
         reached it. The root is never included; ``limit`` caps the result — the caller
         should surface truncation to the user rather than treat it as the whole graph.
+
+    Raises:
+        GraphWalkTruncated: only with ``raise_on_truncation``, when either bound cut the
+            walk with reachable nodes still unvisited.
     """
     type_filter = list(link_types) if link_types else None
     follow_out = direction in ("outgoing", "both")
@@ -774,7 +795,15 @@ def compute_neighbors(
     frontier: list[int] = [root_id]
     depth = 0
 
-    while frontier and depth < max_depth and len(reached) < limit:
+    # A walk that must know whether it saw everything overshoots each bound by exactly one
+    # and then measures. Stopping AT a bound is ambiguous — a frontier is non-empty whether
+    # or not expanding it would find anything new, and a walk that collected `limit` nodes
+    # may or may not have had a 201st. One extra hop and one extra node settle both, and
+    # cost nothing when nothing is truncated. Only `raise_on_truncation` pays for it.
+    node_cap = limit + 1 if raise_on_truncation else limit
+    depth_cap = max_depth + 1 if raise_on_truncation else max_depth
+
+    while frontier and depth < depth_cap and len(reached) < node_cap:
         depth += 1
         # Pull every edge incident to the current frontier in the chosen direction(s),
         # one batched query per direction rather than per node.
@@ -827,9 +856,25 @@ def compute_neighbors(
                 )
             )
             next_frontier.append(to_id)
-            if len(reached) >= limit:
+            if len(reached) >= node_cap:
                 break
         frontier = next_frontier
+
+    # The overshoot, read back. An extra node means there was a `limit + 1`th; an extra hop
+    # that found anything means `max_depth` was cutting the walk short.
+    if raise_on_truncation:
+        if len(reached) > limit:
+            raise GraphWalkTruncated(
+                f"walk from document {root_id} hit its node cap of {limit}; the reachable "
+                f"set is larger and this result is a cut of it"
+            )
+        beyond = sum(1 for n in reached if n.depth > max_depth)
+        if beyond:
+            raise GraphWalkTruncated(
+                f"walk from document {root_id} hit its depth cap of {max_depth}; "
+                f"{beyond} more node(s) lie past it and this result is a cut of the "
+                f"reachable set"
+            )
 
     # One query to hydrate titles/usetypes for every reached node.
     if reached:
@@ -859,6 +904,20 @@ def compute_neighbors(
 #: retracted with ``delete_link`` — non-destructive and reversible, never a merge.
 SAME_AS_LINK_TYPE = "same_as"
 
+#: Link type joining the copies of ONE real-world thing that exist because it was mentioned
+#: under more than one access (``SPRINT_0_3_0.md`` 7.5). Same referent, different viewers.
+#:
+#: **It is not ``same_as``, and collapsing the two would be a mistake.** ``same_as``
+#: asserts an INFERENCE that may be wrong, and retracting one is a correction;
+#: ``rbac_coref`` asserts something the appliance KNOWS, because it created both nodes, and
+#: retracting one would be a lie. They also mean different things to island analysis — an
+#: access split is not evidence of coreference density.
+#:
+#: Symmetric at read time for the same reason ``same_as`` is, so ``resolve_entity`` writes
+#: one directional edge from the copy it just created to each existing copy and the walk
+#: finds it from either end.
+RBAC_COREF_LINK_TYPE = "rbac_coref"
+
 
 def resolve_coreferent_ids(
     session: Session,
@@ -867,16 +926,30 @@ def resolve_coreferent_ids(
     max_depth: int = 5,
     limit: int = 200,
 ) -> list[int]:
-    """Return ``entity_id`` together with every entity in its ``same_as`` cluster.
+    """Return ``entity_id`` together with every entity it is coreferent with.
 
-    Follows ``same_as`` edges transitively in both directions (coreference is an
-    equivalence relation — symmetric and transitive) via the bounded, cycle-guarded
-    ``compute_neighbors`` walk, so ``A same_as B`` and ``B same_as C`` put A, B and C in
-    one cluster. ``entity_id`` is always the first element, even if it has no coreferents.
+    Follows ``same_as`` AND ``rbac_coref`` edges transitively in both directions
+    (coreference is an equivalence relation — symmetric and transitive) via the bounded,
+    cycle-guarded ``compute_neighbors`` walk, so ``A same_as B`` and ``B same_as C`` put A,
+    B and C in one cluster. ``entity_id`` is always the first element, even if it has no
+    coreferents.
+
+    **Two link types, one cluster.** They are kept distinct as ASSERTIONS — one is an
+    inference, the other is a fact about how the appliance stored a thing — and the
+    distinction is not this function's business: asked "what else denotes this", both
+    answer yes. ``SPRINT_0_3_0.md`` 7.5.
 
     This is the read-side of the coreference leg: pass the result to
     ``TripleRepository.query_triples(entity_ids=...)`` to union the facts recorded under
     every alias of an entity.
+
+    **A cut cluster raises rather than returning.** The bounds used to truncate silently,
+    which handed the caller a partial fact set indistinguishable from a complete one. They
+    are generous for hand-asserted ``same_as`` edges and will not be once an
+    inverse-functional column derives them over a whole workbook. ``SPRINT_0_3_0.md`` 7.3.
+
+    Raises:
+        GraphWalkTruncated: the cluster is larger than ``max_depth``/``limit`` admit.
     """
     cluster = [entity_id]
     seen = {entity_id}
@@ -885,10 +958,25 @@ def resolve_coreferent_ids(
         entity_id,
         max_depth=max_depth,
         direction="both",
-        link_types=[SAME_AS_LINK_TYPE],
+        link_types=[SAME_AS_LINK_TYPE, RBAC_COREF_LINK_TYPE],
         limit=limit,
+        raise_on_truncation=True,
     ):
         if node.document_id not in seen:
             seen.add(node.document_id)
             cluster.append(node.document_id)
+
+    # Subtree RBAC, asserted HERE and not left to the walk. `compute_neighbors` does filter
+    # its frontier today, but its bounds and its filtering are tuned for browsing and it
+    # has callers that legitimately want the whole graph; the guarantee this function makes
+    # is its own. What an `rbac_coref` cluster leaks without it is CARDINALITY — a
+    # principal learns "this entity has four copies and I can read one" — which is exactly
+    # the shape of the access boundary the copies exist to respect.
+    #
+    # `entity_id` itself is never dropped: the caller supplied it, so returning it tells
+    # them nothing they did not already have, and `[entity_id]` is the documented answer
+    # for an entity with no coreferents.
+    if len(cluster) > 1:
+        readable = readable_id_subset(session, cluster[1:])
+        cluster = [entity_id] + [cid for cid in cluster[1:] if cid in readable]
     return cluster

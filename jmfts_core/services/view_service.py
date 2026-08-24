@@ -179,7 +179,7 @@ class ViewService:
         for tp in bundle.triples:
             if tp.get("subject_title"):
                 title_lookup[tp["subject_id"]] = tp["subject_title"]
-            if tp.get("object_title"):
+            if tp.get("object_title") and tp.get("object_id") is not None:
                 title_lookup[tp["object_id"]] = tp["object_title"]
 
         rendered = resolve_references(
@@ -227,11 +227,15 @@ class ViewService:
                     predicate_name=t.get("predicate_name"),
                     object_id=t["object_id"],
                     object_title=t.get("object_title"),
+                    object_literal=t.get("object_literal"),
+                    object_datatype=t.get("object_datatype"),
                     fact_type=t.get("fact_type"),
                     valid_from=t.get("valid_from"),
                     valid_until=t.get("valid_until"),
                     subject_url=f"/view/{t['subject_id']}",
-                    object_url=f"/view/{t['object_id']}",
+                    # A literal object has no node to navigate to, so it gets no URL —
+                    # rather than a `/view/None` that 404s for everyone who follows it.
+                    object_url=(f"/view/{t['object_id']}" if t["object_id"] is not None else None),
                 )
                 for t in bundle.triples
             ],

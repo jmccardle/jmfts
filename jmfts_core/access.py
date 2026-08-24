@@ -163,6 +163,57 @@ def can_write(
     return bool(gov & set(_write_root_ids(session, principal.id)))
 
 
+# --- The access key: a document's governance, as a comparable value ----------------
+
+
+#: A document's effective access, canonicalised: ``(principal_id, level)`` pairs sorted by
+#: principal id, at most one pair per principal. Empty means the document is under no ACR
+#: — ungoverned, and therefore readable by everyone.
+AccessKey = tuple[tuple[int, str], ...]
+
+
+def access_key(session: Session, doc: Document) -> AccessKey:
+    """The effective access of ``doc``, as a value that can be compared and stored.
+
+    The INVERSE of ``_read_root_ids``: that answers "which ACRs may this principal read",
+    this answers "which principals may read this document, and at what level". One query
+    over the ACRs at-or-above ``doc`` — the same ``[D.id] + D.path`` chain
+    ``_governing_acrs`` intersects — with max-over-path collapsed per principal, because
+    grants are additive and ``write`` implies ``read``.
+
+    Two documents with the same key are governed identically even when they hang under
+    different access-control roots. That is what lets ``SPRINT_0_3_0.md`` 7.5 key an
+    entities root by ACCESS rather than by tree position: one entities root per distinct
+    access, not one per ACR.
+
+    The empty key is not a special case. A document under no ACR has no grants on its
+    chain, so the key is ``()``, and an entities root carrying no grants is itself under no
+    ACR — public, by the same rule that makes its source document public.
+    """
+    chain = list(doc.path or []) + [doc.id]
+    rows = session.execute(
+        select(AccessGrant.principal_id, AccessGrant.level).where(
+            AccessGrant.document_id.in_(chain)
+        )
+    ).all()
+    best: dict[int, str] = {}
+    for principal_id, level in rows:
+        if best.get(principal_id) != "write":  # write beats read; max-over-path
+            best[principal_id] = level
+    return tuple(sorted(best.items()))
+
+
+def access_key_text(key: AccessKey) -> str:
+    """The storage form of an access key: ``"7:read,12:write"``, or ``""`` for ungoverned.
+
+    Text and not JSONB because the whole point of the key is EQUALITY — it is a UNIQUE
+    column in ``entity_roots``, and two documents with identical access must collide there.
+    ``access_key`` has already sorted and deduplicated the pairs, so the encoding is
+    canonical: equal accesses produce equal strings.
+    """
+    return ",".join(f"{principal_id}:{level}" for principal_id, level in key)
+
+
 # --- Write-gate guards + list read filter (raise HTTP-mapped errors) ---------------
 
 

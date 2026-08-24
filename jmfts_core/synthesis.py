@@ -3,10 +3,8 @@
 import logging
 from dataclasses import dataclass
 
-import httpx
-
 from jmfts_core.config import get_settings
-from jmfts_core.llm_utils import extract_llm_text
+from jmfts_core.llm_client import complete
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +21,9 @@ SYSTEM_PROMPT = (
 class SynthesisResult:
     text: str
     model: str
+    #: τ's ``Usage``, as a dict — see :class:`jmfts_core.llm_client.LlmCompletion`. Still
+    #: optional because a caller may construct a result without one; the synthesis path
+    #: always fills it.
     usage: dict | None = None
 
 
@@ -66,8 +67,15 @@ async def synthesize(
         SynthesisResult with the generated text.
 
     Raises:
-        httpx.HTTPStatusError: If the LLM endpoint returns an error status.
-        httpx.ConnectError: If the LLM endpoint is unreachable.
+        LlmNotConfiguredError: If no LLM endpoint is configured. Raised by
+            ``require_llm`` before any transport is built.
+        Exception: For every other failure — a refused connection, a timeout, a non-200.
+            It used to be the httpx type (``ConnectError``, ``TimeoutException``,
+            ``HTTPStatusError`` from ``raise_for_status()``); τ 0.9.3 catches the
+            transport's exception inside its own event generator and reports it as an
+            error event, so what reaches here is a bare ``Exception`` whose message names
+            the model, the endpoint and the status or fault. See ``llm_client``'s module
+            docstring for what that costs ``task_errors.classify_exception``.
     """
     settings = get_settings()
     base_url, model = settings.require_llm("Synthesis", llm_model)
@@ -76,22 +84,16 @@ async def synthesize(
 
     user_message = f"Query: {query}\n\nSources:\n{context}\n\nSynthesize an answer to the query based on the sources above."
 
-    payload = {
-        "model": model,
-        "messages": [
+    result = await complete(
+        settings=settings,
+        base_url=base_url,
+        model=model,
+        messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
         ],
-        "temperature": 0.3,
-        "max_tokens": settings.synthesis_max_tokens,
-    }
+        max_tokens=settings.synthesis_max_tokens,
+        temperature=0.3,
+    )
 
-    async with httpx.AsyncClient(timeout=settings.effective_llm_timeout) as client:
-        resp = await client.post(f"{base_url}/v1/chat/completions", json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-
-    text = extract_llm_text(data["choices"][0])
-    usage = data.get("usage")
-
-    return SynthesisResult(text=text, model=model, usage=usage)
+    return SynthesisResult(text=result.text, model=model, usage=result.usage)

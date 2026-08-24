@@ -186,8 +186,12 @@ class Settings(BaseSettings):
     # BM25 defaults
     bm25_k1: float = 1.2
     bm25_b: float = 0.75
-    bm25_exclude_usetypes: list[str] = ["entity", "summary"]
-    search_exclude_usetypes: list[str] = ["entity", "summary"]
+    # `entities` is the ROOT that holds entity nodes (SPRINT_0_3_0.md 7.5), `entity` is the
+    # nodes under it. Both are held out: a root is a container with no content, so it
+    # cannot match a vector or BM25 query anyway, but its title can match a full-text one
+    # and "Entities" is a plausible thing to type. Neither is ever the answer to a search.
+    bm25_exclude_usetypes: list[str] = ["entity", "entities", "summary"]
+    search_exclude_usetypes: list[str] = ["entity", "entities", "summary"]
 
     # LLM endpoint (any OpenAI-compatible server: llama-server, vLLM, Ollama, ensonet, or
     # a metered web API).
@@ -335,10 +339,10 @@ class Settings(BaseSettings):
         encoded_password = quote_plus(self.db_password)
         return f"postgresql://{self.db_user}:{encoded_password}@{self.db_host}:{self.db_port}/{self.db_name}"
 
-    @property
-    def async_database_url(self) -> str:
-        encoded_password = quote_plus(self.db_password)
-        return f"postgresql+asyncpg://{self.db_user}:{encoded_password}@{self.db_host}:{self.db_port}/{self.db_name}"
+    # `async_database_url` used to sit here, building a `postgresql+asyncpg://` URL. It had
+    # zero references in code, tests, scripts, benchmarks or docs, and `asyncpg` is not a
+    # dependency and is not installed — so the one thing it produced would have failed at
+    # `create_engine`. The synchronous `database_url` above is the only connection string.
 
     class Config:
         env_prefix = "JMFTS_"

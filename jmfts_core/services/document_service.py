@@ -34,9 +34,12 @@ from sqlalchemy.orm import Session
 from jmfts_core.access import can_read, filter_readable
 from jmfts_core.chunking import ChunkStrategy, chunk_text
 from jmfts_client.contracts.document import (
+    CellNoteResponse,
+    CellRowResponse,
     ChunkItem,
     ChunkRequest,
     ChunkResponse,
+    DocumentCellsResponse,
     DocumentCreate,
     DocumentResponse,
     DocumentTokensResponse,
@@ -61,7 +64,20 @@ from jmfts_client.contracts.document import (
 )
 from jmfts_core.embedding import TextTooLongError, get_embedding_service
 from jmfts_core.fact_extraction import extract_facts
+from jmfts_core.office import OfficeStackNotInstalled
+from jmfts_core.office.cells import (
+    CELLS_READ_MAX,
+    BadCellRef,
+    CellRange,
+    TooManyCells,
+    cell_ref,
+    parse_ref,
+    read_region,
+    render_region,
+    used_range,
+)
 from jmfts_core.registry import expose, register_service
+from jmfts_core.repositories.blob import BlobRepository
 from jmfts_core.repositories.document import (
     DocumentRepository,
     InFlightSubtreeError,
@@ -85,6 +101,115 @@ class EmbedTextTooLongError(Exception):
     def __init__(self, detail: dict):
         self.http_detail = detail
         super().__init__(detail.get("message", "text too long"))
+
+
+class NotASheetNode(Exception):
+    """``GET /{id}/cells`` was pointed at a document that is not a worksheet (→ HTTP 409).
+
+    409 and not 404: the document exists and the caller may read it. It is simply not a
+    thing that has cells. Answering with an empty table instead would be the failure
+    ``OFFICE_SPEC.md`` Part 5 rejects in the citation case for the same reason — the caller
+    cannot tell "this sheet is blank" from "you asked the wrong node".
+    """
+
+
+class SheetSourceUnavailable(Exception):
+    """The node is a sheet, and its cells still cannot be served (→ HTTP 409).
+
+    Every instance names which of the four it is: the node carries no ``sheet.name``, it has
+    no file node above it, that file node's bytes are gone, or its used range has not been
+    measured (and no ``ref`` was given to stand in for one). All four are states of the tree
+    rather than faults in the request, which is what makes them 409 rather than 400.
+    """
+
+
+#: The usetype ``structure:sheets`` gives a worksheet node, spelled here rather than
+#: imported from :data:`jmfts_core.sheet_tasks.USETYPE_SHEET`. The import would pull in
+#: ``jmfts_core.ingest_tasks``, whose module scope REGISTERS every task handler as a side
+#: effect — a read verb on the query path must not change what the worker will dispatch
+#: merely by being imported. ``tests/test_document_cells.py`` asserts the two strings agree,
+#: which is the guard the import would have been.
+USETYPE_SHEET = "sheet"
+
+#: Where an anchor lives on a node, spelled here for the same reason (the writer is
+#: :data:`jmfts_core.citation_tasks.ANCHOR_KEY`), and the ``kind`` ``OFFICE_SPEC.md`` Part 5
+#: gives a worksheet region: ``{"kind": "cells", "sheet": "Q3 Pipeline", "ref": "B4:H120"}``.
+ANCHOR_KEY = "anchor"
+ANCHOR_KIND_CELLS = "cells"
+
+#: What ``ref_source`` reports. Three, because "the caller named this rectangle", "the node
+#: was already addressed at this rectangle" and "this is everything the sheet holds" are
+#: three different claims about the same string, and a consumer caching a region needs to
+#: know which one it has.
+CELLS_REF_REQUEST = "request"
+CELLS_REF_ANCHOR = "anchor"
+CELLS_REF_USED_RANGE = "used_range"
+
+
+def _cells_bounds(
+    document_id: int,
+    structured: dict,
+    sheet: dict,
+    ref: Optional[str],
+) -> tuple[CellRange, str]:
+    """Which rectangle ``GET /{id}/cells`` serves, and which of the three said so.
+
+    The order is the spec's: what the caller named, then what the node is addressed at, then
+    what the sheet was measured to hold. Separated from the verb because it is the part with
+    a decision in it and it needs none of a session, a blob or a reader to be tested.
+    """
+    if ref is not None:
+        return parse_ref(ref), CELLS_REF_REQUEST
+
+    anchor = structured.get(ANCHOR_KEY)
+    if anchor is not None:
+        if not isinstance(anchor, dict):
+            raise SheetSourceUnavailable(
+                f"Document {document_id} carries an `anchor` that is not an object; Part 5 "
+                "makes an anchor a record with a `kind`, and there is no address to read "
+                "out of anything else"
+            )
+        kind = anchor.get("kind")
+        if kind != ANCHOR_KIND_CELLS:
+            # Not ignored in favour of the used range: an anchor of another kind on a sheet
+            # node means something wrote an address for a region that is not a region of
+            # cells, and quietly serving a different rectangle would hide it.
+            raise SheetSourceUnavailable(
+                f"Document {document_id} carries an anchor of kind {kind!r}; Part 5 gives a "
+                f"worksheet region the kind {ANCHOR_KIND_CELLS!r}. Name a region with `ref`"
+            )
+        named = anchor.get("sheet")
+        if named is not None and named != sheet.get("name"):
+            raise SheetSourceUnavailable(
+                f"Document {document_id} is sheet {sheet.get('name')!r} and its anchor "
+                f"addresses sheet {named!r}; an anchor records where THIS node's region came "
+                "from, so the two naming different sheets is a tree that was rewritten "
+                "underneath the anchor"
+            )
+        anchored = anchor.get("ref")
+        if not anchored:
+            raise SheetSourceUnavailable(
+                f"Document {document_id} carries a {ANCHOR_KIND_CELLS!r} anchor with no "
+                "`ref`, which is the half of it that names the region"
+            )
+        return parse_ref(anchored), CELLS_REF_ANCHOR
+
+    measurements = sheet.get("measurements") or {}
+    rows, cols = measurements.get("rows"), measurements.get("cols")
+    if rows is None or cols is None:
+        raise SheetSourceUnavailable(
+            f"Document {document_id} carries no `sheet.measurements`, so `profile:sheet` has "
+            "not run and this sheet's used range has not been measured. Name a region with "
+            "`ref` to read one without it"
+        )
+    bounds = used_range(int(rows), int(cols))
+    if bounds is None:
+        raise SheetSourceUnavailable(
+            f"Sheet {sheet.get('name')!r} was measured to hold no cells ({rows} row(s) by "
+            f"{cols} column(s)), so it has no used range to serve. Name a region with `ref` "
+            "to read one anyway"
+        )
+    return bounds, CELLS_REF_USED_RANGE
 
 
 @register_service
@@ -495,6 +620,135 @@ class DocumentService:
             title=doc.title,
             token_count=len(tokens),
             tokens=tokens,
+        )
+
+    # -- Spreadsheet regions (OFFICE_SPEC.md Part 7) -------------------------------
+
+    @expose(
+        "GET",
+        "/documents/{document_id}/cells",
+        response_model=DocumentCellsResponse,
+        errors={
+            LookupError: 404,
+            # Two states of the tree, not two faults in the request. See the classes.
+            NotASheetNode: 409,
+            SheetSourceUnavailable: 409,
+            BadCellRef: 400,
+            # 413, and it is the RESPONSE that would be too large. The status is the one
+            # word HTTP has for "what you named is bigger than I will serve", and telling it
+            # apart from the 400 a malformed `ref` gets is worth more to a caller than the
+            # literal reading of the request half of RFC 9110's definition.
+            TooManyCells: 413,
+            ValueError: 400,
+            # 501 and not 503: this install cannot open a workbook and will not be able to
+            # after a retry. `OfficeStackNotInstalled` says which extra is missing, and an
+            # install without the office readers is a supported deployment (Part 1, tier 2),
+            # so this is "this server does not do that" and not "try again later".
+            OfficeStackNotInstalled: 501,
+        },
+        tags=["documents"],
+        summary="Read a region of a spreadsheet from the sheet node's source workbook",
+    )
+    def get_document_cells(
+        self,
+        document_id: int,
+        *,
+        ref: Optional[str] = None,
+    ) -> DocumentCellsResponse:
+        """Read a region of a spreadsheet: its values, its formulas, and it as a table.
+
+        ``OFFICE_SPEC.md`` Part 7. Served from the SOURCE blob with ``openpyxl``; no
+        rendition is involved, because a page image of a spreadsheet answers a different
+        question and is rarely the one asked.
+
+        ``ref`` is an A1-style rectangle (``B4:H120``) or a single cell (``B4``). Omitting it
+        asks for the node's own region, and there are two of those:
+
+        1. **The node's ``cells`` anchor**, when it carries one — Part 5's
+           ``{"kind": "cells", "sheet": ..., "ref": "B4:H120"}``, which is the address the
+           node's region was produced from.
+        2. **The sheet's used range**, otherwise: ``A1`` to the last row and column
+           ``profile:sheet`` MEASURED a value in. Note that **nothing in this tree writes a
+           ``cells`` anchor yet** — Part 5 specifies where one lives and every writer of one
+           is still unbuilt — so case 2 is what every request takes today. It is a default
+           and not a placeholder: the used range is a measured fact about the sheet, it is
+           the region a caller asking for "this sheet" means, and ``ref_source`` says which
+           of the three the answer came from so nothing downstream has to assume.
+
+        Refusals, none of which is a smaller or emptier region:
+
+        * a ``ref`` that is not a rectangle, or is outside the format's own limits — 400;
+        * a ``ref`` naming more than ``CELLS_READ_MAX`` cells — 413, naming the limit;
+        * a document that is not a sheet node — 409, saying so;
+        * a sheet whose used range has not been measured, or was measured as empty — 409,
+          naming ``ref`` as the way to read one anyway.
+
+        Access is the subtree RBAC every read here uses, applied TWICE: to the sheet node,
+        and to the file node above it whose bytes are what actually gets served.
+        """
+        repo = DocumentRepository(self.session)
+        node = repo.get(document_id)
+        # Subtree RBAC: an unreadable document is indistinguishable from a missing one.
+        if not node or not can_read(self.session, node):
+            raise LookupError(f"Document {document_id} not found")
+        if node.usetype != USETYPE_SHEET:
+            raise NotASheetNode(
+                f"Document {document_id} has usetype {node.usetype!r} and not "
+                f"{USETYPE_SHEET!r}, so it is not a worksheet and has no cells to read"
+            )
+
+        structured = node.structured_content or {}
+        sheet = structured.get("sheet") or {}
+        name = sheet.get("name")
+        if not name:
+            raise SheetSourceUnavailable(
+                f"Document {document_id} carries usetype {USETYPE_SHEET!r} with no "
+                "`sheet.name`, which is the only thing that says WHICH sheet of the "
+                "workbook it is"
+            )
+
+        bounds, ref_source = _cells_bounds(document_id, structured, sheet, ref)
+
+        if node.parent_id is None:
+            raise SheetSourceUnavailable(
+                f"Sheet node {document_id} has no parent, so there is no file node holding "
+                "the workbook its cells would come from"
+            )
+        parent = repo.get(node.parent_id)
+        # The bytes belong to the file node, so reading them is a read OF the file node.
+        # Same 404 as above and for the same reason — a principal who may not read the
+        # workbook must not learn from this verb that it is there.
+        if parent is None or not can_read(self.session, parent):
+            raise LookupError(f"Document {document_id} not found")
+        data = BlobRepository(self.session).read_bytes(node.parent_id)
+        if data is None:
+            raise SheetSourceUnavailable(
+                f"Document {node.parent_id} has no stored blob, so sheet {name!r} has no "
+                "bytes left to read a region out of"
+            )
+
+        region = read_region(data, name, bounds=bounds, max_cells=CELLS_READ_MAX)
+
+        return DocumentCellsResponse(
+            document_id=document_id,
+            sheet=name,
+            ref=bounds.ref,
+            ref_source=ref_source,
+            columns=list(bounds.column_letters),
+            rows=[CellRowResponse(row=row.index, values=list(row.values)) for row in region.rows],
+            cells={
+                cell_ref(row.index, column): CellNoteResponse(
+                    formula=note.formula,
+                    formula_shared=note.formula_shared,
+                    text_forced=note.text_forced,
+                )
+                for row in region.rows
+                for column, note in sorted(row.notes.items())
+            },
+            markdown=render_region(region),
+            row_count=len(region.rows),
+            # The AREA, which is what the limit is applied to — see the contract.
+            cell_count=bounds.cells,
         )
 
     # -- Structural splitting -----------------------------------------------------

@@ -62,9 +62,14 @@ def resolve_references(
     for tp in triples:
         n += 1
         obj_id = tp.get("object_id")
-        obj_title = tp.get("object_title") or title_lookup.get(obj_id) or f"#{obj_id}"
         pred = tp.get("predicate_name") or "?"
         prefix = f"[{n}] " if link_handling == "footnotes" else "- "
+        if obj_id is None:
+            # A literal object is a value, not a place. Rendering it as a link would
+            # produce `/view/None`, and there is nothing at the other end of it.
+            refs.append(f"{prefix}**{pred}** → {tp.get('object_literal')}")
+            continue
+        obj_title = tp.get("object_title") or title_lookup.get(obj_id) or f"#{obj_id}"
         refs.append(f"{prefix}**{pred}** → [{obj_title}](/view/{obj_id})")
 
     if not refs:

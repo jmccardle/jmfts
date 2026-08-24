@@ -2,6 +2,8 @@
 
 from jmfts_core.models.document import Document, DocumentLink
 from jmfts_core.models.document_blob import DocumentBlob
+from jmfts_core.models.entity_root import EntityRoot
+from jmfts_core.models.ontology import Ontology, ShapeBinding
 from jmfts_core.models.search_index import (
     SearchIndex,
     SearchIndexMember,
@@ -18,6 +20,9 @@ __all__ = [
     "Document",
     "DocumentLink",
     "DocumentBlob",
+    "EntityRoot",
+    "Ontology",
+    "ShapeBinding",
     "SearchIndex",
     "SearchIndexMember",
     "SearchTermPosting",

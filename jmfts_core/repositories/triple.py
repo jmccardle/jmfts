@@ -37,15 +37,23 @@ class TripleRepository:
     # =========================================================================
 
     def create_predicate(
-        self, name: str, domain: Optional[str] = None, description: Optional[str] = None
+        self,
+        name: str,
+        namespace: Optional[str] = None,
+        description: Optional[str] = None,
+        iri: Optional[str] = None,
     ) -> Predicate:
-        pred = Predicate(name=name, domain=domain, description=description)
+        pred = Predicate(name=name, namespace=namespace, description=description, iri=iri)
         self.session.add(pred)
         self.session.flush()
         return pred
 
     def get_or_create_predicate(
-        self, name: str, domain: Optional[str] = None, description: Optional[str] = None
+        self,
+        name: str,
+        namespace: Optional[str] = None,
+        description: Optional[str] = None,
+        iri: Optional[str] = None,
     ) -> tuple[Predicate, bool]:
         """Resolve a predicate by name, creating it atomically if absent.
 
@@ -57,12 +65,18 @@ class TripleRepository:
         ``upsert_triple``); ``create_predicate`` keeps raising for the explicit
         REST create path that wants a 409.
 
+        ``iri`` is only ever WRITTEN by this call, never used to resolve: the conflict key
+        is ``name``, so importing a vocabulary term whose local name already exists returns
+        the existing predicate and leaves its ``iri`` alone rather than silently rebinding
+        a local predicate to somebody else's IRI. ``OntologyService`` reports that case to
+        the caller instead of resolving it here.
+
         Returns:
             (predicate, created) — created is False if it already existed.
         """
         stmt = (
             pg_insert(Predicate.__table__)
-            .values(name=name, domain=domain, description=description)
+            .values(name=name, namespace=namespace, description=description, iri=iri)
             .on_conflict_do_nothing(index_elements=["name"])
             .returning(Predicate.__table__.c.id)
         )
@@ -80,12 +94,16 @@ class TripleRepository:
         result = self.session.execute(select(Predicate).where(Predicate.name == name))
         return result.scalar_one_or_none()
 
+    def get_predicate_by_iri(self, iri: str) -> Optional[Predicate]:
+        result = self.session.execute(select(Predicate).where(Predicate.iri == iri))
+        return result.scalar_one_or_none()
+
     def list_predicates(
-        self, domain: Optional[str] = None, with_triples_only: bool = False
+        self, namespace: Optional[str] = None, with_triples_only: bool = False
     ) -> list[Predicate]:
         query = select(Predicate).order_by(Predicate.name)
-        if domain:
-            query = query.where(Predicate.domain == domain)
+        if namespace:
+            query = query.where(Predicate.namespace == namespace)
         if with_triples_only:
             query = query.where(exists().where(Triple.predicate_id == Predicate.id))
         result = self.session.execute(query)
@@ -106,16 +124,35 @@ class TripleRepository:
         self,
         subject_id: int,
         predicate_id: int,
-        object_id: int,
+        object_id: Optional[int] = None,
         source_document_id: Optional[int] = None,
         valid_from: Optional[datetime] = None,
         valid_until: Optional[datetime] = None,
         fact_type: FactType = FactType.atemporal,
+        object_literal: Optional[str] = None,
+        object_datatype: Optional[str] = None,
+        derived_by: Optional[str] = None,
     ) -> Triple:
+        """Write one triple. The object is a document node OR a literal, never both.
+
+        The database enforces that too (``ck_triples_object_exactly_one``); this raises
+        first so the caller gets the name of its own mistake rather than an IntegrityError
+        that has already poisoned the transaction it was running in.
+        """
+        if (object_id is None) == (object_literal is None):
+            raise ValueError(
+                "a triple's object is exactly one of object_id and object_literal; "
+                f"got object_id={object_id!r}, object_literal={object_literal!r}"
+            )
+        if object_datatype is not None and object_literal is None:
+            raise ValueError("object_datatype types a literal; it cannot type a document node")
         triple = Triple(
             subject_id=subject_id,
             predicate_id=predicate_id,
             object_id=object_id,
+            object_literal=object_literal,
+            object_datatype=object_datatype,
+            derived_by=derived_by,
             source_document_id=source_document_id,
             valid_from=valid_from,
             valid_until=valid_until,
@@ -192,6 +229,7 @@ class TripleRepository:
         fact_type: Optional[FactType] = None,
         include_invalidated: bool = True,
         entity_ids: Optional[list[int]] = None,
+        provenance: str = "any",
     ) -> list[Triple]:
         """Query triples, optionally scoped to one entity or a set of entities.
 
@@ -200,7 +238,22 @@ class TripleRepository:
         resolve the cluster, then pass every member here so a query on one alias sees the
         facts recorded under all of them. When both are given, ``entity_ids`` wins;
         ``entity_id`` alone behaves exactly as before (single-id filter).
+
+        **Neither given means unscoped, and that is deliberate** — ``GET /triples`` and the
+        Turtle export both page the whole store through here. What is not allowed is a
+        scope that WAS asked for and came out empty widening to unscoped; see the comment
+        on the filter below.
+
+        ``provenance`` splits the asserted layer from a derived one (``derived_by``):
+        ``"asserted"`` is ``derived_by IS NULL``, ``"derived"`` its complement, ``"any"``
+        both. An unrecognised value raises rather than being read as ``"any"`` — a filter
+        that silently widens is how an unvalidated derived row reaches an answer that asked
+        for asserted facts.
         """
+        if provenance not in ("any", "asserted", "derived"):
+            raise ValueError(
+                f"provenance must be 'any', 'asserted' or 'derived'; got {provenance!r}"
+            )
         query = select(Triple).options(
             joinedload(Triple.subject),
             joinedload(Triple.predicate),
@@ -213,8 +266,19 @@ class TripleRepository:
         if predicate_name:
             query = query.join(Predicate)
             conditions.append(Predicate.name == predicate_name)
-        ids = entity_ids if entity_ids is not None else ([entity_id] if entity_id else None)
-        if ids:
+        # Three states, not two: no scope asked for (None), a scope asked for and empty
+        # ([]), a scope asked for and populated. An empty `entity_ids` — a coreference
+        # cluster whose every member the caller may not read, say — must return NOTHING;
+        # under `if ids:` it fell through to the unscoped query and returned the whole
+        # store instead. Same family of defect as SPRINT_0_3_0.md 13.1: a filter built by
+        # truthiness widens exactly where it should close.
+        if entity_ids is not None:
+            ids: Optional[list[int]] = entity_ids
+        elif entity_id is not None:
+            ids = [entity_id]
+        else:
+            ids = None
+        if ids is not None:
             if direction == "outgoing":
                 conditions.append(Triple.subject_id.in_(ids))
             elif direction == "incoming":
@@ -233,6 +297,11 @@ class TripleRepository:
         if fact_type is not None:
             conditions.append(Triple.fact_type == fact_type)
 
+        if provenance == "asserted":
+            conditions.append(Triple.derived_by.is_(None))
+        elif provenance == "derived":
+            conditions.append(Triple.derived_by.is_not(None))
+
         if conditions:
             query = query.where(and_(*conditions))
 
@@ -245,10 +314,18 @@ class TripleRepository:
         # Single query; a no-op for owner/unbound callers and when no ACRs exist. Because
         # find_path() walks the graph through this method, dropping edges to unreadable
         # nodes here also prevents paths from traversing them.
-        endpoint_ids = {t.subject_id for t in triples} | {t.object_id for t in triples}
+        # A literal object has no document id and therefore no access rule of its own; the
+        # subject's is the whole check for it. `None` must not reach readable_id_subset.
+        endpoint_ids = {t.subject_id for t in triples} | {
+            t.object_id for t in triples if t.object_id is not None
+        }
         readable = readable_id_subset(self.session, endpoint_ids)
         if len(readable) != len(endpoint_ids):
-            triples = [t for t in triples if t.subject_id in readable and t.object_id in readable]
+            triples = [
+                t
+                for t in triples
+                if t.subject_id in readable and (t.object_id is None or t.object_id in readable)
+            ]
         return triples
 
     # =========================================================================
@@ -335,7 +412,16 @@ class TripleRepository:
         max_depth: int = 5,
         valid_only: bool = False,
     ) -> list[list[Triple]]:
-        """BFS path finding between two entities via triples."""
+        """BFS path finding between two entities via triples.
+
+        A path is between entities, so only resource edges are traversable. A triple whose
+        object is a LITERAL is a leaf — a value has no far side to step to — and is skipped
+        here rather than walked (``SPRINT_0_3_0.md`` 13.1). Before that skip existed a
+        literal fact produced ``next_id = None``, which was queued and then passed to
+        ``query_triples(entity_id=None)``; that filter is built by truthiness, so the round
+        ran UNSCOPED and every triple in the store was treated as adjacent to the literal's
+        subject. Two edges that do not connect came back as a path.
+        """
         visited = {from_id}
         queue: list[tuple[int, list[Triple]]] = [(from_id, [])]
         paths: list[list[Triple]] = []
@@ -350,6 +436,8 @@ class TripleRepository:
                     valid_only=valid_only,
                 )
                 for triple in triples:
+                    if triple.object_id is None:
+                        continue  # literal object: a leaf, not an edge to walk through
                     next_id = (
                         triple.object_id if triple.subject_id == current_id else triple.subject_id
                     )

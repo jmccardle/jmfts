@@ -9,21 +9,24 @@ See test_methodology_raptor_pipeline.md § 2.2 for the full test plan.
 import asyncio
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
 from jmfts_core.fact_extraction import (
+    _best_match,
+    _like_escape,
     _llm_extract,
     _parse_fact_type,
     _parse_raw_triples,
     _parse_temporal,
     _string_similarity,
     extract_facts_from_document,
-    resolve_entity,
     resolve_predicate,
     EXTRACTION_SYSTEM_PROMPT,
 )
 from jmfts_core.models.triple import FactType
+from tests.llm_stub import llm_stub
 
 # ============================================================================
 # Helpers
@@ -39,14 +42,28 @@ def _run(coro):
         loop.close()
 
 
+#: The extraction knobs these tests pin, kept apart from the endpoint so the same set can
+#: be layered onto a `Settings` pointed at a live stub.
+EXTRACTION_DEFAULTS = {
+    "extraction_max_facts": 5,
+    "extraction_confidence_threshold": 0.5,
+    "extraction_entity_similarity_threshold": 0.8,
+    "extraction_temperature": 0.1,
+    "extraction_max_tokens": 2048,
+}
+
+
 def _make_settings(**overrides):
     """A real Settings with extraction defaults, pointed at an endpoint nothing calls.
 
     Previously a `MagicMock(spec=Settings)` with the read-only `effective_llm_*` properties
     stubbed out. That bypassed the resolution chain being tested: `require_llm` is a method,
     so a mock returned another mock instead of the (url, model) pair, and the stubs hid the
-    fact that the endpoint has to be configured at all. The HTTP client is patched in each
-    test, so this address is never contacted.
+    fact that the endpoint has to be configured at all.
+
+    The tests that actually make a call pass `llm_base_url` through
+    `llm_stub(...).settings(**EXTRACTION_DEFAULTS)` instead; this address belongs to the
+    ones that never reach the transport.
     """
     from jmfts_core.config import Settings
 
@@ -54,11 +71,7 @@ def _make_settings(**overrides):
         "llm_base_url": "http://llm.invalid:8853",
         "llm_model": "a-model-that-is-never-called",
         "llm_timeout": 10.0,
-        "extraction_max_facts": 5,
-        "extraction_confidence_threshold": 0.5,
-        "extraction_entity_similarity_threshold": 0.8,
-        "extraction_temperature": 0.1,
-        "extraction_max_tokens": 2048,
+        **EXTRACTION_DEFAULTS,
     }
     defaults.update(overrides)
     return Settings(**defaults)
@@ -228,141 +241,90 @@ class TestExtractionPrompt:
 
 
 class TestLLMExtractParsing:
-    """Test _llm_extract response parsing (mocked HTTP)."""
+    """Test _llm_extract against a live stub endpoint.
+
+    These used to patch `jmfts_core.fact_extraction.httpx.AsyncClient`. The transport
+    moved to `tau_llm` in 0.3.0 and builds its own client, so there is no client in this
+    module left to patch; `tests/llm_stub.py` serves the same canned bodies over loopback
+    and each test asserts the same thing it did before, plus what reached the wire.
+    """
+
+    def _extract(self, stub, text="some text"):
+        return _run(_llm_extract(text, stub.settings(**EXTRACTION_DEFAULTS)))
 
     def test_valid_json_response(self):
         triples = [{"subject": "A", "predicate": "rel", "object": "B", "confidence": 0.9}]
-        mock_response = {"choices": [{"message": {"content": json.dumps(triples)}}]}
+        with llm_stub(content=json.dumps(triples)) as stub:
+            result = self._extract(stub)
 
-        async def mock_post(*args, **kwargs):
-            resp = MagicMock()
-            resp.raise_for_status = MagicMock()
-            resp.json.return_value = mock_response
-            return resp
-
-        settings = _make_settings()
-        with patch("jmfts_core.fact_extraction.httpx.AsyncClient") as mock_client:
-            instance = MagicMock()
-            instance.__aenter__ = AsyncMock(return_value=instance)
-            instance.__aexit__ = AsyncMock(return_value=False)
-            instance.post = AsyncMock(side_effect=mock_post)
-            mock_client.return_value = instance
-
-            result = _run(_llm_extract("some text", settings))
-            assert len(result) == 1
-            assert result[0]["subject"] == "A"
+        assert len(result) == 1
+        assert result[0]["subject"] == "A"
+        request = stub.requests[0]
+        assert request.path == "/v1/chat/completions"
+        assert request.body["temperature"] == EXTRACTION_DEFAULTS["extraction_temperature"]
+        assert request.body["max_tokens"] == EXTRACTION_DEFAULTS["extraction_max_tokens"]
+        assert "some text" in request.role("user")
 
     def test_markdown_fenced_json(self):
         triples = [{"subject": "A", "predicate": "rel", "object": "B"}]
-        content = f"```json\n{json.dumps(triples)}\n```"
-        mock_response = {"choices": [{"message": {"content": content}}]}
-
-        async def mock_post(*args, **kwargs):
-            resp = MagicMock()
-            resp.raise_for_status = MagicMock()
-            resp.json.return_value = mock_response
-            return resp
-
-        settings = _make_settings()
-        with patch("jmfts_core.fact_extraction.httpx.AsyncClient") as mock_client:
-            instance = MagicMock()
-            instance.__aenter__ = AsyncMock(return_value=instance)
-            instance.__aexit__ = AsyncMock(return_value=False)
-            instance.post = AsyncMock(side_effect=mock_post)
-            mock_client.return_value = instance
-
-            result = _run(_llm_extract("some text", settings))
-            assert len(result) == 1
+        with llm_stub(content=f"```json\n{json.dumps(triples)}\n```") as stub:
+            result = self._extract(stub)
+        assert len(result) == 1
 
     def test_invalid_json_returns_empty(self):
-        mock_response = {"choices": [{"message": {"content": "not json at all"}}]}
-
-        async def mock_post(*args, **kwargs):
-            resp = MagicMock()
-            resp.raise_for_status = MagicMock()
-            resp.json.return_value = mock_response
-            return resp
-
-        settings = _make_settings()
-        with patch("jmfts_core.fact_extraction.httpx.AsyncClient") as mock_client:
-            instance = MagicMock()
-            instance.__aenter__ = AsyncMock(return_value=instance)
-            instance.__aexit__ = AsyncMock(return_value=False)
-            instance.post = AsyncMock(side_effect=mock_post)
-            mock_client.return_value = instance
-
-            result = _run(_llm_extract("some text", settings))
-            assert result == []
+        with llm_stub(content="not json at all") as stub:
+            result = self._extract(stub)
+        assert result == []
 
     def test_empty_array_response(self):
-        mock_response = {"choices": [{"message": {"content": "[]"}}]}
+        with llm_stub(content="[]") as stub:
+            result = self._extract(stub, text="The weather was nice.")
+        assert result == []
 
-        async def mock_post(*args, **kwargs):
-            resp = MagicMock()
-            resp.raise_for_status = MagicMock()
-            resp.json.return_value = mock_response
-            return resp
+    def test_reasoning_only_response_is_read(self):
+        """A model that spent its budget thinking still answers.
 
-        settings = _make_settings()
-        with patch("jmfts_core.fact_extraction.httpx.AsyncClient") as mock_client:
-            instance = MagicMock()
-            instance.__aenter__ = AsyncMock(return_value=instance)
-            instance.__aexit__ = AsyncMock(return_value=False)
-            instance.post = AsyncMock(side_effect=mock_post)
-            mock_client.return_value = instance
-
-            result = _run(_llm_extract("The weather was nice.", settings))
-            assert result == []
+        `llm_utils.extract_llm_text` fell back from an empty `content` to
+        `reasoning_content`; `llm_client._text_of` restates that rule over τ's typed
+        blocks. This is the test that keeps the two equivalent — without it the fallback
+        is a comment nobody checks, and a reasoning model would silently extract nothing.
+        """
+        triples = [{"subject": "A", "predicate": "rel", "object": "B"}]
+        with llm_stub(content="", reasoning=json.dumps(triples)) as stub:
+            result = self._extract(stub)
+        assert len(result) == 1
+        assert result[0]["object"] == "B"
 
 
-class TestResolveEntity:
-    """Test entity resolution with mocked DB session."""
+class TestEntityMatching:
+    """The parts of entity resolution that are a decision rather than a query.
 
-    def test_cache_hit(self):
-        cache = {"paris": 42}
-        session = MagicMock()
-        doc_id, created = resolve_entity("Paris", session, threshold=0.8, _cache=cache)
-        assert doc_id == 42
-        assert created is False
+    `resolve_entity` itself no longer has a tier-1 shape: since `SPRINT_0_3_0.md` 7.5 it
+    resolves against the entities root for the source document's ACCESS, so it reads
+    grants, mints a root and writes links — a mocked session can only assert that it called
+    the mock. Its behaviour is tested against a real database in
+    `tests/test_entity_access_keys.py`. What stays here is the matching logic, which is
+    pure.
+    """
 
-    def test_exact_match_in_db(self):
-        mock_doc = MagicMock()
-        mock_doc.id = 99
-        mock_doc.title = "Paris"
+    def test_best_match_needs_the_threshold(self):
+        paris = SimpleNamespace(id=99, title="Paris", parent_id=1)
+        assert _best_match("Paris", [paris], 0.8) is paris
+        assert _best_match("Berlin", [paris], 0.8) is None
 
-        mock_repo = MagicMock()
-        mock_repo.find.return_value = [mock_doc]
+    def test_best_match_prefers_the_closer_title(self):
+        near = SimpleNamespace(id=1, title="Paris, France", parent_id=1)
+        exact = SimpleNamespace(id=2, title="Paris", parent_id=1)
+        assert _best_match("Paris", [near, exact], 0.8) is exact
 
-        session = MagicMock()
-        cache = {}
+    def test_best_match_ignores_untitled_candidates(self):
+        assert _best_match("Paris", [SimpleNamespace(id=1, title=None, parent_id=1)], 0.0) is None
 
-        with patch("jmfts_core.fact_extraction.DocumentRepository", return_value=mock_repo):
-            doc_id, created = resolve_entity("Paris", session, threshold=0.8, _cache=cache)
-            assert doc_id == 99
-            assert created is False
-            assert cache["paris"] == 99
-
-    def test_creates_new_entity_when_no_match(self):
-        new_doc = MagicMock()
-        new_doc.id = 200
-
-        mock_repo = MagicMock()
-        mock_repo.find.return_value = []
-        mock_repo.create.return_value = new_doc
-
-        session = MagicMock()
-        # Mock the select().where().limit() chain to return empty
-        mock_result = MagicMock()
-        mock_result.scalars.return_value.all.return_value = []
-        session.execute.return_value = mock_result
-
-        cache = {}
-
-        with patch("jmfts_core.fact_extraction.DocumentRepository", return_value=mock_repo):
-            doc_id, created = resolve_entity("NewEntity", session, threshold=0.8, _cache=cache)
-            assert doc_id == 200
-            assert created is True
-            mock_repo.create.assert_called_once()
+    def test_like_metacharacters_are_escaped(self):
+        # An entity really named "50%" must not turn the candidate sieve into a wildcard.
+        assert _like_escape("50%") == "50\\%"
+        assert _like_escape("a_b") == "a\\_b"
+        assert _like_escape("back\\slash") == "back\\\\slash"
 
 
 class TestResolvePredicate:

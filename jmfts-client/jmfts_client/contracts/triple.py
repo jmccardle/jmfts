@@ -17,8 +17,14 @@ class PredicateCreate(BaseModel):
     """Request to create a predicate"""
 
     name: str
-    domain: Optional[str] = None
+    #: Renamed from ``domain`` in 0.3.0. ``rdfs:domain`` means "the class a subject must
+    #: belong to"; this has always meant "the group this predicate belongs to", and the
+    #: two readings collide once the tree speaks RDF.
+    namespace: Optional[str] = None
     description: Optional[str] = None
+    #: The IRI a published vocabulary knows this predicate by. Unique across predicates;
+    #: null means the predicate is local to this appliance.
+    iri: Optional[str] = None
 
 
 class PredicateResponse(BaseModel):
@@ -26,7 +32,8 @@ class PredicateResponse(BaseModel):
 
     id: int
     name: str
-    domain: Optional[str]
+    namespace: Optional[str]
+    iri: Optional[str] = None
     description: Optional[str]
     created_at: Optional[datetime]
 
@@ -35,7 +42,14 @@ class PredicateResponse(BaseModel):
 
 
 class TripleCreate(BaseModel):
-    """Request to create a triple"""
+    """Request to create a triple.
+
+    The object stays a document node on this surface. ``triples.object_literal`` exists in
+    the schema as of 0.3.0 and the repository can write it, but no REST verb mints a
+    literal fact yet — literals arrive from the sheet reader (``SPRINT_0_3_0.md`` 6.5),
+    which is a later step, and an idempotent ``PUT /triples`` over literals needs the
+    uniqueness question settled first.
+    """
 
     subject_id: int
     predicate_id: int
@@ -52,7 +66,15 @@ class TripleResponse(BaseModel):
     id: int
     subject_id: int
     predicate_id: int
-    object_id: int
+    #: Null when the object is a literal — see ``object_literal``.
+    object_id: Optional[int]
+    #: The literal object's lexical form, and the ``xsd:`` IRI typing it. Exactly one of
+    #: ``object_id`` and ``object_literal`` is set on any triple. A null
+    #: ``object_datatype`` beside a literal means ``xsd:string``, not "unknown".
+    object_literal: Optional[str] = None
+    object_datatype: Optional[str] = None
+    #: Which rule produced this row. Null means asserted.
+    derived_by: Optional[str] = None
     source_document_id: Optional[int]
     created_at: Optional[datetime]
     valid_from: Optional[datetime]
@@ -73,7 +95,11 @@ class TripleDetailResponse(BaseModel):
     id: int
     subject: DocumentResponse
     predicate: PredicateResponse
-    object: DocumentResponse
+    #: Null when the object is a literal; ``object_literal`` carries it instead.
+    object: Optional[DocumentResponse]
+    object_literal: Optional[str] = None
+    object_datatype: Optional[str] = None
+    derived_by: Optional[str] = None
     source_document_id: Optional[int]
     created_at: Optional[datetime]
     valid_from: Optional[datetime]
@@ -109,7 +135,17 @@ class TripleSupersedRequest(BaseModel):
 
 
 class PathStep(BaseModel):
-    """A single step in a graph path"""
+    """One traversed edge in a graph path — always between two entities.
+
+    ``object_id`` stays non-null here while ``TripleResponse.object_id`` is nullable, and
+    the difference is the point. A triple's object may be a literal; a path STEP's cannot,
+    because a literal is a value with no far side to walk to, so a literal fact is a leaf
+    and never a step. ``find_path`` skips those edges (``SPRINT_0_3_0.md`` 13.1), and this
+    type is where that invariant is stated to callers: a step's ``object_id`` is an entity
+    id you can ask about, unconditionally. Widening it to ``Optional[int]`` would make
+    every consumer branch on a case the walk cannot produce, and would let a regression
+    that reintroduced literal hops serve nulls quietly instead of failing at the boundary.
+    """
 
     triple_id: int
     subject_id: int

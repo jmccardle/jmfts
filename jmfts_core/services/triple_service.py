@@ -83,14 +83,19 @@ class TripleService:
     def list_predicates(
         self,
         *,
-        domain: Optional[str] = None,
+        namespace: Optional[str] = None,
         with_triples_only: bool = True,
     ) -> list[PredicateResponse]:
-        """List predicates. By default returns only predicates with at least one triple."""
+        """List predicates. By default returns only predicates with at least one triple.
+
+        ``namespace`` was called ``domain`` before 0.3.0. It never meant ``rdfs:domain``
+        and no writer ever set it; the rename happened before RDF vocabulary made the
+        wrong reading the natural one.
+        """
         repo = TripleRepository(self.session)
         return [
             PredicateResponse(**p.to_dict())
-            for p in repo.list_predicates(domain=domain, with_triples_only=with_triples_only)
+            for p in repo.list_predicates(namespace=namespace, with_triples_only=with_triples_only)
         ]
 
     @expose(
@@ -109,7 +114,10 @@ class TripleService:
         if existing:
             raise PredicateConflictError(f"Predicate '{request.name}' already exists")
         pred = repo.create_predicate(
-            name=request.name, domain=request.domain, description=request.description
+            name=request.name,
+            namespace=request.namespace,
+            description=request.description,
+            iri=request.iri,
         )
         response = PredicateResponse(**pred.to_dict())
         # Commit before responding: get_db's teardown commit runs after the
@@ -261,9 +269,10 @@ class TripleService:
         """Query triples with optional filters including temporal filtering.
 
         With ``coreferent=true`` and an ``entity_id``, the query expands to the entity's
-        ``same_as`` cluster: facts recorded under any alias of the entity are returned as
-        one set. Off by default, so a plain single-entity query is byte-identical — the
-        coreference leg is strictly opt-in.
+        coreference cluster — its ``same_as`` aliases and its ``rbac_coref`` copies under
+        other entities roots — so facts recorded under any of them are returned as one set,
+        minus the copies the caller cannot read. Off by default, so a plain single-entity
+        query is byte-identical — the coreference leg is strictly opt-in.
         """
         ft = None
         if fact_type:
@@ -294,7 +303,14 @@ class TripleService:
                     id=t.id,
                     subject=DocumentResponse.from_document(t.subject),
                     predicate=PredicateResponse(**t.predicate.to_dict()),
-                    object=DocumentResponse.from_document(t.object),
+                    # A literal object has no document to expand; the lexical form and its
+                    # datatype travel beside it instead.
+                    object=(
+                        DocumentResponse.from_document(t.object) if t.object is not None else None
+                    ),
+                    object_literal=t.object_literal,
+                    object_datatype=t.object_datatype,
+                    derived_by=t.derived_by,
                     source_document_id=t.source_document_id,
                     created_at=t.created_at,
                     valid_from=t.valid_from,
@@ -419,8 +435,12 @@ class TripleService:
         if not triple:
             raise LookupError("Triple not found")
         # Subtree RBAC: a triple whose subject or object the principal cannot read is hidden
-        # whole (existence-hiding, 404) — the same rule query_triples applies in bulk.
-        endpoints = {triple.subject_id, triple.object_id}
+        # whole (existence-hiding, 404) — the same rule query_triples applies in bulk. A
+        # literal object has no document and so no rule of its own; the subject's is the
+        # whole check.
+        endpoints = {triple.subject_id}
+        if triple.object_id is not None:
+            endpoints.add(triple.object_id)
         if readable_id_subset(self.session, endpoints) != endpoints:
             raise LookupError("Triple not found")
         return TripleResponse(**triple.to_dict())

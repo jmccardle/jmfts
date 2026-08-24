@@ -377,15 +377,17 @@ class TestScopeFiltering:
 class TestEntityPollution:
     """Tests for Bug #2: Entity nodes polluted 40-60% of search results.
 
-    Root cause was that entities were created without parent_id, so they
-    appeared as root documents and matched all scope-less searches equally.
+    Root cause was that entities were created without parent_id, so they appeared as root
+    documents and matched all scope-less searches equally. The fix was to hang them under
+    the document that mentioned them; `SPRINT_0_3_0.md` 7.5 moved them again, to the
+    entities root for that document's ACCESS, because tree position was scoping them and
+    tree position is not what governs a fact. They still have a parent and are still held
+    out of retrieval by usetype — which is what these tests are really about.
     """
 
-    def test_entities_have_parent_id(self, db_session):
-        """After entity resolution, entity documents should have a non-null parent_id.
-
-        This tests the fix: resolve_entity now passes source_document_id as parent_id.
-        """
+    def test_entities_hang_under_an_entities_root(self, db_session):
+        """A resolved entity is a child of an entities root, never a loose root document."""
+        from jmfts_core.entity_roots import ENTITIES_ROOT_USETYPE
         from jmfts_core.fact_extraction import resolve_entity
 
         # Create a source document
@@ -402,49 +404,65 @@ class TestEntityPollution:
             db_session,
             threshold=0.8,
             _cache=cache,
-            parent_id=source.id,
+            source_document_id=source.id,
         )
 
         assert created is True, "Should create a new entity document"
 
-        # Verify the entity document has a parent_id
         entity_doc = db_session.get(Document, entity_id)
         assert entity_doc is not None
-        assert (
-            entity_doc.parent_id == source.id
-        ), f"Entity should have parent_id={source.id}, got {entity_doc.parent_id}"
         assert entity_doc.usetype == "entity"
+        assert entity_doc.parent_id is not None, "Entity must not be a loose root document"
 
-    def test_entity_path_includes_source(self, db_session):
-        """Entity document's path should include the source document's ancestry."""
-        from jmfts_core.fact_extraction import resolve_entity
+        root = db_session.get(Document, entity_doc.parent_id)
+        assert root.usetype == ENTITIES_ROOT_USETYPE
+        assert root.parent_id is None
+        assert entity_doc.path == [root.id]
+
+    def test_mention_is_a_link_not_a_parent(self, db_session):
+        """The document that mentioned the entity reaches it by a `mentions` edge.
+
+        The parent relationship used to BE the record of the mention, so an entity
+        mentioned by two documents could only be recorded against one of them, and a
+        mention that resolved to an existing node was recorded against neither.
+        """
+        from jmfts_core.fact_extraction import MENTIONS_LINK_TYPE, resolve_entity
+        from jmfts_core.repositories.document import DocumentRepository
 
         root = _create_doc(db_session, title="Root", content="Root doc", usetype="raw")
-        source = _create_doc(
+        first = _create_doc(
             db_session,
             title="Source Chunk",
             content="Machine learning models.",
             parent_id=root.id,
             usetype="raw/chunk",
         )
+        second = _create_doc(
+            db_session,
+            title="Another Chunk",
+            content="More machine learning.",
+            parent_id=root.id,
+            usetype="raw/chunk",
+        )
 
         cache = {}
         entity_id, created = resolve_entity(
-            "MachineLearning",
-            db_session,
-            threshold=0.8,
-            _cache=cache,
-            parent_id=source.id,
+            "MachineLearning", db_session, threshold=0.8, _cache=cache, source_document_id=first.id
         )
+        assert created is True
+        # The second mention resolves to the same node — and is still recorded.
+        again, created_again = resolve_entity(
+            "MachineLearning", db_session, threshold=0.8, _cache=cache, source_document_id=second.id
+        )
+        assert (again, created_again) == (entity_id, False)
 
-        entity_doc = db_session.get(Document, entity_id)
-        assert entity_doc is not None
-        assert (
-            source.id in entity_doc.path
-        ), f"Entity path should include source doc ID {source.id}, got {entity_doc.path}"
-        assert (
-            root.id in entity_doc.path
-        ), f"Entity path should include root ID {root.id}, got {entity_doc.path}"
+        repo = DocumentRepository(db_session)
+        mentioners = {
+            link.source_id
+            for link in repo.get_links(entity_id, link_type=MENTIONS_LINK_TYPE)
+            if link.target_id == entity_id
+        }
+        assert mentioners == {first.id, second.id}
 
     def test_entities_excluded_from_bm25_indexing(self, db_session):
         """Entity documents (usetype=entity) must be excluded from BM25 indexing.

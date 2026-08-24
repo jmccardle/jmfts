@@ -97,6 +97,17 @@ def lint_orphans(
     return findings
 
 
+def _object_key(triple: Triple) -> tuple:
+    """What makes two triples' objects the same object.
+
+    Comparing ``object_id`` alone was enough while every object was a document node. It is
+    not any more: two literal facts both have ``object_id IS NULL``, so "1999" and "2001"
+    under one subject and predicate would compare EQUAL and the contradiction would go
+    unreported — a false negative in the check whose whole job is to find them.
+    """
+    return (triple.object_id, triple.object_literal, triple.object_datatype)
+
+
 def lint_contradictions(session: Session, *, max_findings: int = 200) -> list[LintFinding]:
     """Triples with same (subject, predicate) and overlapping validity but different objects."""
     stmt = (
@@ -118,13 +129,13 @@ def lint_contradictions(session: Session, *, max_findings: int = 200) -> list[Li
     for (sid, pid), members in groups.items():
         if len(members) < 2:
             continue
-        if len({t.object_id for t in members}) < 2:
+        if len({_object_key(t) for t in members}) < 2:
             continue
         # Check for any pair with overlapping validity
         overlapping_ids: list[int] = []
         for i, a in enumerate(members):
             for b in members[i + 1 :]:
-                if a.object_id == b.object_id:
+                if _object_key(a) == _object_key(b):
                     continue
                 if _windows_overlap(a, b):
                     overlapping_ids.extend([a.id, b.id])
@@ -149,7 +160,10 @@ def lint_contradictions(session: Session, *, max_findings: int = 200) -> list[Li
                     "predicate_id": pid,
                     "predicate_name": pred_name,
                     "triple_count": len(members),
-                    "object_ids": sorted({t.object_id for t in members}),
+                    "object_ids": sorted({t.object_id for t in members if t.object_id}),
+                    "object_literals": sorted(
+                        {t.object_literal for t in members if t.object_literal is not None}
+                    ),
                 },
             )
         )
@@ -185,14 +199,15 @@ def lint_stale(
             continue
         age = (datetime.now(timezone.utc) - ref).days
         subj_title = t.subject.title if t.subject else None
-        obj_title = t.object.title if t.object else None
+        # A literal object has no document and so no title; the value is the description.
+        obj_title = t.object.title if t.object else t.object_literal
         pred_name = t.predicate.name if t.predicate else None
         findings.append(
             LintFinding(
                 category="stale",
                 severity="warning",
                 triple_ids=[t.id],
-                document_ids=[t.subject_id, t.object_id],
+                document_ids=[i for i in (t.subject_id, t.object_id) if i is not None],
                 message=(
                     f"triple #{t.id}: dynamic claim {age}d old "
                     f"({subj_title or '?'} -[{pred_name or '?'}]-> {obj_title or '?'})"

@@ -34,7 +34,10 @@ PY="${PYTHON:-./.venv/bin/python}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-cleanup() { docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; }
+# `-v` matters. The pgvector image declares VOLUME /var/lib/postgresql/data, so every
+# `docker run` here creates an anonymous volume, and `docker rm` without `-v` removes the
+# container and leaves the volume behind — about 128 MB of abandoned PGDATA per suite run.
+cleanup() { docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 cleanup  # remove any leftover from a previous aborted run
 

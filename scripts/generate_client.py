@@ -130,11 +130,20 @@ def _default_for(field: Any, type_text: str) -> tuple[str, Optional[str]]:
 class _Param:
     """One client-method parameter and where it belongs on the wire."""
 
-    def __init__(self, name: str, type_text: str, where: str, default: Optional[str]) -> None:
+    def __init__(
+        self,
+        name: str,
+        type_text: str,
+        where: str,
+        default: Optional[str],
+        media_type: Optional[str] = None,
+    ) -> None:
         self.name = name
         self.type_text = type_text
-        self.where = where  # "path" | "query" | "body" | "file" | "form_json"
+        self.where = where  # "path" | "query" | "body" | "raw_body" | "file" | "form_json"
         self.default = default
+        #: Only for "raw_body": the media type the route declared, sent verbatim.
+        self.media_type = media_type
 
     @property
     def required(self) -> bool:
@@ -155,6 +164,17 @@ def _collect_params(route: APIRoute, imports: set[str]) -> list[_Param]:
         if annotation is UploadFile:
             imports.add(f"from {CONTRACTS_ROOT}.upload import UploadedFile")
             params.append(_Param(field.name, "UploadedFile", "file", None))
+            continue
+        # A body the route declared under a media type of its own is sent VERBATIM, not
+        # wrapped in JSON. `text/turtle` works either way — FastAPI would parse a JSON
+        # string back to the same str — but a client that posts `application/json` to a
+        # route documented as `text/turtle` is a client whose requests do not look like the
+        # ones the OpenAPI document tells everyone else to send, and the first proxy or
+        # gateway that content-negotiates would tell them apart.
+        media_type = getattr(field.field_info, "media_type", None)
+        if media_type and media_type != "application/json" and not _has_file_part(route):
+            rendered, default = _default_for(field, _render_type(annotation, imports))
+            params.append(_Param(field.name, rendered, "raw_body", default, media_type))
             continue
         # A body param beside a file part is a multipart form field carrying JSON text.
         where = "form_json" if _has_file_part(route) else "body"
@@ -245,9 +265,19 @@ def _emit_method(route: APIRoute, spec: Any, imports: set[str]) -> str:
     if files:
         entries = ", ".join(f'"{p.name}": {p.name}' for p in files)
         call.append(f"            files={{{entries}}},")
+    raw = [p for p in params if p.where == "raw_body"]
+    if len(raw) > 1:
+        raise GenerationError(f"{spec.name} has {len(raw)} raw body params; expected at most 1")
+    if raw:
+        call.append(f"            content={raw[0].name},")
+        call.append(f'            content_type="{raw[0].media_type}",')
     body = [p for p in params if p.where == "body"]
     if len(body) > 1:
         raise GenerationError(f"{spec.name} has {len(body)} JSON body params; expected at most 1")
+    if body and raw:
+        raise GenerationError(
+            f"{spec.name} has both a JSON body and a raw body; one request has one body"
+        )
     if body:
         call.append(f"            body={body[0].name},")
     call.append(f"            response={response_arg},")

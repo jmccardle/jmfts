@@ -228,7 +228,14 @@ CREATE TABLE document_links (
 CREATE TABLE predicates (
     id SERIAL PRIMARY KEY,
     name VARCHAR(200) NOT NULL UNIQUE,
-    domain VARCHAR(100),
+    -- WAS `domain`, renamed in migration 013. `rdfs:domain` means "the class a subject
+    -- must belong to", which is NOT what this column means — it is the group a predicate
+    -- belongs to. `rdfs:domain` is expressed in the ontology, not here.
+    namespace VARCHAR(100),
+    -- The IRI a published vocabulary knows this predicate by. NULL = local to this
+    -- appliance. UNIQUE, so "which predicate does this vocabulary term mean" has one
+    -- answer; NULLs do not conflict, so any number of local predicates coexist.
+    iri TEXT UNIQUE,
     description TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -240,7 +247,16 @@ CREATE TABLE triples (
     id SERIAL PRIMARY KEY,
     subject_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     predicate_id INTEGER NOT NULL REFERENCES predicates(id) ON DELETE CASCADE,
-    object_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    -- NULLABLE since migration 013: null here means the object is the literal below.
+    -- Before that every object had to be a document node, which is why extracting the
+    -- fact "revenue 128000" created a document titled `128000`, embedded it, and put it
+    -- in the retrieval index.
+    object_id INTEGER REFERENCES documents(id) ON DELETE CASCADE,
+    -- The literal object's LEXICAL form, verbatim: "1.50" and "1.5" are the same decimal
+    -- and different literals. object_datatype is an `xsd:` IRI; NULL means xsd:string —
+    -- RDF's plain literal — not "unknown".
+    object_literal TEXT,
+    object_datatype VARCHAR(100),
     source_document_id INTEGER REFERENCES documents(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ DEFAULT NOW(),
 
@@ -257,8 +273,31 @@ CREATE TABLE triples (
     invalidated_by INTEGER REFERENCES triples(id) ON DELETE SET NULL,
     invalidation_reason TEXT,
 
+    -- WHICH RULE PRODUCED THIS ROW. NULL means asserted. "Asserted only" is then
+    -- `WHERE derived_by IS NULL` — without this column an inference layer and an asserted
+    -- layer are the same rows and cannot be separated later. Nothing writes it yet, and
+    -- that is the point: the first rule to land must not be indistinguishable from an
+    -- assertion. See migration 013.
+    derived_by VARCHAR(200),
+
+    -- Exactly one object. A datatype belongs to a literal, so it is refused on a resource
+    -- object rather than ignored there.
+    CONSTRAINT ck_triples_object_exactly_one CHECK (
+        (object_id IS NOT NULL AND object_literal IS NULL AND object_datatype IS NULL)
+        OR (object_literal IS NOT NULL AND object_id IS NULL)
+    ),
+
+    -- Resource objects only: NULLs are distinct in a UNIQUE constraint, so a literal row
+    -- (object_id NULL) never conflicts here. uq_triple_literal below is its counterpart.
     UNIQUE(subject_id, predicate_id, object_id)
 );
+
+-- The literal half of the uniqueness above. md5() because a btree entry is capped near
+-- 2704 bytes and object_literal is unbounded TEXT; COALESCE because a NULL datatype means
+-- xsd:string and NULLs do not compare equal. See migration 013 for the collision cost.
+CREATE UNIQUE INDEX uq_triple_literal
+    ON triples (subject_id, predicate_id, md5(object_literal), COALESCE(object_datatype, ''))
+    WHERE object_literal IS NOT NULL;
 
 CREATE INDEX ix_triples_subject ON triples(subject_id);
 CREATE INDEX ix_triples_object ON triples(object_id);
@@ -266,6 +305,9 @@ CREATE INDEX ix_triples_predicate ON triples(predicate_id);
 CREATE INDEX ix_triples_valid_range ON triples(valid_from, valid_until);
 CREATE INDEX ix_triples_fact_type ON triples(fact_type);
 CREATE INDEX ix_triples_invalidated ON triples(invalidated_at) WHERE invalidated_at IS NOT NULL;
+-- Partial: derived_by is NULL for every row an assertion writes, so the index holds only
+-- the derived minority.
+CREATE INDEX ix_triples_derived_by ON triples(derived_by) WHERE derived_by IS NOT NULL;
 
 -- ============================================================================
 -- BM25 SEARCH INFRASTRUCTURE
@@ -541,6 +583,65 @@ VALUES
     ('transcript',         'transcript','collapsed',        'footnotes',         'Voice transcript');
 
 -- ============================================================================
+-- ONTOLOGIES AND SHAPE BINDINGS (see migration 013, jmfts_core/models/ontology.py)
+-- ============================================================================
+-- The same shape as usetype_presentations above: an open string key, policy in JSONB,
+-- extended by inserting a row rather than by altering the schema.
+
+CREATE TABLE ontologies (
+    -- A second upload under the same name REPLACES that vocabulary; it is not a second
+    -- copy of it.
+    name VARCHAR(200) PRIMARY KEY,
+    -- Not derived from @base or from the first prefix: an ontology may declare neither,
+    -- and every locally-minted IRI would then rest on a guess.
+    base_iri TEXT NOT NULL,
+    -- Exactly the bytes that were uploaded. `shapes` below is a parsed digest of the SHACL
+    -- subset this release reads, and a digest is lossy; when the subset widens it is
+    -- rebuilt from here rather than from a file somebody has to find again.
+    source_turtle TEXT NOT NULL,
+    -- {prefix: namespace IRI}, as declared, so Turtle renders back out with the names the
+    -- author chose instead of rdflib's invented ns1:.
+    prefixes JSONB NOT NULL DEFAULT '{}'::jsonb,
+    -- {shape IRI: {targetClass, properties: [...]}}. A cache of a parse, never the
+    -- authority over the Turtle above.
+    shapes JSONB NOT NULL DEFAULT '{}'::jsonb,
+    description TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TRIGGER trigger_ontologies_updated_at
+    BEFORE UPDATE ON ontologies
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at();
+
+-- Which shape applies to which documents. Until a shape is bound it constrains nothing,
+-- which is what makes uploading an ontology safe: it cannot change how anything already in
+-- the tree is validated or extracted.
+CREATE TABLE shape_bindings (
+    id SERIAL PRIMARY KEY,
+    ontology_name VARCHAR(200) NOT NULL REFERENCES ontologies(name) ON DELETE CASCADE,
+    -- TEXT and not a foreign key: shapes live in the ontology's JSONB digest, and giving
+    -- them their own table would make the digest the authority over the source Turtle.
+    shape_iri TEXT NOT NULL,
+    -- A CLOSED set, unlike usetype: each value names a different query the resolver runs.
+    --   usetype    scope = {"pattern": "profile:sheet"}
+    --   subtree    scope = {"parent_id": 42}
+    --   documents  scope = {"document_ids": [1, 2, 3]}
+    scope_type VARCHAR(20) NOT NULL,
+    scope JSONB NOT NULL DEFAULT '{}'::jsonb,
+    description TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+
+    CONSTRAINT ck_shape_bindings_scope_type
+        CHECK (scope_type IN ('usetype', 'subtree', 'documents')),
+    CONSTRAINT uq_shape_binding UNIQUE (ontology_name, shape_iri, scope_type, scope)
+);
+
+CREATE INDEX ix_shape_bindings_ontology ON shape_bindings(ontology_name);
+CREATE INDEX ix_shape_bindings_scope ON shape_bindings USING GIN (scope);
+
+-- ============================================================================
 -- ACCESS CONTROL (subtree RBAC — see migration 006, jmfts_core/access.py)
 -- ============================================================================
 
@@ -582,6 +683,20 @@ CREATE TABLE access_grants (
 );
 CREATE INDEX idx_access_grants_principal ON access_grants(principal_id);
 CREATE INDEX idx_access_grants_document ON access_grants(document_id);
+
+-- One entities root per distinct ACCESS (migration 014). An entity node lives under the
+-- root whose grants are the effective access of the document that mentioned it, and
+-- resolution only looks under that root — which is what stops a restricted document's
+-- entities resolving to public nodes and making its facts world-readable. `access_key` is
+-- the canonical text of `jmfts_core.access.access_key` ("7:read,12:write"); the empty
+-- string is the ungoverned key, whose root carries no grants and is therefore public.
+-- Both columns are UNIQUE: a key names one root, a root serves one key.
+CREATE TABLE entity_roots (
+    id SERIAL PRIMARY KEY,
+    access_key TEXT NOT NULL UNIQUE,
+    document_id INTEGER NOT NULL UNIQUE REFERENCES documents(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
 
 -- ============================================================================
 -- DEFAULT DATA

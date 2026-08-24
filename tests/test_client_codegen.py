@@ -42,6 +42,11 @@ UNTYPED_OPERATIONS = frozenset(
         "IndexService.index_single_document",
         "IndexService.refresh_index",
         "IndexService.remove_root_from_index",
+        # The two 0.3.0 deletes, on the same terms as every other delete above: the body is
+        # ``{"deleted": <key>}`` echoing what was named, and a contract class per delete
+        # would be twelve classes saying one thing.
+        "OntologyService.delete_binding",
+        "OntologyService.delete_ontology",
         "SearchContextService.delete_context",
         "TripleService.delete_predicate",
         "TripleService.delete_triple",

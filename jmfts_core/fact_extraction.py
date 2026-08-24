@@ -13,18 +13,39 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from typing import Optional
 
-import httpx
-from sqlalchemy import select
+from sqlalchemy import or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from jmfts_core.config import Settings, get_settings
-from jmfts_core.llm_utils import extract_llm_text
-from jmfts_core.models.document import Document
+from jmfts_core.entity_roots import (
+    ENTITY_USETYPE,
+    entity_root_ids,
+    get_or_create_entities_root,
+)
+from jmfts_core.graph_analysis import RBAC_COREF_LINK_TYPE
+from jmfts_core.llm_client import complete
+from jmfts_core.models.document import Document, DocumentLink
 from jmfts_core.models.triple import FactType
 from jmfts_core.repositories.document import DocumentRepository
 from jmfts_core.repositories.triple import TripleRepository
 
 logger = logging.getLogger(__name__)
+
+#: Link type recording that a document mentions an entity. This edge is the SCOPING
+#: MECHANISM: until ``SPRINT_0_3_0.md`` 7.5 the entity was a CHILD of the document that
+#: mentioned it, so "which entities came out of this subtree" was a path query — and an
+#: entity mentioned by two documents could only be a child of one of them. As a link it is
+#: many-to-many and records every mention, including the ones that resolved to a node that
+#: already existed, which the parent relationship could not represent at all.
+MENTIONS_LINK_TYPE = "mentions"
+
+#: How many entity nodes a title lookup will consider. Two separate bounds because they
+#: answer differently sized questions: the same-root lookup wants the best match among this
+#: access's entities, the cross-root scan wants at most one match per OTHER root, and there
+#: are as many roots as there are distinct accesses in the corpus.
+_SAME_ROOT_CANDIDATE_LIMIT = 50
+_CROSS_ROOT_CANDIDATE_LIMIT = 200
 
 
 # ---------------------------------------------------------------------------
@@ -45,18 +66,10 @@ class RawTriple:
     valid_until: Optional[str] = None
 
 
-@dataclass
-class ResolvedTriple:
-    """A triple after entity/predicate resolution, ready for DB insertion."""
-
-    subject_id: int
-    predicate_id: int
-    object_id: int
-    source_document_id: int
-    fact_type: FactType = FactType.atemporal
-    valid_from: Optional[datetime] = None
-    valid_until: Optional[datetime] = None
-    confidence: float = 1.0
+# `ResolvedTriple` used to sit here — a dataclass for "a triple after entity/predicate
+# resolution, ready for DB insertion". Nothing ever constructed one: the pipeline calls
+# `TripleRepository.upsert_triple()` with those same fields as arguments, so the dataclass
+# described a row shape the repository already owns.
 
 
 @dataclass
@@ -142,22 +155,19 @@ async def _llm_extract(text: str, settings: Settings, llm_model: str | None = No
     if len(text) > char_budget:
         text = text[:char_budget]
 
-    payload = {
-        "model": model,
-        "messages": [
+    result = await complete(
+        settings=settings,
+        base_url=base_url,
+        model=model,
+        messages=[
             {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
             {"role": "user", "content": f"Extract factual triples from this text:\n\n{text}"},
         ],
-        "temperature": settings.extraction_temperature,
-        "max_tokens": settings.extraction_max_tokens,
-    }
+        max_tokens=settings.extraction_max_tokens,
+        temperature=settings.extraction_temperature,
+    )
 
-    async with httpx.AsyncClient(timeout=settings.effective_llm_timeout) as client:
-        resp = await client.post(f"{base_url}/v1/chat/completions", json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-
-    content = extract_llm_text(data["choices"][0])
+    content = result.text
 
     # Strip markdown fences if the LLM wraps the JSON
     if content.startswith("```"):
@@ -214,45 +224,49 @@ def _string_similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
 
-def resolve_entity(
-    name: str,
-    session: Session,
-    threshold: float,
-    _cache: dict[str, int] | None = None,
-    parent_id: int | None = None,
-) -> tuple[int, bool]:
-    """Resolve an entity name to an existing Document or create a new entity document.
+def _like_escape(value: str) -> str:
+    """Escape LIKE metacharacters so an entity named ``50%`` is not a wildcard."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
-    Args:
-        name: Entity name to resolve.
-        session: DB session.
-        threshold: Minimum string similarity to match an existing entity.
-        _cache: Optional name->id cache for this extraction run.
-        parent_id: Source document ID to attach newly created entity nodes to.
-            This keeps entity nodes structurally part of the document tree so
-            that path-based scope filters include/exclude them correctly.
 
-    Returns:
-        (document_id, created) — True if a new entity document was created.
+def _entity_candidates(
+    session: Session, name: str, parent_ids: list[int], limit: int
+) -> list[Document]:
+    """Entity nodes directly under ``parent_ids`` whose title could plausibly be ``name``.
+
+    Two patterns, one query: a prefix match (the cheap, index-friendly one) OR a contains
+    match (which catches "Paris" inside "Paris, France"). Both are only a candidate SIEVE —
+    :func:`_string_similarity` decides. Entities are created as direct children of their
+    entities root, so ``parent_id`` membership is the exact scope and needs no path query.
+
+    NO ACCESS FILTER, deliberately, and this is the load-bearing part of
+    ``SPRINT_0_3_0.md`` 7.5. Scoping is done by WHICH ROOTS are passed in, not by who is
+    asking: the same-root lookup is already confined to one access, and the cross-root scan
+    must see every copy regardless of the current principal, because fact extraction runs
+    in the worker (which binds no principal, ``ingest_worker.py:58``) and a copy created
+    last must still find the copies created first.
     """
-    # Check in-run cache first
-    if _cache is not None:
-        normalized = name.strip().lower()
-        if normalized in _cache:
-            return _cache[normalized], False
+    if not parent_ids:
+        return []
+    prefix = name[:3] if len(name) >= 3 else name
+    stmt = (
+        select(Document)
+        .where(
+            Document.usetype == ENTITY_USETYPE,
+            Document.parent_id.in_(parent_ids),
+            or_(
+                Document.title.ilike(f"{_like_escape(prefix)}%", escape="\\"),
+                Document.title.ilike(f"%{_like_escape(name)}%", escape="\\"),
+            ),
+        )
+        .limit(limit)
+    )
+    return list(session.execute(stmt).scalars().all())
 
-    repo = DocumentRepository(session)
 
-    # Search existing entity documents by title similarity
-    # First try exact match (case-insensitive)
-    candidates = repo.find(usetype="entity", title_prefix=name[:3] if len(name) >= 3 else name)
-
-    # Also search without usetype filter for broader matching
-    if not candidates:
-        stmt = select(Document).where(Document.title.ilike(f"%{name}%")).limit(50)
-        candidates = list(session.execute(stmt).scalars().all())
-
-    best_match = None
+def _best_match(name: str, candidates: list[Document], threshold: float) -> Optional[Document]:
+    """The candidate most similar to ``name``, or None if none clears ``threshold``."""
+    best: Optional[Document] = None
     best_score = 0.0
     for doc in candidates:
         if not doc.title:
@@ -260,32 +274,141 @@ def resolve_entity(
         score = _string_similarity(name, doc.title)
         if score > best_score:
             best_score = score
-            best_match = doc
+            best = doc
+    return best if best is not None and best_score >= threshold else None
 
-    if best_match and best_score >= threshold:
+
+def _link_rbac_coref(
+    session: Session, entity_doc: Document, name: str, threshold: float, root_id: int
+) -> int:
+    """Join a freshly created entity node to the copies of it under every OTHER root.
+
+    One real-world thing gets one entity node per distinct access it is mentioned in, and
+    those copies are joined by ``rbac_coref``: same referent, different viewers. At most
+    one edge per other root — a root holds one node per referent, so a second match under
+    the same root would be a duplicate rather than another copy.
+
+    **Creation order does not matter, and that is load-bearing.** Copy *k* links to copies
+    1..*k*−1 when it is created, and the walk runs ``direction="both"``, so every pair gets
+    exactly one edge when its later member appears and a public copy created last is still
+    reachable from every restricted one.
+
+    Returns the number of edges written.
+    """
+    others = [rid for rid in entity_root_ids(session) if rid != root_id]
+    candidates = _entity_candidates(session, name, others, _CROSS_ROOT_CANDIDATE_LIMIT)
+    by_root: dict[int, list[Document]] = {}
+    for doc in candidates:
+        by_root.setdefault(doc.parent_id, []).append(doc)
+
+    written = 0
+    for twins in by_root.values():
+        twin = _best_match(name, twins, threshold)
+        if twin is None:
+            continue
+        _upsert_link(session, entity_doc.id, twin.id, RBAC_COREF_LINK_TYPE)
+        written += 1
+    if written:
         logger.debug(
-            "Entity '%s' resolved to doc %d ('%s', score=%.2f)",
+            "Entity '%s' (doc %d) joined to %d copy/copies under other entities roots",
             name,
-            best_match.id,
-            best_match.title,
-            best_score,
+            entity_doc.id,
+            written,
         )
-        if _cache is not None:
-            _cache[name.strip().lower()] = best_match.id
-        return best_match.id, False
+    return written
 
-    # Create new entity document, attached to the source document so that
-    # path-based scope filters handle it correctly (Bug 1b fix — Option A).
+
+def _upsert_link(session: Session, source_id: int, target_id: int, link_type: str) -> None:
+    """Assert a ``DocumentLink``, idempotently.
+
+    ``document_links`` is UNIQUE on (source, target, type), so a plain ``create_link``
+    raises the second time the same mention is extracted — which, inside an extraction
+    batch, takes the whole batch with it. Same reasoning as
+    ``TripleRepository.get_or_create_predicate``.
+    """
+    session.execute(
+        pg_insert(DocumentLink.__table__)
+        .values(source_id=source_id, target_id=target_id, link_type=link_type)
+        .on_conflict_do_nothing()
+    )
+
+
+def resolve_entity(
+    name: str,
+    session: Session,
+    threshold: float,
+    _cache: dict[tuple[int, str], int] | None = None,
+    *,
+    source_document_id: int,
+) -> tuple[int, bool]:
+    """Resolve an entity name to the entity node for the ACCESS of its source document.
+
+    Lookup is keyed by access, not by tree position (``SPRINT_0_3_0.md`` 7.5). The name is
+    matched only against entity nodes under the entities root whose grants are the
+    effective access of ``source_document_id``; copies under other roots are found in a
+    separate pass and joined with ``rbac_coref`` rather than resolved to.
+
+    **That split is the fix for 13.9.** Resolution used to run over every entity node in
+    the store with no access filter, so a restricted document's two entities resolved to
+    existing PUBLIC nodes, the triple was written between them, and ``query_triples`` —
+    which scopes a fact by the readability of its endpoints — handed that fact to everyone.
+    Nothing was created, so the placement rule that was the whole of the protection never
+    ran. A restricted document's resolution now cannot land on a public node because it
+    does not look there.
+
+    The mention is recorded as a ``mentions`` link on every call, including the ones that
+    resolved to an existing node.
+
+    Args:
+        name: Entity name to resolve.
+        session: DB session.
+        threshold: Minimum string similarity to match an existing entity.
+        _cache: Optional ``(entities_root_id, normalized_name) -> id`` cache for this run.
+            The root is IN the key: one extraction run walks a whole subtree, a deeper ACR
+            can give part of that subtree a different access, and a name-only cache would
+            hand a restricted document the copy it resolved for a public one — which is
+            13.9 again, one run wide.
+        source_document_id: The document this mention was extracted from. Required: an
+            entity has to be keyed by the access of the document that mentioned it, and
+            there is no key without one.
+
+    Returns:
+        (document_id, created) — True if a new entity document was created.
+    """
+    root_id = get_or_create_entities_root(session, source_document_id)
+    key = (root_id, name.strip().lower())
+
+    if _cache is not None and key in _cache:
+        entity_id = _cache[key]
+        _upsert_link(session, source_document_id, entity_id, MENTIONS_LINK_TYPE)
+        return entity_id, False
+
+    repo = DocumentRepository(session)
+
+    match = _best_match(
+        name,
+        _entity_candidates(session, name, [root_id], _SAME_ROOT_CANDIDATE_LIMIT),
+        threshold,
+    )
+    if match is not None:
+        logger.debug("Entity '%s' resolved to doc %d ('%s')", name, match.id, match.title)
+        if _cache is not None:
+            _cache[key] = match.id
+        _upsert_link(session, source_document_id, match.id, MENTIONS_LINK_TYPE)
+        return match.id, False
+
     entity_doc = repo.create(
         title=name,
         content=name,
-        usetype="entity",
+        usetype=ENTITY_USETYPE,
         auto_embed=True,
-        parent_id=parent_id,
+        parent_id=root_id,
     )
-    logger.info("Created entity document '%s' -> doc %d", name, entity_doc.id)
+    logger.info("Created entity document '%s' -> doc %d (root %d)", name, entity_doc.id, root_id)
+    _link_rbac_coref(session, entity_doc, name, threshold, root_id)
+    _upsert_link(session, source_document_id, entity_doc.id, MENTIONS_LINK_TYPE)
     if _cache is not None:
-        _cache[name.strip().lower()] = entity_doc.id
+        _cache[key] = entity_doc.id
     return entity_doc.id, True
 
 
@@ -360,7 +483,7 @@ async def extract_facts_from_document(
     llm_model: str | None = None,
     max_facts: int | None = None,
     confidence_threshold: float | None = None,
-    entity_cache: dict[str, int] | None = None,
+    entity_cache: dict[tuple[int, str], int] | None = None,
     predicate_cache: dict[str, int] | None = None,
 ) -> ExtractionResult:
     """Extract knowledge triples from a single document via LLM.
@@ -372,7 +495,7 @@ async def extract_facts_from_document(
         llm_model: Override LLM model name.
         max_facts: Max triples per document.
         confidence_threshold: Minimum confidence to keep a triple.
-        entity_cache: Shared name->id cache across documents.
+        entity_cache: Shared (entities root, name) -> id cache across documents.
         predicate_cache: Shared name->id cache across documents.
 
     Returns:
@@ -415,13 +538,21 @@ async def extract_facts_from_document(
             # parent path when creating entity child documents (Bug 1b / Bug 2 fix).
             session.flush()
 
-            # Resolve entities, attaching new entity nodes to this document so
-            # path-based scope filters handle them correctly.
+            # Resolve entities against the entities root for THIS document's access, and
+            # record each mention as a link (SPRINT_0_3_0.md 7.5).
             subject_id, _ = resolve_entity(
-                raw.subject, session, entity_threshold, entity_cache, parent_id=document_id
+                raw.subject,
+                session,
+                entity_threshold,
+                entity_cache,
+                source_document_id=document_id,
             )
             object_id, _ = resolve_entity(
-                raw.object, session, entity_threshold, entity_cache, parent_id=document_id
+                raw.object,
+                session,
+                entity_threshold,
+                entity_cache,
+                source_document_id=document_id,
             )
 
             # Resolve predicate
@@ -521,7 +652,7 @@ async def extract_facts(
         return result
 
     # Shared caches for cross-document entity/predicate resolution
-    entity_cache: dict[str, int] = {}
+    entity_cache: dict[tuple[int, str], int] = {}
     predicate_cache: dict[str, int] = {}
 
     for doc in docs_to_process:

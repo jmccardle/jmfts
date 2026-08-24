@@ -14,7 +14,7 @@ keeps ``embed`` opt-in and coerces with ``float(x)``.
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -196,6 +196,81 @@ class DocumentTokensResponse(BaseModel):
     title: Optional[str]
     token_count: int
     tokens: list[TokenEmbeddingResponse]
+
+
+# ============================================================================
+# Spreadsheet regions — OFFICE_SPEC.md Part 7, `GET /documents/{id}/cells`
+# ============================================================================
+
+
+class CellNoteResponse(BaseModel):
+    """What one cell carries beyond its value. Sparse: most cells carry nothing.
+
+    ``formula_shared`` marks a cell in a shared-formula group, where Excel writes the text
+    once on the group's master cell. ``formula`` is then the MASTER's text with the master's
+    references, not this cell's — the flag says so rather than letting a consumer read a
+    translated formula that was never translated.
+
+    ``text_forced`` is the leading apostrophe: the author declared this cell text. Nothing
+    acts on it. It is here so that a consumer comparing ``"0012345"`` against the integer
+    ``12345`` can see why the two do not match.
+    """
+
+    formula: Optional[str] = None
+    formula_shared: bool = False
+    text_forced: bool = False
+
+
+class CellRowResponse(BaseModel):
+    """One row of the region, at its worksheet row number.
+
+    ``row`` is the number Excel shows down the left edge, not a position in ``rows``: the
+    rows of a region that hold nothing are not returned, so positions are not contiguous and
+    were never the address.
+
+    ``values`` is positional across the REGION, left to right, one entry per entry of
+    ``columns`` — ``values[0]`` is the region's first column, which is column A only when the
+    region starts there. ``null`` is an empty cell.
+    """
+
+    row: int
+    values: list[Any]
+
+
+class DocumentCellsResponse(BaseModel):
+    """A spreadsheet region: its values, its formulas, and it rendered as a table.
+
+    ``ref`` is the region that was actually SERVED, always in the two-ended form
+    (``B4:B4`` for a single cell), so a caller comparing it against what it asked for does
+    not have to normalise. ``ref_source`` says where it came from: ``request`` when the
+    caller named it, ``anchor`` when it came from the node's own ``cells`` anchor
+    (``OFFICE_SPEC.md`` Part 5), ``used_range`` when it is the whole of what the sheet was
+    measured to hold.
+
+    ``cells`` is keyed by A1 cell reference and holds only the cells that carry a formula or
+    a forced-text flag. Absent is the normal case; a note per cell would be a second copy of
+    the region made of mostly-empty records.
+
+    ``cell_count`` is the region's AREA — rows times columns, the number the size limit is
+    applied to — and not the number of cells that hold a value. It is the price of the
+    request, so it is reported in the units the request was priced in.
+    """
+
+    document_id: int
+    sheet: str
+    ref: str
+    ref_source: str
+    #: Column letters, left to right: ``["B", "C", ..., "H"]``. One per entry of each row's
+    #: ``values``.
+    columns: list[str]
+    rows: list[CellRowResponse]
+    cells: dict[str, CellNoteResponse]
+    #: The region as a markdown grid: the header row holds the column letters and the first
+    #: column holds the worksheet row number. A region holding nothing is the header and
+    #: separator alone — the columns that were asked for, and no row claiming to be a row.
+    markdown: str
+    row_count: int
+    cell_count: int
 
 
 # ============================================================================

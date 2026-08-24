@@ -69,6 +69,8 @@ class _VerbTransport:
         path: Optional[Mapping[str, Any]] = None,
         query: Optional[Mapping[str, Any]] = None,
         body: Any = None,
+        content: Optional[str] = None,
+        content_type: Optional[str] = None,
         files: Optional[Mapping[str, UploadedFile]] = None,
         form_json: Optional[Mapping[str, Any]] = None,
         response: Any = None,
@@ -80,6 +82,11 @@ class _VerbTransport:
         different things. ``body`` is a single Pydantic model sent as JSON. ``files`` and
         ``form_json`` are the multipart case: the file parts, and the fields that travel
         beside them as JSON text.
+
+        ``content`` with ``content_type`` is the fourth and narrowest case: a body the route
+        declared under a media type of its own (``text/turtle``), sent verbatim. It is the
+        one body form that is NOT serialised on the way out, because for these routes the
+        bytes are the record — ``ontologies.source_turtle`` stores exactly what arrives.
         """
         url = self.base_url + _fill_path(path_template, path or {})
 
@@ -88,7 +95,12 @@ class _VerbTransport:
             params = {k: _query_value(v) for k, v in query.items() if v is not None}
 
         kwargs: dict[str, Any] = {}
-        if files is not None:
+        if content is not None:
+            kwargs["content"] = content.encode("utf-8")
+            # Explicit, and with a charset: httpx would otherwise send no Content-Type at
+            # all for raw bytes, and FastAPI reads a missing Content-Type as JSON.
+            kwargs["headers"] = {"Content-Type": f"{content_type or 'text/plain'}; charset=utf-8"}
+        elif files is not None:
             kwargs["files"] = {
                 name: (f.filename, f.data, f.content_type) for name, f in files.items()
             }

@@ -336,30 +336,44 @@ class TestEntityResolution:
         from jmfts_core.fact_extraction import resolve_entity
 
         doc_repo = DocumentRepository(db_session)
-        # Create an entity document first
-        entity = doc_repo.create(title="Paris", content=None, usetype="entity", auto_embed=False)
+        source = doc_repo.create(title="Source", content="Paris text", auto_embed=False)
         db_session.flush()
 
-        cache = {}
-        doc_id, created = resolve_entity("Paris", db_session, threshold=0.8, _cache=cache)
+        # First resolution mints the node under the entities root for this access.
+        first, created_first = resolve_entity(
+            "Paris", db_session, threshold=0.8, _cache={}, source_document_id=source.id
+        )
+        assert created_first is True
 
-        assert doc_id == entity.id, "Should reuse existing entity document"
+        cache = {}
+        doc_id, created = resolve_entity(
+            "Paris", db_session, threshold=0.8, _cache=cache, source_document_id=source.id
+        )
+
+        assert doc_id == first, "Should reuse existing entity document"
         assert created is False
 
     def test_resolve_new_entity_creates_document(self, db_session, mock_embedding):
         """resolve_entity for a new entity name creates a new entity document."""
         from jmfts_core.fact_extraction import resolve_entity
 
+        doc_repo = DocumentRepository(db_session)
+        source = doc_repo.create(title="Source", content="text", auto_embed=False)
+        db_session.flush()
+
         cache = {}
         doc_id, created = resolve_entity(
-            "BrandNewEntityXYZ", db_session, threshold=0.8, _cache=cache
+            "BrandNewEntityXYZ",
+            db_session,
+            threshold=0.8,
+            _cache=cache,
+            source_document_id=source.id,
         )
 
         assert doc_id is not None
         assert created is True
 
         # Verify the created document
-        doc_repo = DocumentRepository(db_session)
         doc = doc_repo.get(doc_id)
         assert doc is not None
         assert doc.usetype == "entity"
@@ -367,15 +381,27 @@ class TestEntityResolution:
 
     def test_resolve_entity_caches_result(self, db_session, mock_embedding):
         """After resolving, the cache contains the entity for fast lookup."""
+        from jmfts_core.entity_roots import get_or_create_entities_root
         from jmfts_core.fact_extraction import resolve_entity
 
+        doc_repo = DocumentRepository(db_session)
+        source = doc_repo.create(title="Source", content="text", auto_embed=False)
+        db_session.flush()
+        root_id = get_or_create_entities_root(db_session, source.id)
+
         cache = {}
-        doc_id1, created1 = resolve_entity("CachedEntity", db_session, threshold=0.8, _cache=cache)
+        doc_id1, created1 = resolve_entity(
+            "CachedEntity", db_session, threshold=0.8, _cache=cache, source_document_id=source.id
+        )
         assert created1 is True
-        assert "cachedentity" in cache
+        # Keyed by (entities root, normalized name) — the root is in the key so one run
+        # spanning two accesses cannot reuse the wrong copy.
+        assert (root_id, "cachedentity") in cache
 
         # Second resolve should hit cache
-        doc_id2, created2 = resolve_entity("CachedEntity", db_session, threshold=0.8, _cache=cache)
+        doc_id2, created2 = resolve_entity(
+            "CachedEntity", db_session, threshold=0.8, _cache=cache, source_document_id=source.id
+        )
         assert doc_id2 == doc_id1
         assert created2 is False
 

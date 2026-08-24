@@ -44,7 +44,7 @@ dependencies = [
     # verb that is missing or whose parameters moved — at call time, on the wire, not at
     # install time. `./bump-version.sh` moves this line and both `__version__` literals
     # together, and tests/test_packaging.py fails if they disagree.
-    "jmfts-client==0.2.0",
+    "jmfts-client==0.2.1",
     "fastapi>=0.109.0",
     # Required by the multipart upload route (POST /ingest/file). NOT optional and NOT
     # lazy: FastAPI checks for it while the ROUTE IS BUILT, i.e. at
@@ -67,6 +67,20 @@ dependencies = [
     "transformers>=4.40",
     "numpy>=1.26.0",
     "httpx>=0.26.0",
+    # The LLM transport, behind `jmfts_core/llm_client.py`. BASE rather than an extra,
+    # because four existing code paths moved onto it — synthesis, RAPTOR summarization,
+    # fact extraction and span summarization — and an extra whose absence breaks shipped
+    # behaviour is not an extra. The transitive cost is genuinely zero: `ffwf-tau-llm`
+    # declares `pydantic>=2` and `httpx>=0.27` and nothing else, and both are already
+    # above. Its Anthropic and Google SDKs are extras in that package, imported lazily on
+    # first request, and JMFTS does not ask for them.
+    #
+    # `>=` and not `==`: this is a first-party package but it is NOT released in lockstep
+    # with JMFTS the way `jmfts-client` is — there is no generated artefact on either side
+    # to keep in step, only the `complete_simple` entry point, which is the one surface τ
+    # documents as stable. Floor at 0.9.3 because that is where `Model.stream` and
+    # `Model.request_timeout` exist, and llm_client.py sets both.
+    "ffwf-tau-llm>=0.9.3",
     "ruptures>=1.1.8",
     "python-igraph>=0.11.0",
     "leidenalg>=0.10.0",
@@ -179,6 +193,62 @@ office = [
     "openpyxl>=3.1.0",
 ]
 
+# TURTLE IN, TURTLE OUT, AND SHAPES. docs/SPRINT_0_3_0.md Parts 5 and 9.
+#
+# The same split as `office`, for the same reason. The triple store needs neither of these
+# to work: facts are asserted, queried, superseded and invalidated through
+# TripleRepository with no RDF library involved, because the store is an RDF store with
+# integers for names and always was. What these buy is saying those integers out loud in
+# somebody else's vocabulary, and being told a vocabulary in return. Most of a fleet does
+# neither.
+#
+# Both are pure Python, unlike `office` — no C extension, no build toolchain. rdflib pulls
+# pyparsing; pyshacl pulls rdflib, owlrl, prettytable and packaging.
+#
+# pyshacl is here although NOTHING CALLS IT YET. 0.3.0 stores shapes and binds them to
+# scopes; running a shape against data is the step after. It is declared now because WHICH
+# TIER it belongs to is the packaging decision, and because a validator landing later would
+# otherwise arrive with a quiet top-level import — which is the failure the seam exists to
+# prevent. `require_openpyxl()` sat uncalled in the office seam for the same reason.
+#
+# `jmfts_core.rdf` is the ONLY place these may be imported, and only through the
+# `require_*` guards there — see the module docstring, and tests/test_rdf_packaging.py,
+# which fails if either library reaches the app's import path.
+rdf = [
+    "rdflib>=7.0",
+    "pyshacl>=0.26",
+]
+
+# BOUNDED SET SKETCHES. docs/INGEST_SPEC.md 8.6, docs/SPRINT_0_3_0.md 6.3 and 6.4.
+#
+# `profile:sheet` sketches every column so that `propose:links` can find columns whose
+# value sets are nested. It is an extra and not a base dependency for the same reason
+# `office` is: an install that never profiles a worksheet never builds a sketch, and a
+# fleet is mostly such installs.
+#
+# Why it is a dependency at all rather than a performance choice. 8.5 stores a column's
+# `values` only while the distinct set is small enough to retain, so a HIGH-CARDINALITY
+# column has a count and no values — and the set comparison 8.6 specifies cannot see it.
+# A MinHash is bounded whatever the cardinality is, so it makes exactly the columns most
+# worth asking about comparable instead of invisible. `MinHashLSHEnsemble` from the same
+# package is then what turns 8.6's quadratic pairwise comparison into a containment
+# search that survives hundreds of sheets.
+#
+# `jmfts_core.sketch` is the ONLY place it may be imported, and only through
+# `require_datasketch()` — the same shape as jmfts_core/office/__init__.py, and
+# tests/test_office_packaging.py holds both.
+#
+# MEASURED, 2026-08-22, in the same empty venv `scripts/check_base_install.sh` builds:
+# base is 585 MB and base + datasketch 2.0.0 is 586 MB, so this extra costs about 1 MB.
+# It is that cheap because its two dependencies are already here — numpy directly, and
+# scipy transitively through `ruptures`. Do not read that as "it could go in base": the
+# reason it is an extra is the seam, not the megabytes. An install that never profiles a
+# worksheet should fail by name when something asks it to sketch a column, rather than
+# silently having the capability and never using it.
+sketch = [
+    "datasketch>=1.6",
+]
+
 # DRIVING LIBREOFFICE. docs/OFFICE_SPEC.md Parts 1 and 6.
 #
 # The third tier, and the reason it is a worker rather than an extra: `pip install
@@ -209,12 +279,16 @@ convert = [
 ]
 
 # The suite embeds for real — it ingests documents and asserts on the vectors — so dev
-# implies the model stack rather than testing a configuration nobody ships. `office` is
-# implied for the same reason: the office tests open real packages. `convert` is NOT,
-# because unoserver without LibreOffice underneath it is a configuration nobody runs.
+# implies the model stack rather than testing a configuration nobody ships. Three of the
+# four extras are implied for the same reason: the office tests open real packages, the
+# RDF tests parse and serialise real Turtle, and `profile:sheet` sketches every column by
+# default so a suite without `sketch` would only ever exercise the way out. `convert` is
+# NOT, because unoserver without LibreOffice underneath it is a configuration nobody runs.
 dev = [
     "jmfts[embed]",
     "jmfts[office]",
+    "jmfts[rdf]",
+    "jmfts[sketch]",
     "pytest>=7.4.0",
     "pytest-asyncio>=0.23.0",
     "black>=24.1.0",

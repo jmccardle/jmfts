@@ -284,15 +284,12 @@ class TestEnqueueConditions:
 
         assert plan.eligible == ()
         assert plan.skipped == ()
-        assert set(plan.not_applicable) == {
-            TASK_EXTRACT_TEXT,
-            TASK_OCR,
-            TASK_STRUCTURE_DECLARED,
-            TASK_STRUCTURE_INFERRED,
-            TASK_EXTRACT_TABLES,
-            TASK_EXTRACT_IMAGES,
-            TASK_CITATION,
-        }
+        # EVERY row, taken from the table rather than typed out. The claim in the name is
+        # "everything", and a hand-written list quietly weakens it to "these seven" the day
+        # a row is added — which is exactly what `structure:sheets` did to the list that
+        # used to be here. Derived, the test keeps making the claim it says it makes: no
+        # row of Part 4's table may come out eligible from no patterns at all.
+        assert set(plan.not_applicable) == {row.task for row in TASK_ROWS}
 
     def test_an_unknown_format_says_it_declares_no_structure_pattern(self):
         """The sentinel's asymmetry: unsatisfiable as a requirement, satisfied as a

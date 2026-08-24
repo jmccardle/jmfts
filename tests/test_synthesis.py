@@ -11,11 +11,25 @@ import httpx
 import pytest
 
 from jmfts_core.synthesis import _format_context, synthesize, SynthesisResult
+from tests.llm_stub import llm_stub
 
 
 def _run(coro):
-    """Run an async coroutine synchronously for tests."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    """Run an async coroutine synchronously for tests.
+
+    A loop of its own, per call — the same shape ``test_fact_extraction`` and
+    ``test_conversation_ingest`` use. It used to be
+    ``asyncio.get_event_loop().run_until_complete(...)``, which depends on a loop the
+    process happens to have left current: any earlier test calling ``asyncio.run`` leaves
+    it unset (3.10+ ends ``asyncio.run`` with ``set_event_loop(None)``), and every test in
+    this file then failed with "There is no current event loop" depending on collection
+    order. ``jmfts_core.llm_client.complete_sync`` is such a caller.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 # ============================================================================
@@ -62,42 +76,13 @@ class TestFormatContext:
 # ============================================================================
 
 
-def _mock_llm_client(response_json, side_effect=None):
-    """Create a mock httpx.AsyncClient with a preset response."""
-    mock_response = MagicMock()
-    mock_response.raise_for_status = MagicMock()
-    mock_response.json.return_value = response_json
-
-    mock_client = AsyncMock()
-    if side_effect:
-        mock_client.post = AsyncMock(side_effect=side_effect)
-    else:
-        mock_client.post = AsyncMock(return_value=mock_response)
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=None)
-    return mock_client
-
-
-def _configured_settings(**overrides):
-    """A real Settings naming an LLM endpoint that nothing will contact.
-
-    These tests used to rely on the shipped default being a live-looking address. It is
-    blank now — JMFTS does not include an LLM — so synthesis raises `LlmNotConfiguredError`
-    before it builds a request. The HTTP client is patched in every test below, so this
-    address is never reached.
-    """
-    from jmfts_core.config import Settings
-
-    values = {
-        "llm_base_url": "http://llm.invalid:8853",
-        "llm_model": "a-model-that-is-never-called",
-        "llm_timeout": 10.0,
-    }
-    values.update(overrides)
-    return Settings(**values)
-
-
 class TestSynthesize:
+    """The transport moved to ``tau_llm`` in 0.3.0, so these drive a real loopback
+    endpoint (``tests/llm_stub.py``) instead of a patched ``httpx.AsyncClient``. The
+    assertions are the same ones — URL, payload, parsed answer — made against the bytes
+    that actually left the process.
+    """
+
     def test_synthesis_without_a_configured_llm_says_so(self):
         """The unconfigured case names the variables instead of failing at the socket."""
         from jmfts_core.config import LlmNotConfiguredError, Settings
@@ -113,47 +98,74 @@ class TestSynthesize:
                 )
 
     def test_successful_synthesis(self):
-        mock_client = _mock_llm_client(
-            {
-                "choices": [{"message": {"content": "Synthesized answer here."}}],
-                "usage": {"prompt_tokens": 100, "completion_tokens": 50},
-            }
-        )
         docs = [{"id": 1, "title": "Doc", "content": "Text", "score": 0.9}]
 
-        with (
-            patch("jmfts_core.synthesis.httpx.AsyncClient", return_value=mock_client),
-            patch("jmfts_core.synthesis.get_settings", return_value=_configured_settings()),
-        ):
-            result = _run(
-                synthesize(
-                    query="What is X?",
-                    documents=docs,
-                    max_context_tokens=4096,
-                    llm_model="test-model",
+        with llm_stub(content="Synthesized answer here.") as stub:
+            with patch("jmfts_core.synthesis.get_settings", return_value=stub.settings()):
+                result = _run(
+                    synthesize(
+                        query="What is X?",
+                        documents=docs,
+                        max_context_tokens=4096,
+                        llm_model="test-model",
+                    )
                 )
-            )
 
-        assert isinstance(result, SynthesisResult)
-        assert result.text == "Synthesized answer here."
-        assert result.model == "test-model"
-        assert result.usage["prompt_tokens"] == 100
+            assert isinstance(result, SynthesisResult)
+            assert result.text == "Synthesized answer here."
+            assert result.model == "test-model"
+            # τ's Usage vocabulary, not OpenAI's `prompt_tokens` — the numbers are the
+            # server's, the spelling is τ's. See llm_client.LlmCompletion.usage.
+            assert result.usage["input_tokens"] == 11
+            assert result.usage["output_tokens"] == 7
 
-        mock_client.post.assert_called_once()
-        call_args = mock_client.post.call_args
-        assert "/chat/completions" in call_args[0][0]
-        payload = call_args[1]["json"]
-        assert payload["model"] == "test-model"
-        assert len(payload["messages"]) == 2
+            assert len(stub.requests) == 1
+            request = stub.requests[0]
+            # The `/v1` the call site used to write into the path literal is now appended
+            # once, in llm_client.build_model. This is what proves it lands in one place
+            # and not two.
+            assert request.path == "/v1/chat/completions"
+            assert request.body["model"] == "test-model"
+            assert len(request.messages) == 2
+            assert request.messages[0]["role"] == "system"
+            assert "What is X?" in request.role("user")
 
-    def test_connection_error_propagates(self):
-        mock_client = _mock_llm_client(None, side_effect=httpx.ConnectError("Connection refused"))
+    def test_a_refusing_endpoint_propagates(self):
+        """A non-200 reaches the caller as an exception naming the status.
 
-        with (
-            patch("jmfts_core.synthesis.httpx.AsyncClient", return_value=mock_client),
-            patch("jmfts_core.synthesis.get_settings", return_value=_configured_settings()),
-        ):
-            with pytest.raises(httpx.ConnectError):
+        It used to be an ``httpx.HTTPStatusError`` from ``raise_for_status()``. τ 0.9.3
+        reports a non-200 as an error carrying the status and the server's message, so the
+        type is now plain ``Exception`` — see ``llm_client``'s module docstring for what
+        that costs ``task_errors.classify_exception``. What has to keep holding, and is
+        what this asserts, is that the failure is loud and says which status it was.
+        """
+        with llm_stub(status=503) as stub:
+            with patch("jmfts_core.synthesis.get_settings", return_value=stub.settings()):
+                with pytest.raises(Exception, match="503"):
+                    _run(
+                        synthesize(
+                            query="test",
+                            documents=[{"id": 1, "title": "A", "content": "B", "score": 0.5}],
+                        )
+                    )
+
+    def test_an_unreachable_endpoint_propagates(self):
+        """A dead socket is an error, never an empty synthesis.
+
+        The endpoint is a port nothing listens on, so this exercises the real connect
+        failure rather than a mock's ``side_effect``. ``search_service`` catches it and
+        degrades to results-without-synthesis; that it is raised at all is the contract.
+
+        The type is only ``Exception`` now (τ launders the ``httpx.ConnectError`` into an
+        error event — see ``llm_client``'s module docstring), so ``match`` carries the
+        assertion instead: a bare ``pytest.raises(Exception)`` would pass on a typo in the
+        `Settings` above and prove nothing about the socket.
+        """
+        from jmfts_core.config import Settings
+
+        dead = Settings(llm_base_url="http://127.0.0.1:1", llm_model="m", llm_timeout=5.0)
+        with patch("jmfts_core.synthesis.get_settings", return_value=dead):
+            with pytest.raises(Exception, match="127.0.0.1:1"):
                 _run(
                     synthesize(
                         query="test",
@@ -162,28 +174,19 @@ class TestSynthesize:
                 )
 
     def test_uses_default_model_from_settings(self):
-        mock_client = _mock_llm_client(
-            {
-                "choices": [{"message": {"content": "Answer"}}],
-                "usage": None,
-            }
-        )
-
-        mock_settings = _configured_settings(llm_model="test-default-model")
-
-        with (
-            patch("jmfts_core.synthesis.httpx.AsyncClient", return_value=mock_client),
-            patch("jmfts_core.synthesis.get_settings", return_value=mock_settings),
-        ):
-            result = _run(
-                synthesize(
-                    query="test",
-                    documents=[{"id": 1, "title": "A", "content": "B", "score": 0.5}],
-                    llm_model=None,
+        with llm_stub(content="Answer") as stub:
+            settings = stub.settings(llm_model="test-default-model")
+            with patch("jmfts_core.synthesis.get_settings", return_value=settings):
+                result = _run(
+                    synthesize(
+                        query="test",
+                        documents=[{"id": 1, "title": "A", "content": "B", "score": 0.5}],
+                        llm_model=None,
+                    )
                 )
-            )
 
         assert result.model == "test-default-model"
+        assert stub.requests[0].body["model"] == "test-default-model"
 
 
 # ============================================================================

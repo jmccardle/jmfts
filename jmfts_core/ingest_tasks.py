@@ -60,6 +60,30 @@ TASK_STRUCTURE_INFERRED = "structure:inferred"
 TASK_EXTRACT_TABLES = "extract:tables"
 TASK_EXTRACT_IMAGES = "extract:images"
 
+#: ``INGEST_SPEC.md`` Part 8, not Part 4 — a workbook's declared rung, which is its sheet
+#: list and nothing else (8.1). It is a task of its own rather than a second reading inside
+#: ``structure:declared`` because it reads different EVIDENCE: the two structure rungs
+#: consume the text ``extract:text`` produced, and a workbook has no text layer and cannot
+#: get one without first choosing a rendering for its cells — which is 8.4's decision and
+#: is precisely what 8.1 excludes from the declared rung.
+#:
+#: 8.2 names ``structure:declared`` as what ``profile:sheet`` depends on, so this is a
+#: DIVERGENCE from the spec's task name, taken deliberately and recorded in
+#: :mod:`jmfts_core.sheet_tasks`. The rung the nodes carry is still ``declared``.
+TASK_STRUCTURE_SHEETS = "structure:sheets"
+
+#: ``INGEST_SPEC.md`` 8.2's two per-sheet tasks. NOT rows of :data:`TASK_ROWS`, and they
+#: cannot be: that table is evaluated once per uploaded FILE from probe's patterns, and
+#: these are scoped to a SHEET node — which does not exist until ``structure:sheets`` has
+#: created it. They are enqueued from that handler, in one batch per sheet, the way
+#: ``embed`` is enqueued per chunk. 8.2's "depends on ``structure:declared``" is that
+#: relationship and not a queue dependency: the node a task is scoped to has to exist.
+#:
+#: One workbook of forty sheets is therefore forty batches of two, and one malformed sheet
+#: fails its own two tasks and leaves the other thirty-nine settled (8.1).
+TASK_PROFILE_SHEET = "profile:sheet"
+TASK_EXTRACT_SHEET = "extract:sheet"
+
 #: ``OFFICE_SPEC.md`` Part 5, not ``INGEST_SPEC.md`` Part 4 — the first task in this table
 #: that belongs to the office/citation plan rather than to the original file pipeline. It
 #: puts a page and a rectangle on every chunk under a file node
@@ -261,6 +285,22 @@ PAGE_GEOMETRY_PATTERN: dict[str, str] = {
 #: a page geometry", resolved through the dict above.
 PAGE_GEOMETRY = "@page_geometry"
 
+#: Which pattern, per format, means "this file's own container names a list of sheets".
+#: ``INGEST_SPEC.md`` 8.1's condition, and a third per-format dict rather than a reuse of
+#: :data:`DECLARED_STRUCTURE_PATTERN` because the two answer different questions. That one
+#: says which pattern makes a format's DECLARED rung applicable; this one says which
+#: pattern means the declared structure is readable from the container without any text
+#: having been extracted first. ``xlsx`` is in both, with the same pattern, and the two
+#: entries are not a copy: the day a format declares sheets AND has a text layer, the rows
+#: reading these two dicts want different answers about it.
+SHEET_LIST_PATTERN: dict[str, str] = {
+    "xlsx": "has_sheets",
+}
+
+#: Stands in a row's ``requires``/``forbids`` for "whatever pattern says THIS format names
+#: a sheet list", resolved through the dict above.
+SHEET_LIST = "@sheet_list"
+
 #: Every sentinel, and the per-format dict that resolves it. A registry rather than a chain
 #: of ``if name == ...`` so that :func:`_resolve_pattern` and the ``EXPLAIN`` path cannot
 #: come to know different numbers of sentinels — an unresolved sentinel silently read as a
@@ -269,6 +309,7 @@ PAGE_GEOMETRY = "@page_geometry"
 SENTINEL_PATTERNS: dict[str, dict[str, str]] = {
     DECLARED_STRUCTURE: DECLARED_STRUCTURE_PATTERN,
     PAGE_GEOMETRY: PAGE_GEOMETRY_PATTERN,
+    SHEET_LIST: SHEET_LIST_PATTERN,
 }
 
 #: Why a task whose Part 4 condition HOLDS is nevertheless not enqueued: its handler
@@ -283,6 +324,15 @@ DEFERRED_REASON: dict[str, str] = {
     ),
     TASK_EXTRACT_IMAGES: "image handling is INGEST_SPEC.md phasing step 7; no handler registered",
 }
+# There is no `TASK_EXTRACT_SHEET` entry, and its absence is the record of a decision.
+# It carried one — "8.4 has four representations and 8.8 leaves every threshold that
+# decision reads unset" — for as long as the task had no handler. `run_extract_sheet` now
+# runs ONE of those four, `records`, on a rule that is not a threshold: 8.3's `header_row`
+# is a measured boolean, and a sheet whose first row names every column has record keys
+# whatever the uncalibrated numbers turn out to be. The other three shapes are still
+# unbuilt and a sheet that needs one gets no records with the reason on the node
+# (`jmfts_core.sheet_records.NO_HEADER_REASON`), which is a per-sheet fact and not a
+# per-task-type one.
 
 
 @dataclass(frozen=True)
@@ -430,6 +480,22 @@ TASK_ROWS: tuple[TaskRow, ...] = (
         forbids=(DECLARED_STRUCTURE,),
         params_key="structure",
     ),
+    # `INGEST_SPEC.md` 8.1. The third structural row, and the only one with no `after`:
+    # its evidence is the workbook part, which is in the uploaded bytes, so it waits for
+    # nothing. That is also why it is not the two rows above with an extra splitter —
+    # those consume `extract:text`'s output, and a workbook has none.
+    #
+    # No `params_key`. 8.1's rung takes no parameters and that is a claim, not an
+    # omission: the sheet list is what the file says, so there is nothing here for 6.1 to
+    # re-run differently. The knobs Part 8 does have — which representation a sheet
+    # becomes, and the thresholds that choose it — belong to `profile:sheet` (8.4), and
+    # giving this row a params group would put them one rung too high, where a re-run
+    # would rebuild every sheet node to change a decision about one sheet's cells.
+    TaskRow(
+        TASK_STRUCTURE_SHEETS,
+        write_mode=WRITE_CHILDREN,
+        requires=(SHEET_LIST,),
+    ),
     # `pages_with_tables` is a LIST of page numbers, and this row reads it for TRUTHINESS
     # exactly as it read the `has_tables` boolean it replaced: an empty list blocks the
     # row, a non-empty one satisfies it. The list is carried rather than a flag because
@@ -536,6 +602,16 @@ def _no_page_geometry_reason(fmt: str) -> str:
     return f"format {fmt!r} carries no page geometry a citation rectangle could address"
 
 
+def _no_sheet_list_reason(fmt: str) -> str:
+    """Why a row requiring :data:`SHEET_LIST` can never fire for this format.
+
+    The same fact as above about a third sentinel: :data:`SHEET_LIST_PATTERN` has no entry,
+    so no bytes of this format could name the worksheets ``INGEST_SPEC.md`` 8.1 builds its
+    declared rung out of.
+    """
+    return f"format {fmt!r} names no worksheet list a declared rung could read"
+
+
 #: sentinel -> the sentence explaining why a row requiring it is impossible for a format.
 #: Beside :data:`SENTINEL_PATTERNS` and keyed the same way, so a sentinel cannot be added to
 #: one without the other: a requirement that no format can satisfy and no sentence to say
@@ -543,6 +619,7 @@ def _no_page_geometry_reason(fmt: str) -> str:
 SENTINEL_REASONS: dict[str, Callable[[str], str]] = {
     DECLARED_STRUCTURE: _no_declared_structure_reason,
     PAGE_GEOMETRY: _no_page_geometry_reason,
+    SHEET_LIST: _no_sheet_list_reason,
 }
 
 
@@ -1230,3 +1307,8 @@ from jmfts_core import structure_tasks  # noqa: E402,F401  (side effect: registr
 # `EXTRACTION_PDF_TEXT_LAYER` and `USETYPE_CHUNK`, which is the contract between the task
 # that wrote the text and the task that addresses it.
 from jmfts_core import citation_tasks  # noqa: E402,F401  (side effect: registration)
+
+# AFTER `structure_tasks` for the same kind of reason: `sheet_tasks` reads `RUNG_DECLARED`
+# from it, because the rung a workbook's sheet list belongs to is the same rung a PDF's
+# outline belongs to and the two must be spelled once (INGEST_SPEC.md 3.5, 8.1).
+from jmfts_core import sheet_tasks  # noqa: E402,F401  (side effect: registration)

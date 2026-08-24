@@ -52,13 +52,18 @@ class ViewTripleRef(BaseModel):
     subject_id: int
     subject_title: Optional[str]
     predicate_name: Optional[str]
-    object_id: int
+    #: Null when the object is a literal value rather than a document node — see
+    #: ``object_literal``. ``object_url`` is null with it, because there is nothing to
+    #: navigate to.
+    object_id: Optional[int]
     object_title: Optional[str]
+    object_literal: Optional[str] = None
+    object_datatype: Optional[str] = None
     fact_type: Optional[str]
     valid_from: Optional[datetime]
     valid_until: Optional[datetime]
     subject_url: str
-    object_url: str
+    object_url: Optional[str]
 
 
 class ViewResponse(BaseModel):

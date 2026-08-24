@@ -59,12 +59,21 @@ import jmfts_core.embedder       # the remote embedder
 
 import jmfts_core.probe          # format detection, which must stay stdlib-only
 import jmfts_core.office         # the office seam: importing it imports no reader
+import jmfts_core.rdf            # the RDF seam: importing it imports no rdflib
+import jmfts_core.office.sheets  # 8.3's measurer, which reaches for BOTH at call time
+import jmfts_core.sketch         # the sketch seam, same rule
 
 heavy = sorted(m for m in ("torch", "sentence_transformers") if m in sys.modules)
 assert not heavy, f"importing the app pulled in {heavy}"
 readers = sorted(m for m in ("docx", "pptx", "openpyxl") if m in sys.modules)
 assert not readers, f"importing the app pulled in {readers}"
-print("   api + worker + task registry import, with no model stack and no office readers")
+# Both optional stacks, asserted the same way. The three seam modules above are importable
+# in a base install BY DESIGN — that is what a seam is — so the check that matters is that
+# importing them dragged nothing in behind them.
+optional_libs = sorted(m for m in ("rdflib", "pyshacl", "datasketch") if m in sys.modules)
+assert not optional_libs, f"importing the app pulled in {optional_libs}"
+print("   api + worker + task registry import: no model stack, no office readers,")
+print("   no rdflib, no datasketch")
 
 import numpy as np
 
@@ -137,6 +146,47 @@ for label, guard in (("docx", require_docx), ("pptx", require_pptx), ("openpyxl"
     else:
         raise AssertionError(f"{label} imported with no office extra installed")
 print("   office readers refuse by name, classified PERMANENT")
+
+# ---------------------------------------------------------------------------
+# The RDF stack. docs/SPRINT_0_3_0.md Part 9.
+# ---------------------------------------------------------------------------
+
+from jmfts_core.rdf import RdfStackNotInstalled, require_pyshacl, require_rdflib
+
+# The half that is base JMFTS: naming. Minting an IRI for a document node and reading a
+# local name back out of somebody else's are string work, and a base install can do both —
+# which is what keeps `jmfts_core.rdf.names` importable beside `probe`.
+from jmfts_core.rdf.names import document_iri, local_name, predicate_iri
+
+assert document_iri(42) == "urn:jmfts:document:42"
+assert predicate_iri("works at") == "urn:jmfts:predicate:works%20at"
+assert local_name("http://xmlns.com/foaf/0.1/knows") == "knows"
+print("   IRI minting and local names work with no rdflib installed")
+
+for label, guard in (("rdflib", require_rdflib), ("pyshacl", require_pyshacl)):
+    try:
+        guard()
+    except RdfStackNotInstalled as exc:
+        assert "jmfts[rdf]" in str(exc), f"{label}: message does not name the extra"
+        assert classify_exception(exc) is ErrorType.PERMANENT, f"{label}: not PERMANENT"
+    else:
+        raise AssertionError(f"{label} imported with no rdf extra installed")
+print("   rdflib and pyshacl refuse by name, classified PERMANENT")
+
+# The sketch stack, same seam. `profile:sheet` sketches every column by default and a
+# base install has no `datasketch`; the failure has to name the extra AND the parameter
+# that measures a sheet without sketching it, because there are two ways out.
+from jmfts_core.sketch import SketchStackNotInstalled, require_datasketch
+
+try:
+    require_datasketch()
+except SketchStackNotInstalled as exc:
+    assert "jmfts[sketch]" in str(exc), "sketch: message does not name the extra"
+    assert "sketch_columns" in str(exc), "sketch: message does not name the other way out"
+    assert classify_exception(exc) is ErrorType.PERMANENT, "sketch: not PERMANENT"
+else:
+    raise AssertionError("datasketch imported with no sketch extra installed")
+print("   the sketch stack refuses by name, classified PERMANENT")
 
 print("\nBASE INSTALL OK")
 PY

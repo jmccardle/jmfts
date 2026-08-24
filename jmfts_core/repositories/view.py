@@ -177,16 +177,29 @@ class ViewRepository:
                     "predicate_name": pred.name if pred else None,
                     "object_id": t.object_id,
                     "object_title": obj.title if obj else None,
+                    # Null unless the object IS a literal, in which case object_id is null
+                    # and this is the whole object.
+                    "object_literal": t.object_literal,
+                    "object_datatype": t.object_datatype,
                     "fact_type": t.fact_type.value if t.fact_type else None,
                     "valid_from": t.valid_from,
                     "valid_until": t.valid_until,
                 }
             )
-        # Subtree RBAC: hide facts whose subject or object the principal cannot read.
-        endpoint_ids = {r["subject_id"] for r in out} | {r["object_id"] for r in out}
+        # Subtree RBAC: hide facts whose subject or object the principal cannot read. A
+        # literal object has no document and therefore no access rule of its own — the
+        # subject's is the whole check — so its null id must not reach readable_id_subset.
+        endpoint_ids = {r["subject_id"] for r in out} | {
+            r["object_id"] for r in out if r["object_id"] is not None
+        }
         readable = readable_id_subset(self.session, endpoint_ids)
         if len(readable) != len(endpoint_ids):
-            out = [r for r in out if r["subject_id"] in readable and r["object_id"] in readable]
+            out = [
+                r
+                for r in out
+                if r["subject_id"] in readable
+                and (r["object_id"] is None or r["object_id"] in readable)
+            ]
         return out
 
     # -- companion endpoints ----------------------------------------------

@@ -16,13 +16,23 @@ Domain → HTTP mapping lives here, not in the service: each spec's ``errors`` d
 which exception types become which status codes (subclasses included). A spec's optional
 ``status_code`` sets the success status (e.g. 201 Created); unset means FastAPI's default.
 
-One annotation is TRANSLATED rather than mirrored: a parameter typed
-``jmfts_client.contracts.upload.UploadedFile`` is republished to FastAPI as
-``fastapi.UploadFile`` and converted back before the service sees it. That is what lets a
-multipart upload be an ordinary ``@expose``'d service method while ``jmfts_core`` stays
-free of any web framework — see the module docstring of ``contracts/upload.py`` for why
-the alternatives (importing ``UploadFile`` into core, or hand-writing the route) each
-break one of the parity seals.
+Two annotations are TRANSLATED rather than mirrored, and both for the same reason: a
+service method may not import a web framework, so it cannot say the thing FastAPI needs to
+hear. The adapter learns the type instead.
+
+* ``jmfts_client.contracts.upload.UploadedFile`` is republished as ``fastapi.UploadFile``
+  and converted back before the service sees it. That is what lets a multipart upload be an
+  ordinary ``@expose``'d service method — see ``contracts/upload.py`` for why the
+  alternatives (importing ``UploadFile`` into core, or hand-writing the route) each break
+  one of the parity seals.
+* ``jmfts_client.contracts.rdf.TurtleDocument`` is republished as
+  ``Annotated[str, Body(media_type="text/turtle")]``, so ``POST /ontologies`` takes a
+  vocabulary as the file it is instead of as a JSON string. No conversion back is needed:
+  a ``NewType`` of ``str`` IS a ``str`` at runtime, so the service receives exactly what
+  FastAPI parsed.
+
+A third entry in that list should prompt the question of whether ``@expose`` wants a way to
+declare a media type, rather than the adapter growing another special case.
 
 Annotations are resolved WITH their ``Annotated`` extras, because that metadata is how a
 parameter declares its wire behaviour to FastAPI rather than being commentary on it.
@@ -34,13 +44,20 @@ import inspect
 import typing
 from typing import Callable
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile
 from fastapi.routing import APIRoute
 from sqlalchemy.orm import Session
 
+from jmfts_client.contracts.rdf import TurtleDocument
 from jmfts_client.contracts.upload import UploadedFile
 from jmfts_core.database import get_db
 from jmfts_core.registry import REGISTRY, ExposeSpec
+
+#: What ``TurtleDocument`` becomes on the wire. A single non-model ``Body`` parameter is
+#: NOT embedded by FastAPI, so the whole request body is the value — which is the point:
+#: the bytes stored in ``ontologies.source_turtle`` are the bytes that were POSTed, with no
+#: escaping step in between.
+_TURTLE_BODY = typing.Annotated[str, Body(media_type="text/turtle")]
 
 
 def _status_for(exc: Exception, error_map: dict[type, int]) -> int | None:
@@ -86,6 +103,8 @@ def _make_endpoint(spec: ExposeSpec) -> Callable:
         if annotation is UploadedFile:
             upload_params.append(name)
             annotation = UploadFile
+        elif annotation is TurtleDocument:
+            annotation = _TURTLE_BODY
         service_params.append(param.replace(annotation=annotation))
     # Inject the request-scoped session as a keyword-only Depends param.
     db_param = inspect.Parameter(
