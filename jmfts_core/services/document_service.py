@@ -40,6 +40,7 @@ from jmfts_client.contracts.document import (
     ChunkRequest,
     ChunkResponse,
     DocumentCellsResponse,
+    DocumentEvidenceResponse,
     DocumentCreate,
     DocumentResponse,
     DocumentTokensResponse,
@@ -64,7 +65,7 @@ from jmfts_client.contracts.document import (
 )
 from jmfts_core.embedding import TextTooLongError, get_embedding_service
 from jmfts_core.fact_extraction import extract_facts
-from jmfts_core.office import OfficeStackNotInstalled
+from jmfts_core.models.document import USETYPE_SHEET
 from jmfts_core.office.cells import (
     CELLS_READ_MAX,
     BadCellRef,
@@ -78,6 +79,7 @@ from jmfts_core.office.cells import (
 )
 from jmfts_core.registry import expose, register_service
 from jmfts_core.repositories.blob import BlobRepository
+from jmfts_core.repositories.evidence import EvidenceRepository
 from jmfts_core.repositories.document import (
     DocumentRepository,
     InFlightSubtreeError,
@@ -123,18 +125,20 @@ class SheetSourceUnavailable(Exception):
     """
 
 
-#: The usetype ``structure:sheets`` gives a worksheet node, spelled here rather than
-#: imported from :data:`jmfts_core.sheet_tasks.USETYPE_SHEET`. The import would pull in
-#: ``jmfts_core.ingest_tasks``, whose module scope REGISTERS every task handler as a side
-#: effect — a read verb on the query path must not change what the worker will dispatch
-#: merely by being imported. ``tests/test_document_cells.py`` asserts the two strings agree,
-#: which is the guard the import would have been.
-USETYPE_SHEET = "sheet"
+# THE SECOND SPELLING OF `USETYPE_SHEET` IS GONE. This module carried its own
+# `USETYPE_SHEET = "sheet"` with a comment saying why: importing it from `sheet_tasks`
+# would pull in `jmfts_core.ingest_tasks`, whose module scope REGISTERS every task handler
+# as a side effect, and a read verb on the query path must not change what the worker will
+# dispatch merely by being imported. That reasoning was right about `sheet_tasks` and is not
+# a reason to copy the string — `jmfts_core.models.document` is where the ingest usetypes
+# live now (`SPRINT_JOBS.md` Phase 3 needed them below the handler modules), this module
+# already imports that one, and it registers nothing. The test that asserted the two
+# spellings agreed is what the copy cost; the import is the guard now.
 
-#: Where an anchor lives on a node, spelled here for the same reason (the writer is
-#: :data:`jmfts_core.citation_tasks.ANCHOR_KEY`), and the ``kind`` ``OFFICE_SPEC.md`` Part 5
+#: The evidence row an anchor lives in, spelled here for the reason above (the writer is
+#: :data:`jmfts_core.citation_tasks.ANCHOR_NAME`), and the ``kind`` ``OFFICE_SPEC.md`` Part 5
 #: gives a worksheet region: ``{"kind": "cells", "sheet": "Q3 Pipeline", "ref": "B4:H120"}``.
-ANCHOR_KEY = "anchor"
+ANCHOR_NAME = "source_anchor"
 ANCHOR_KIND_CELLS = "cells"
 
 #: What ``ref_source`` reports. Three, because "the caller named this rectangle", "the node
@@ -148,7 +152,7 @@ CELLS_REF_USED_RANGE = "used_range"
 
 def _cells_bounds(
     document_id: int,
-    structured: dict,
+    evidence: dict,
     sheet: dict,
     ref: Optional[str],
 ) -> tuple[CellRange, str]:
@@ -161,7 +165,7 @@ def _cells_bounds(
     if ref is not None:
         return parse_ref(ref), CELLS_REF_REQUEST
 
-    anchor = structured.get(ANCHOR_KEY)
+    anchor = evidence.get(ANCHOR_NAME)
     if anchor is not None:
         if not isinstance(anchor, dict):
             raise SheetSourceUnavailable(
@@ -622,6 +626,43 @@ class DocumentService:
             tokens=tokens,
         )
 
+    @expose(
+        "GET",
+        "/documents/{document_id}/evidence",
+        response_model=DocumentEvidenceResponse,
+        errors={LookupError: 404},
+        tags=["documents"],
+        summary="Everything the ingest pipeline knows about a document",
+    )
+    def get_document_evidence(self, document_id: int) -> DocumentEvidenceResponse:
+        """Every evidence row on one node, keyed by registry name.
+
+        ``SPRINT_JOBS.md`` 13.3, and this route is the whole of what that decision gave
+        back. Evidence used to be twenty-nine keys inside
+        ``DocumentResponse.structured_content``; Phase 2b moved it to ``document_evidence``
+        and no response stitches it back, so a client reading ``matched.patterns`` out of
+        that column now reads nothing. This is where it went.
+
+        A ROUTE AND NOT A FIELD, deliberately. A field on ``DocumentResponse`` would join
+        this table on every document read and every search hit, which is the cost 13.3
+        rejected option 1 for. Asking is cheap and it is one query.
+
+        A name present with a ``null`` value and a name missing altogether are DIFFERENT
+        answers (3.2): the first says an atom ran and produced nothing, the second says
+        nothing has run.
+
+        Access is the subtree RBAC every read here uses — an unreadable document is
+        indistinguishable from a missing one, because evidence names the format, the reader
+        and the byte count of a document the caller may not read.
+        """
+        doc = DocumentRepository(self.session).get(document_id)
+        if not doc or not can_read(self.session, doc):
+            raise LookupError(f"Document {document_id} not found")
+        return DocumentEvidenceResponse(
+            document_id=doc.id,
+            evidence=EvidenceRepository(self.session).read_all(doc.id),
+        )
+
     # -- Spreadsheet regions (OFFICE_SPEC.md Part 7) -------------------------------
 
     @expose(
@@ -640,11 +681,11 @@ class DocumentService:
             # literal reading of the request half of RFC 9110's definition.
             TooManyCells: 413,
             ValueError: 400,
-            # 501 and not 503: this install cannot open a workbook and will not be able to
-            # after a retry. `OfficeStackNotInstalled` says which extra is missing, and an
-            # install without the office readers is a supported deployment (Part 1, tier 2),
-            # so this is "this server does not do that" and not "try again later".
-            OfficeStackNotInstalled: 501,
+            # `OfficeStackNotInstalled: 501` was declared here and is now
+            # `registry.DEFAULT_ERRORS`, which maps it for every operation. This route was
+            # the only place in the tree that mapped either optional-stack error, so
+            # `POST /search/*` answered a bare 500 for the same fact about the deployment
+            # — `SPRINT_0_3_0.md` 13.10. The 501-not-503 reasoning moved with it.
         },
         tags=["documents"],
         summary="Read a region of a spreadsheet from the sheet node's source workbook",
@@ -697,8 +738,12 @@ class DocumentService:
                 f"{USETYPE_SHEET!r}, so it is not a worksheet and has no cells to read"
             )
 
-        structured = node.structured_content or {}
-        sheet = structured.get("sheet") or {}
+        # ONE READ FOR THE WHOLE NODE. 13.3 named this method as a server-side reader
+        # that moves to the evidence API: `sheet.name`, `sheet.measurements` and the anchor
+        # were three keys in one column and are three rows now, and asking for them
+        # separately would be three queries where the column was one attribute access.
+        evidence = EvidenceRepository(self.session).read_all(document_id)
+        sheet = evidence.get("sheet") or {}
         name = sheet.get("name")
         if not name:
             raise SheetSourceUnavailable(
@@ -707,7 +752,7 @@ class DocumentService:
                 "workbook it is"
             )
 
-        bounds, ref_source = _cells_bounds(document_id, structured, sheet, ref)
+        bounds, ref_source = _cells_bounds(document_id, evidence, sheet, ref)
 
         if node.parent_id is None:
             raise SheetSourceUnavailable(
@@ -795,9 +840,13 @@ class DocumentService:
                 usetype=request.usetype,
                 structured_content={
                     "heading_level": section.level,
-                    "source_line": section.source_line,
                     "split_from": document_id,
                 },
+                # `source_line` is registered evidence and the ingest chunker writes the
+                # same fact, so it goes to the same place. A caller-driven split that left
+                # it in the column would put one name in two stores, which is the second
+                # code path SPRINT_JOBS.md Part 14 forbids.
+                evidence={"source_line": section.source_line},
                 auto_embed=request.auto_embed,
             )
             result_items.append(
@@ -877,8 +926,10 @@ class DocumentService:
                 content=chunk.text,
                 parent_id=document_id,
                 usetype=request.child_usetype,
+                # `chunk_index` is registered evidence for the same reason `source_line` is
+                # above: the ingest chunker writes the same fact under the same name.
+                evidence={"chunk_index": chunk.index},
                 structured_content={
-                    "chunk_index": chunk.index,
                     "char_start": chunk.char_start,
                     "char_end": chunk.char_end,
                     "strategy": request.strategy,
@@ -975,7 +1026,6 @@ class DocumentService:
                     structured_content={
                         "segment_index": idx,
                         "source_parent_id": document_id,
-                        "child_count": seg.end - seg.start,
                     },
                     auto_embed=False,
                 )

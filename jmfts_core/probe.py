@@ -22,6 +22,7 @@ how a ``.pdf`` that is really a ZIP becomes an unexplained extraction failure la
 from __future__ import annotations
 
 import io
+import json
 import logging
 import re
 import xml.etree.ElementTree as ET
@@ -366,6 +367,56 @@ def _probe_pdf(data: bytes) -> tuple[dict, dict]:
     return patterns, detail
 
 
+#: How many leading lines :func:`_conversation_turns` will parse. A conversation is
+#: decided by its FIRST message line; the rest are counted so the detail can say how much
+#: of the prefix agreed, which is what separates a transcript from a one-line JSON file
+#: that happens to carry the same keys.
+CONVERSATION_SCAN_LINES = 64
+
+
+def _is_message_object(obj: object) -> bool:
+    """Does this decoded JSON line carry the keys a conversation message carries?
+
+    The two shapes :func:`~jmfts_core.conversation_ingest.parse_adjutant_jsonl` accepts,
+    and nothing else: an adjutant prompt/response pair, or a pre-structured
+    ``{role, content}`` message. Kept as a predicate over the DECODED object rather than a
+    regex over the line, because "is this a message" is a question about the keys and a
+    pattern that answered it from the bytes would be a second, weaker parser.
+    """
+    if not isinstance(obj, dict):
+        return False
+    return "prompt" in obj or ("role" in obj and "content" in obj)
+
+
+def _conversation_turns(text: str) -> tuple[bool, int, int]:
+    """``(first line is a message, message lines found, non-blank lines scanned)``.
+
+    TIER 1, and it has to be: ``json`` is in the standard library and ``probe`` may depend
+    on nothing else (``OFFICE_SPEC.md`` Part 1). A base install that could not recognise a
+    conversation would accept one, probe it, and report a pattern set with no
+    ``is_conversation`` in it — which is indistinguishable from a text file that is not one.
+    """
+    scanned = 0
+    matched = 0
+    first = False
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            obj = None
+        if _is_message_object(obj):
+            matched += 1
+            if scanned == 0:
+                first = True
+        scanned += 1
+        if scanned >= CONVERSATION_SCAN_LINES:
+            break
+    return first, matched, scanned
+
+
 def _probe_text(data: bytes) -> tuple[dict, dict]:
     """``(patterns, detail)`` for a UTF-8 text file. ``INGEST_SPEC.md`` 11.3.
 
@@ -381,6 +432,14 @@ def _probe_text(data: bytes) -> tuple[dict, dict]:
     :func:`~jmfts_core.structural_splitting.find_headings`, the same function the splitter
     uses, so ``heading_count`` here and the titled sections the structure task produces are
     comparable numbers rather than two independent guesses.
+
+    ``is_conversation`` — the file is a transcript: its first non-blank line decodes as a
+    JSON object carrying the keys a message carries. ``SPRINT_JOBS.md`` 15.2 decision 3
+    made this a probed FORMAT PATTERN rather than a usetype a caller declares, which is
+    what gives conversations the attempt log, the retry classification and ``EXPLAIN``
+    every other input already has. It selects a reader in ``extract:text`` and a rung in
+    Part 4's table, and it holds the two prose rungs back — a transcript split on ATX
+    headings or packed into sentences would lose the turn boundaries the file states.
 
     ``has_markup`` — the document IS markup: HTML, XML, an RDF dump. It holds ``extract:text``
     back, and that is the whole reason it is measured. The text extractor is a DECODER, and
@@ -415,12 +474,15 @@ def _probe_text(data: bytes) -> tuple[dict, dict]:
     tag_count = len(_TAG_RE.findall(prefix))
     has_markup = uncommented.strip().startswith("<") and tag_count > 0
 
+    is_conversation, message_lines, scanned_lines = _conversation_turns(text)
+
     patterns = {
         "has_text_layer": bool(stripped),
         "has_headings": bool(headings),
         "heading_count": len(headings),
         "max_heading_level": max((level for level, _ in headings), default=0),
         "has_markup": has_markup,
+        "is_conversation": is_conversation,
         "char_count": len(text),
         "line_count": text.count("\n") + 1,
     }
@@ -434,6 +496,8 @@ def _probe_text(data: bytes) -> tuple[dict, dict]:
         "markup_scan_bytes": MARKUP_SCAN_BYTES,
         "heading_count": len(headings),
         "heading_levels": sorted({level for level, _ in headings}),
+        "conversation_message_lines": message_lines,
+        "conversation_lines_scanned": scanned_lines,
     }
     return patterns, detail
 

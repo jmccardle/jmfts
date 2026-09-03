@@ -182,7 +182,22 @@ Consequences worth knowing before you "clean up" something:
 
 Large ingests do not run inline. `jmfts_core/ingest_tasks.py` defines the task types and their handler registry; `ingest_worker.py` runs the worker thread; `repositories/task_queue.py` is the claim/retry/write-mode machinery. A document carries a `settled` column — retrieval indexes are partial on it, so in-flight nodes are invisible to search until `settling.py` walks them complete. Adding a rung means registering a handler, not editing a ladder of conditionals.
 
-`docs/INGEST_SPEC.md` is the normative specification and roughly sixty source comments cite it by part and section.
+There is ONE ingest path and it is this one. The synchronous `execute_pipeline` and its
+`PipelineDefinition` registry were deleted; the seven entry points `POST /ingest` accepts
+survive as `INGEST_USETYPES` in `jmfts_core/ingest_options.py`, which is a table of
+defaults rather than a table of stages.
+
+A handler is not only a function. `jmfts_core/atoms.py` has each one declare what it reads
+and what it writes, `jmfts_core/evidence.py` records what a run measured as rows in
+`document_evidence`, and a rung's eligibility is a rule that names its scope
+(`Scope` in `ingest_tasks.py`) with guards that compare a measurement against a constant
+or against an option. `Document.produced_by` is what a scope matches on. The point of all
+four is that the planner reads declarations instead of a ladder of conditionals, so adding
+a rung means registering a handler.
+
+`docs/INGEST_SPEC.md` is the normative specification for the pipeline and
+`docs/SPRINT_JOBS.md` for the declaration machinery; between them they are cited by around
+three hundred source comments, by part and section.
 
 ### Office formats, in three dependency tiers
 
@@ -271,14 +286,24 @@ pytest tests/corpus -q             # no database, no optional dependency
 `tests/test_readme_links.py::PUBLISHED`, and `docs/RELEASING.md` cites that constant
 rather than repeating it.
 
-Roughly three hundred source comments cite a `docs/` file by part and section. Counted at
-0.2.1: `INGEST_SPEC.md` 117, `OFFICE_SPEC.md` 81, `SPRINT_0_3_0.md` 52, `CORPUS.md` 14,
-`RELEASING.md` 13, `KNOWN-DEFECTS.md` 9 (D1–D4 anchors, all resolved), `ROADMAP.md` 4,
-`AGENTIC_KNOWLEDGEBASE.md` 4, `RERANKER_CRITIQUE.md` 2,
-`API_UNIFICATION_CONTRACT_NOTES.md` 1, `research/INTERMEDIATE_FORMATS.md` 1. In the public
-tree every one of those documents is absent by design. **Do not treat the citations as
-broken links to fix, and do not delete them** — they are the anchors the documents will be
-republished against.
+Over four hundred source comments cite a `docs/` file by part and section. Count them
+rather than trusting the number below, which is a reading and not a rule:
+
+```bash
+git grep -hoE "(research/)?[A-Z][A-Z0-9_-]*\.md" -- \
+    jmfts_core jmfts-client jmfts_batch plugin scripts tests .github .githooks |
+  sort | uniq -c | sort -rn
+```
+
+Read at 0.2.1+28: `SPRINT_JOBS.md` 156, `INGEST_SPEC.md` 136, `OFFICE_SPEC.md` 76,
+`SPRINT_0_3_0.md` 54, `CORPUS.md` 12, `RELEASING.md` 11, `KNOWN-DEFECTS.md` 7 (D1–D4
+anchors, all resolved), `AGENTIC_KNOWLEDGEBASE.md` 4, `ROADMAP.md` 2,
+`RERANKER_CRITIQUE.md` 1, `research/INTERMEDIATE_FORMATS.md` 1. The command also reports
+`README.md`, `CLAUDE.md` and `INVENTORY-2026-04-05.md`; the first two ship, and the third
+is a corpus filename in `scripts/ingest_missing_steelman.py` rather than a `docs/`
+citation. In the public tree every held-back document is absent by design. **Do not treat
+the citations as broken links to fix, and do not delete them** — they are the anchors the
+documents will be republished against.
 
 The public README's "A note on documentation" names the same list in prose, so a reader
 who follows a citation finds out why it goes nowhere. A release that adds a new `docs/`

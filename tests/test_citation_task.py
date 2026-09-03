@@ -24,9 +24,9 @@ import pytest
 from sqlalchemy import select
 
 from jmfts_core.citation_tasks import (
-    ANCHOR_KEY,
+    ANCHOR_NAME,
     ANCHOR_KIND_PDF,
-    ANCHOR_UNRESOLVED_KEY,
+    ANCHOR_UNRESOLVED_NAME,
     UNRESOLVED_NO_BLOCK,
     UNRESOLVED_NO_SPAN,
     anchor_for_span,
@@ -47,9 +47,10 @@ from jmfts_core.models.task_queue import (
     WRITE_SUBTREE,
 )
 from jmfts_core.repositories.document import DocumentRepository
+from jmfts_core.repositories.evidence import EvidenceRepository
 from jmfts_core.repositories.task_queue import TaskQueueRepository
 from jmfts_core.services.ingest_service import IngestService
-from jmfts_core.structure_tasks import USETYPE_CHUNK
+from jmfts_core.models.document import USETYPE_CHUNK
 from jmfts_core.task_errors import ErrorType
 from tests.conftest import drain_ingest_queue
 
@@ -271,7 +272,7 @@ class TestAnchorForSpan:
 
 class TestCitationOverARealPdf:
     def test_every_chunk_is_anchored_and_the_rectangle_holds_its_text(
-        self, db_session, citation_pdf
+        self, db_session, evidence, citation_pdf
     ):
         """The check that a plausible-but-wrong anchor cannot pass: the words are looked
         for on the page the anchor names, and the rectangle they are found in has to be
@@ -289,8 +290,9 @@ class TestCitationOverARealPdf:
         source = pymupdf.open(stream=citation_pdf, filetype="pdf")
         try:
             for chunk in chunks:
-                anchor = chunk.structured_content.get(ANCHOR_KEY)
-                assert anchor is not None, chunk.structured_content.get(ANCHOR_UNRESOLVED_KEY)
+                found = evidence(chunk)
+                anchor = found.get(ANCHOR_NAME)
+                assert anchor is not None, found.get(ANCHOR_UNRESOLVED_NAME)
                 assert anchor["kind"] == ANCHOR_KIND_PDF
 
                 page = source[anchor["page"]]
@@ -312,12 +314,14 @@ class TestCitationOverARealPdf:
         finally:
             source.close()
 
-    def test_the_attempt_detail_counts_what_was_and_was_not_placed(self, db_session, citation_pdf):
+    def test_the_attempt_detail_counts_what_was_and_was_not_placed(
+        self, db_session, evidence, citation_pdf
+    ):
         response = _upload(db_session, citation_pdf)
         drain_ingest_queue(db_session, max_tasks=200)
 
         node = DocumentRepository(db_session).get(response.document_id)
-        attempts = {entry["task"]: entry for entry in node.structured_content["attempts"]}
+        attempts = {entry["task"]: entry for entry in evidence(node)["attempts"]}
         assert TASK_CITATION in attempts, "citation was never enqueued for a PDF"
         attempt = attempts[TASK_CITATION]
         assert attempt["status"] == "completed"
@@ -329,7 +333,7 @@ class TestCitationOverARealPdf:
         assert detail["text_blocks"] > 0
 
     def test_a_chunk_with_no_source_span_is_reported_rather_than_failed(
-        self, db_session, citation_pdf
+        self, db_session, evidence, citation_pdf
     ):
         """Partial recovery is a COMPLETED task. The chunk keeps no anchor, gains a reason,
         and the rest of the document is anchored around it."""
@@ -339,9 +343,7 @@ class TestCitationOverARealPdf:
         node = DocumentRepository(db_session).get(response.document_id)
         chunks = _chunks(db_session, node.id)
         victim = chunks[0]
-        structured = dict(victim.structured_content)
-        structured.pop("source_span")
-        victim.structured_content = structured
+        EvidenceRepository(db_session).delete(victim.id, "source_span")
         db_session.flush()
 
         tasks = TaskQueueRepository(db_session)
@@ -353,9 +355,9 @@ class TestCitationOverARealPdf:
 
         assert outcome.status == "completed"
         assert outcome.detail["unresolved"] == {UNRESOLVED_NO_SPAN: 1}
-        db_session.refresh(victim)
-        assert ANCHOR_KEY not in victim.structured_content
-        assert victim.structured_content[ANCHOR_UNRESOLVED_KEY]["code"] == UNRESOLVED_NO_SPAN
+        found = evidence(victim)
+        assert ANCHOR_NAME not in found
+        assert found[ANCHOR_UNRESOLVED_NAME]["code"] == UNRESOLVED_NO_SPAN
 
     def test_text_that_disagrees_with_a_re_extraction_raises_rather_than_anchoring(
         self, db_session, citation_pdf

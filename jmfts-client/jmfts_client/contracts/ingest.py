@@ -22,13 +22,24 @@ class IngestRequest(BaseModel):
     title: Optional[str] = Field(default=None, description="Title for the root document")
     parent_id: Optional[int] = Field(default=None, description="Parent document ID to nest under")
 
-    # Pipeline configuration overrides
+    # Ingest options — the queue's vocabulary.
+    options: Optional[dict[str, dict]] = Field(
+        default=None,
+        description=(
+            "Ingest option overrides: option group -> parameters, e.g. "
+            "{'structure': {'max_tokens': 300}}. Same shape as the `options` field of "
+            "POST /ingest/file. An unknown group, an unknown option or a value of the "
+            "wrong type is a 400."
+        ),
+    )
+
     pipeline_config: Optional[dict[str, Any]] = Field(
         default=None,
         description=(
-            "Per-stage overrides. Keys are stage names (parse, chunk, summarize, "
-            "extract_facts). Values can be bool (enable/disable) or dict with "
-            "'enabled' and/or param keys."
+            "REMOVED. The synchronous pipeline's per-stage overrides. Sending this is a "
+            "400 naming `options`, which is the ingest queue's vocabulary; the two do not "
+            "translate, so accepting the field and doing something else would be worse "
+            "than refusing it. The field is kept so the refusal can name it."
         ),
     )
 
@@ -69,17 +80,32 @@ class IngestResponse(BaseModel):
     )
 
 
-class PipelineStageInfo(BaseModel):
-    """Info about a single stage in a pipeline definition."""
-
-    name: str
-    enabled: bool
-    params: dict = Field(default_factory=dict)
-
-
 class PipelineInfo(BaseModel):
-    """Info about a registered pipeline."""
+    """What one ``usetype`` a caller may name in :class:`IngestRequest` does.
+
+    Two facts, and they are the two ``probe`` cannot supply: where the bytes come from, and
+    what this entry point tunes differently from the task defaults. Everything else about
+    an ingest is decided from what was measured.
+
+    ``PipelineStageInfo`` and a ``stages`` field were here until ``SPRINT_JOBS.md`` 15.4
+    S9. They described the synchronous pipeline's stage list, and there are no stages —
+    there are tasks, and which of them run is ``GET /ingest/explain``'s answer, not a
+    property of the usetype.
+    """
 
     name: str
     description: str
-    stages: list[PipelineStageInfo]
+    source: str = Field(
+        default="content",
+        description=(
+            "What `content` holds for this usetype: 'content' for the document itself, or "
+            "'url' / 'arxiv' / 'path' for an identifier the appliance fetches."
+        ),
+    )
+    options: dict[str, dict] = Field(
+        default_factory=dict,
+        description=(
+            "The resolved ingest options for this usetype, option group -> parameters. "
+            "A request may override any of them; see the `options` field of an upload."
+        ),
+    )

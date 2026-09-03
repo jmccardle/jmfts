@@ -1,9 +1,14 @@
-"""Tests for the durable attempt log — INGEST_SPEC.md Part 3.3 / 3.4.
+"""The durable attempt log — ``INGEST_SPEC.md`` Part 3.3 / 3.4.
 
-Tier 1: unit tests over the contract and the fingerprint (no DB).
-Tier 2: integration tests — real DB (savepoint rollback), mocked embedding, LLM stages
-off, asserting that ``execute_pipeline`` actually writes the log to the row rather than
-into a mock that proves nothing.
+The CONTRACT and the fingerprint, with no database. ``AttemptRecord`` and
+``param_fingerprint`` live in ``jmfts-client`` and are what every task writes through, so
+they outlived both ingest pipelines.
+
+A Tier-2 half was here — it asserted that ``execute_pipeline`` really wrote the log to the
+row rather than into a mock — and ``SPRINT_JOBS.md`` 15.4 S9 deleted it with that function.
+The queue writes its own log, one entry per TASK, through
+``TaskQueueRepository.complete``/``fail``; it is asserted in ``tests/test_ingest_worker.py``
+and ``tests/test_file_upload.py``.
 """
 
 import asyncio
@@ -20,16 +25,14 @@ from pydantic import ValidationError
 from sqlalchemy import text as sa_text
 
 from jmfts_client.contracts.attempt import AttemptRecord, param_fingerprint
-from jmfts_core.pipeline import execute_pipeline
 
 # ---------------------------------------------------------------------------
 # DB availability check (same pattern as test_regression_ingestion.py)
 # ---------------------------------------------------------------------------
 
 try:
-    from jmfts_core.database import get_engine, get_session_factory
+    from jmfts_core.database import get_engine
     from jmfts_core.embedding import EmbeddingResult, TokenEmbeddingResult
-    from jmfts_core.repositories.document import DocumentRepository
 
     _engine = get_engine()
     with _engine.connect() as _conn:
@@ -290,16 +293,16 @@ class MockEmbeddingService:
         return trunc
 
 
-@pytest.fixture
-def db_session():
-    if not _DB_AVAILABLE:
-        pytest.skip("Database not available")
-    SessionLocal = get_session_factory()
-    session = SessionLocal()
-    session.begin_nested()  # SAVEPOINT
-    yield session
-    session.rollback()
-    session.close()
+# THE LOCAL `db_session` FIXTURE WAS HERE, and it leaked. It was a plain session with a
+# nested SAVEPOINT, so `session.commit()` committed for real — which nothing in this file
+# used to do, because it called `execute_pipeline` and that only flushes. SPRINT_JOBS.md
+# 15.4 S5 routed these tests through `IngestService`, which commits the file node before
+# the queue can see it, and the committed rows then outlived the test and were claimed by
+# whatever ran next.
+#
+# `tests/conftest.py`'s `db_session` is the one that contains a commit: it binds the
+# session to a connection-level transaction with `join_transaction_mode="create_savepoint"`,
+# so an endpoint's commit releases a savepoint inside a transaction the fixture rolls back.
 
 
 @pytest.fixture
@@ -311,181 +314,19 @@ def mock_embedding():
         yield svc
 
 
-MARKDOWN = (
-    "# Introduction\n\n"
-    "The introduction has enough prose to survive the minimum chunk length.\n\n"
-    "# Methods\n\n"
-    "The methods section also has enough prose to survive the minimum length.\n\n"
-    "# Results\n\n"
-    "The results section rounds out a three-section document for the test.\n"
-)
-
-NO_LLM = {"summarize": False, "extract_facts": False}
-
-
-def _ingest(session, content=MARKDOWN, usetype="markdown", **kwargs):
-    return _run(execute_pipeline(session, content, usetype, pipeline_config=NO_LLM, **kwargs))
-
-
-@requires_db
-class TestAttemptsArePersisted:
-    def test_one_attempt_per_stage_that_ran(self, db_session, mock_embedding):
-        result = _ingest(db_session, title="Attempt log markdown")
-        root = DocumentRepository(db_session).get(result.source_document_id)
-
-        attempts = root.structured_content["attempts"]
-        assert [a["task"] for a in attempts] == [s.stage for s in result.stages]
-        assert [a["status"] for a in attempts] == [s.status for s in result.stages]
-        assert all(a["scope_document_id"] == root.id for a in attempts)
-        assert all(a["attempt"] == 1 for a in attempts)
-
-    def test_response_body_is_unchanged(self, db_session, mock_embedding):
-        """Behaviour must not otherwise change: the returned stage list is as it was."""
-        result = _ingest(db_session)
-        assert [s.stage for s in result.stages] == [
-            "parse",
-            "chunk",
-            "summarize",
-            "extract_facts",
-            "bm25_index",
-        ]
-        assert result.stages[0].detail["sections"] == 3
-
-    def test_existing_structured_content_keys_survive(self, db_session, mock_embedding):
-        result = _ingest(db_session)
-        root = DocumentRepository(db_session).get(result.source_document_id)
-        assert root.structured_content["section_count"] == 3
-        assert "attempts" in root.structured_content
-
-    def test_timestamps_are_real_and_utc(self, db_session, mock_embedding):
-        before = datetime.now(timezone.utc)
-        result = _ingest(db_session)
-        after = datetime.now(timezone.utc)
-        root = DocumentRepository(db_session).get(result.source_document_id)
-
-        for entry in root.structured_content["attempts"]:
-            started = datetime.fromisoformat(entry["started_at"])
-            finished = datetime.fromisoformat(entry["finished_at"])
-            assert started.tzinfo is not None and finished.tzinfo is not None
-            assert started.utcoffset() == timedelta(0)
-            assert before <= started <= finished <= after
-
-    def test_produced_records_the_child_ids(self, db_session, mock_embedding):
-        result = _ingest(db_session)
-        repo = DocumentRepository(db_session)
-        root = repo.get(result.source_document_id)
-
-        chunk = next(a for a in root.structured_content["attempts"] if a["task"] == "chunk")
-        child_ids = sorted(c.id for c in repo.get_children(root.id, depth=1))
-        assert sorted(chunk["produced"]["child_ids"]) == child_ids
-        assert chunk["produced"]["node_count"] == len(child_ids)
-
-        # A stage that creates no nodes gets a null, not an empty undo record.
-        parse = next(a for a in root.structured_content["attempts"] if a["task"] == "parse")
-        assert parse["produced"] is None
-
-    def test_params_and_fingerprint_track_the_resolved_config(self, db_session, mock_embedding):
-        default_run = _ingest(db_session)
-        override_run = _run(
-            execute_pipeline(
-                db_session,
-                MARKDOWN.replace("Introduction", "Preface"),
-                "markdown",
-                pipeline_config={**NO_LLM, "chunk": {"max_tokens": 500}},
-            )
-        )
-        repo = DocumentRepository(db_session)
-
-        def _chunk_attempt(result):
-            root = repo.get(result.source_document_id)
-            return next(a for a in root.structured_content["attempts"] if a["task"] == "chunk")
-
-        default_chunk = _chunk_attempt(default_run)
-        override_chunk = _chunk_attempt(override_run)
-        assert default_chunk["params"]["max_tokens"] == 200
-        assert override_chunk["params"]["max_tokens"] == 500
-        assert default_chunk["param_fingerprint"] != override_chunk["param_fingerprint"]
-        assert default_chunk["param_fingerprint"] == param_fingerprint(default_chunk["params"])
-
-    def test_skipped_stages_carry_their_reason(self, db_session, mock_embedding):
-        result = _ingest(db_session)
-        root = DocumentRepository(db_session).get(result.source_document_id)
-        skipped = [a for a in root.structured_content["attempts"] if a["status"] == "skipped"]
-        assert skipped, "summarize and extract_facts were disabled and must be logged skipped"
-        for entry in skipped:
-            assert entry["detail"]["reason"]
-
-    def test_structure_block_summarises_the_rung(self, db_session, mock_embedding):
-        result = _ingest(db_session)
-        root = DocumentRepository(db_session).get(result.source_document_id)
-        structure = root.structured_content["structure"]
-
-        # The document declares its own outline, so `declared` is the highest rung that
-        # claimed anything, and node_count is what the structuring produced.
-        assert structure["primary_rung"] == "declared"
-        assert structure["source"] == "markdown_headings"
-        assert structure["node_count"] >= 3
-        # Not computable yet — omitted rather than written as a misleading zero.
-        assert "coverage" not in structure
-        assert "gap_regions" not in structure
-
-    def test_headingless_text_is_not_called_declared(self, db_session, mock_embedding):
-        result = _ingest(
-            db_session,
-            content=(
-                "The quick brown fox jumped over the lazy dog. "
-                "This paragraph has no headings anywhere in it at all. "
-                "It should be recorded as flat chunking, not as a declared outline."
-            ),
-            usetype="raw",
-        )
-        root = DocumentRepository(db_session).get(result.source_document_id)
-        structure = root.structured_content["structure"]
-        assert structure["primary_rung"] == "flat"
-
-        parse = next(a for a in root.structured_content["attempts"] if a["task"] == "parse")
-        assert parse["rung"] is None
-
-
-@requires_db
-class TestReIngestAppends:
-    def test_re_ingest_appends_rather_than_replaces(self, db_session, mock_embedding):
-        first = _ingest(db_session, title="Appended log")
-        repo = DocumentRepository(db_session)
-        root = repo.get(first.source_document_id)
-        first_log = list(root.structured_content["attempts"])
-        assert first_log
-
-        second = _ingest(db_session, title="Appended log")
-        assert second.was_existing is True
-        assert second.source_document_id == first.source_document_id
-
-        db_session.refresh(root)
-        second_log = root.structured_content["attempts"]
-        assert len(second_log) == len(first_log) + 1
-        assert second_log[: len(first_log)] == first_log
-        assert second_log[-1]["task"] == "idempotency"
-        assert second_log[-1]["status"] == "skipped"
-        assert second_log[-1]["detail"]["reason"]
-
-    def test_repeat_of_the_same_task_increments_the_attempt_counter(
-        self, db_session, mock_embedding
-    ):
-        first = _ingest(db_session, title="Counted log")
-        _ingest(db_session, title="Counted log")
-        third = _ingest(db_session, title="Counted log")
-
-        root = DocumentRepository(db_session).get(first.source_document_id)
-        db_session.refresh(root)
-        idempotency = [a for a in root.structured_content["attempts"] if a["task"] == "idempotency"]
-        assert [a["attempt"] for a in idempotency] == [1, 2]
-        assert third.was_existing is True
-
-    def test_re_ingest_does_not_disturb_the_first_run_keys(self, db_session, mock_embedding):
-        first = _ingest(db_session, title="Preserved keys")
-        _ingest(db_session, title="Preserved keys")
-
-        root = DocumentRepository(db_session).get(first.source_document_id)
-        db_session.refresh(root)
-        assert root.structured_content["section_count"] == 3
-        assert root.structured_content["structure"]["primary_rung"] == "declared"
+# TestAttemptsArePersisted WAS HERE. SPRINT_JOBS.md 15.4 S7 moved `conversation` onto the
+# ingest queue, and with it the last entry point `execute_pipeline` served that takes a
+# content STRING — the three `wiki:` usetypes left take a URL, an arXiv id or a local path,
+# so there is no way to drive `_record_attempts` from a test without a network or a
+# fixture file, and S8 deletes all three anyway.
+#
+# What the class asserted was that the attempt log is really written to the row rather than
+# into a mock: one entry per stage that ran, timestamps that are real and UTC, `produced`
+# carrying the child ids, `params`/`param_fingerprint` tracking the resolved config, and a
+# skipped stage carrying its reason. The QUEUE's attempt log is a different mechanism — one
+# entry per TASK, written by `TaskQueueRepository.complete`/`fail` — and every one of those
+# properties is asserted about it in `tests/test_ingest_worker.py` and
+# `tests/test_file_upload.py`.
+#
+# The Tier 1 half of this file is unaffected: `AttemptRecord` and `param_fingerprint` are
+# contracts in `jmfts-client` and outlive both pipelines.

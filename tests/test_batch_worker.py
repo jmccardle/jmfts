@@ -272,7 +272,9 @@ class TestGatherAndSubmit:
 
         assert TaskQueueRepository(db_session).claim_next("direct-llm-worker") is None
 
-    def test_a_node_that_now_fits_is_completed_instead_of_batched(self, db_session, store):
+    def test_a_node_that_now_fits_is_completed_instead_of_batched(
+        self, db_session, evidence, store
+    ):
         """A node deferred to ``summarize:llm`` can lose children before a batch worker
         reaches it. Concatenating is better on both cost and fidelity, so it wins."""
         provider = MockBatchProvider(store, _Chat())
@@ -285,7 +287,7 @@ class TestGatherAndSubmit:
         assert batch_id is None
         assert task.status == TASK_COMPLETED
         node = db_session.get(Document, parent.id)
-        assert node.structured_content["effective_content"]["method"] == METHOD_CONCATENATED
+        assert evidence(node)["effective_content"]["method"] == METHOD_CONCATENATED
 
     def test_the_gather_size_bounds_one_batch(self, db_session, store):
         """Not the provider's cap. Every gathered task holds its node's reservation for
@@ -359,7 +361,7 @@ class TestGatherAndSubmit:
 
 
 class TestPollAndApply:
-    def test_a_finished_batch_writes_effective_content(self, db_session, store):
+    def test_a_finished_batch_writes_effective_content(self, db_session, evidence, store):
         provider = MockBatchProvider(store, _Chat())
         parent = _tree(db_session)
         task_id = _enqueue(db_session, parent)
@@ -370,13 +372,13 @@ class TestPollAndApply:
         delivered = worker.poll_once()
 
         task = TaskQueueRepository(db_session).get(task_id)
-        record = db_session.get(Document, parent.id).structured_content["effective_content"]
+        record = evidence(db_session.get(Document, parent.id))["effective_content"]
         assert delivered == 1
         assert task.status == TASK_COMPLETED
         assert record["method"] == METHOD_LLM_SUMMARY
         assert record["text"] == SUMMARY
 
-    def test_the_record_says_which_provider_and_which_batch(self, db_session, store):
+    def test_the_record_says_which_provider_and_which_batch(self, db_session, evidence, store):
         """Provenance, in the attempt record rather than only on the queue row: the row is
         purgeable and the record is what a person reads a year later."""
         provider = MockBatchProvider(store, _Chat())
@@ -387,7 +389,7 @@ class TestPollAndApply:
         provider.finalize(batch_id)
         worker.poll_once()
 
-        record = db_session.get(Document, parent.id).structured_content["effective_content"]
+        record = evidence(db_session.get(Document, parent.id))["effective_content"]
         assert record["provider"] == "mock"
         assert record["batch_id"] == batch_id
 
@@ -551,7 +553,7 @@ class TestTheHandoffSurvivesTheWorker:
 
 class TestMirrorsTheCoreHandler:
     def test_the_batch_path_stores_what_the_direct_path_stores(
-        self, db_session, store, monkeypatch
+        self, db_session, evidence, store, monkeypatch
     ):
         """``jmfts_batch.summarize`` is a copy of ``run_summarize_llm`` split in half, and
         a copy drifts. This is the test that says so.
@@ -594,8 +596,8 @@ class TestMirrorsTheCoreHandler:
         provider.finalize(batch_id)
         worker.poll_once()
 
-        direct = db_session.get(Document, monkeyed.id).structured_content["effective_content"]
-        through_batch = db_session.get(Document, batched.id).structured_content["effective_content"]
+        direct = evidence(db_session.get(Document, monkeyed.id))["effective_content"]
+        through_batch = evidence(db_session.get(Document, batched.id))["effective_content"]
 
         shared = ("method", "source_children", "text", "tokens", "window")
         assert {k: direct[k] for k in shared} == {k: through_batch[k] for k in shared}

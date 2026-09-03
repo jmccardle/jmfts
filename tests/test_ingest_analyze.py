@@ -29,6 +29,7 @@ from jmfts_core.database import get_db
 from jmfts_core.ingest_options import STRUCTURE_CHUNK_PARAMS
 from jmfts_core.ingest_tasks import (
     OUTCOME_ENQUEUED,
+    ROOT_SCOPE,
     PATTERNS_PROBED,
     TASK_EXTRACT_TEXT,
     TASK_PROBE,
@@ -157,16 +158,24 @@ def _counts(session) -> tuple[int, int]:
 class TestAnalyzeForecastsTheRealRun:
     """What `analyze` says will happen is what happens when the same bytes are uploaded."""
 
-    def test_the_enqueued_tasks_are_the_ones_probe_enqueues(self, db_session, pdf_bytes):
+    def test_the_enqueued_tasks_are_the_ones_probe_enqueues(self, db_session, evidence, pdf_bytes):
         forecast = _analyze(db_session, pdf_bytes, "annual.pdf", "application/pdf")
-        predicted = [t.task for t in forecast.plan.tasks if t.outcome == OUTCOME_ENQUEUED]
+        # AT THE FILE NODE'S SCOPE. `probe`'s `enqueued` detail is one node's batch, and
+        # since `SPRINT_JOBS.md` Phase 3 the forecast covers every scope — the rows scoped
+        # to a chunk or a sheet are enqueued by whichever rule creates that node, not by
+        # probe, so comparing them against probe's detail would compare two different lists.
+        predicted = [
+            t.task
+            for t in forecast.plan.tasks
+            if t.outcome == OUTCOME_ENQUEUED and t.scope == str(ROOT_SCOPE)
+        ]
 
         uploaded = IngestService(db_session).upload_file(
             UploadedFile(data=pdf_bytes, filename="annual.pdf", content_type="application/pdf")
         )
         drain_ingest_queue(db_session)
         node = DocumentRepository(db_session).get(uploaded.document_id)
-        attempts = (node.structured_content or {}).get("attempts") or []
+        attempts = evidence(node).get("attempts") or []
         probe_attempt = next(a for a in attempts if a["task"] == TASK_PROBE)
 
         # `probe` itself is enqueued by the upload, not by probe, so it leads the forecast
@@ -180,7 +189,7 @@ class TestAnalyzeForecastsTheRealRun:
         assert predicted[0] == TASK_PROBE
         assert set(predicted[1:]) == set(probe_attempt["detail"]["enqueued"])
 
-    def test_the_measured_patterns_are_the_ones_probe_writes(self, db_session, pdf_bytes):
+    def test_the_measured_patterns_are_the_ones_probe_writes(self, db_session, evidence, pdf_bytes):
         forecast = _analyze(db_session, pdf_bytes, "annual.pdf", "application/pdf")
 
         uploaded = IngestService(db_session).upload_file(
@@ -189,10 +198,12 @@ class TestAnalyzeForecastsTheRealRun:
         drain_ingest_queue(db_session)
         node = DocumentRepository(db_session).get(uploaded.document_id)
 
-        assert forecast.patterns == node.structured_content["matched"]["patterns"]
-        assert forecast.format == node.structured_content["matched"]["format"]
+        assert forecast.patterns == evidence(node)["matched"]["patterns"]
+        assert forecast.format == evidence(node)["matched"]["format"]
 
-    def test_the_skip_and_not_applicable_reasons_are_spelled_the_same(self, db_session, pdf_bytes):
+    def test_the_skip_and_not_applicable_reasons_are_spelled_the_same(
+        self, db_session, evidence, pdf_bytes
+    ):
         forecast = _analyze(db_session, pdf_bytes, "annual.pdf", "application/pdf")
 
         uploaded = IngestService(db_session).upload_file(
@@ -200,7 +211,7 @@ class TestAnalyzeForecastsTheRealRun:
         )
         drain_ingest_queue(db_session)
         node = DocumentRepository(db_session).get(uploaded.document_id)
-        attempts = (node.structured_content or {}).get("attempts") or []
+        attempts = evidence(node).get("attempts") or []
         detail = next(a for a in attempts if a["task"] == TASK_PROBE)["detail"]
 
         by_task = {t.task: t for t in forecast.plan.tasks}

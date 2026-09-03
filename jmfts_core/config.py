@@ -104,6 +104,17 @@ class Settings(BaseSettings):
     ingest_worker_enabled: bool = True  # env JMFTS_INGEST_WORKER_ENABLED
     ingest_worker_poll_seconds: float = 1.0  # env JMFTS_INGEST_WORKER_POLL_SECONDS
 
+    # How long `POST /ingest` may hold a request open while it drains its own document's
+    # tasks (SPRINT_JOBS.md 15.4 S5). That endpoint is synchronous by design — it returns
+    # a finished tree — so the ceiling is on the CALLER's patience, not on the work: the
+    # tasks stay queued and the background worker finishes them either way.
+    #
+    # 300 s is a request timeout, chosen against what sits behind a proxy rather than
+    # against a measurement of ingestion. Anything slower than this belongs on
+    # `POST /ingest/file`, which returns as soon as `probe` is enqueued and lets the client
+    # poll the frontier.
+    ingest_sync_timeout_seconds: float = 300.0  # env JMFTS_INGEST_SYNC_TIMEOUT_SECONDS
+
     # The worker fleet (migration 011). A worker that holds a task touches
     # `task_queue.heartbeat_at` every `worker_heartbeat_seconds`; any worker may reap a
     # task whose last beat is older than `worker_lease_seconds`.

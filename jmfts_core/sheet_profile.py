@@ -3,7 +3,7 @@
 Two renderings of one :class:`~jmfts_core.office.sheets.SheetMeasurement`, and no third
 measurement:
 
-* :func:`sheet_structured_content` — 8.7's block on the sheet node, which is what a
+* :func:`sheet_evidence_block` — 8.7's block on the sheet node, which is what a
   threshold sweep reads;
 * :func:`build_profile_content` — 8.5's prose, which is what a person and an embedding
   model read.
@@ -32,10 +32,9 @@ from typing import Callable, Optional
 
 from jmfts_core.office.sheets import SheetMeasurement, TYPE_EMPTY
 
-#: The usetype 8.5 gives the profile node. The same string the RAPTOR summaries use, and
-#: deliberately: a profile is a summary of the node above it, it is retrieved the same way,
-#: and a reader filtering ``usetype='summary'`` wants both.
-USETYPE_SUMMARY = "summary"
+# The usetype 8.5 gives the profile node is `USETYPE_SUMMARY`, and it is DEFINED on the
+# model with every other ingest usetype — Part 4's rule table names it and cannot import
+# this module. See `jmfts_core.models.document`.
 
 #: Why the sheet node carries no ``shape``. Written into the node so a reader finds the
 #: reason where the key would have been, rather than having to know which sprint step
@@ -48,7 +47,7 @@ SHAPE_DEFERRED_REASON = (
 )
 
 
-def sheet_structured_content(
+def sheet_evidence_block(
     measurement: SheetMeasurement,
     *,
     rendered_tokens: Optional[int],
@@ -219,7 +218,7 @@ def build_profile_content(
 
     **Dropping a value list is not the closed-set threshold.** It is a fact about this
     node's length. The values are on the sheet node either way
-    (:func:`sheet_structured_content`), and 8.6 reads them from there.
+    (:func:`sheet_evidence_block`), and 8.6 reads them from there.
     """
     sentences = _sheet_sentences(measurement)
     columns = list(measurement.columns)
@@ -390,7 +389,6 @@ def _column_sentence(column, *, list_values: bool) -> str:
 
 __all__ = [
     "SHAPE_DEFERRED_REASON",
-    "USETYPE_SUMMARY",
     "build_profile_content",
-    "sheet_structured_content",
+    "sheet_evidence_block",
 ]

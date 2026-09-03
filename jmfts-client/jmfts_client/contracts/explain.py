@@ -99,7 +99,23 @@ class ExplainedTaskResponse(BaseModel):
             "that is always recorded rather than queued, which claims nothing."
         ),
     )
-    after: list[str] = Field(description="Tasks that must ALL be eligible before this one is")
+    scope: str = Field(
+        default="@root",
+        description=(
+            "Which nodes this task runs on. `@root` is the uploaded file node — one task "
+            "per file. `@children_of(rule|rule):usetype|usetype` is one task per child a "
+            "named rule wrote, so a 40-sheet workbook's `profile:sheet` is 40 tasks and "
+            "not one. Without it a plan listing `structure:sheets` beside `profile:sheet` "
+            "reads as two tasks on one node."
+        ),
+    )
+    after: list[str] = Field(
+        description=(
+            "Tasks that must ALL be eligible before this one is. Within one scope: an "
+            "ordering is between two tasks on ONE node. What orders a child-scoped task "
+            "after the rule that made its node is the scope, not this."
+        )
+    )
     after_any: list[str] = Field(
         default_factory=list,
         description=(
@@ -157,7 +173,11 @@ class ExplainIngestResponse(BaseModel):
     )
     options: dict = Field(description="The RESOLVED options, all groups — what the run would use")
     tasks: list[ExplainedTaskResponse] = Field(
-        description="`probe` first, then every Part 4 row in table order. None is omitted."
+        description=(
+            "`probe` first, then every Part 4 row in table order — at EVERY scope, so a "
+            "workbook's forecast reaches the two tasks per sheet rather than stopping at "
+            "the sheet list. None is omitted; read `scope` to know which node each runs on."
+        )
     )
 
 

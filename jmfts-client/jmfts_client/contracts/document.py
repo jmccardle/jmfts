@@ -30,6 +30,13 @@ class DocumentResponse(BaseModel):
     path: list
     depth: int
     usetype: Optional[str]
+    # Which RULE produced this node (`SPRINT_JOBS.md` 4.2), which today is the task type of
+    # the ingest atom that wrote it. NULL means asserted — a person, an importer, or an
+    # upload created it, not a rule. It is a column on the row and it costs no join, unlike
+    # evidence, so unlike evidence it is a field here: "did a machine write this, and which
+    # one" is a question about the node itself. A person editing a produced node's content
+    # clears it (9.4), so NULL after an edit is a real answer and not a gap.
+    produced_by: Optional[str] = None
     position: Optional[int] = None  # CR-1: NULL for unordered documents
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
@@ -64,6 +71,7 @@ class DocumentResponse(BaseModel):
             path=doc.path or [],
             depth=doc.depth,
             usetype=doc.usetype,
+            produced_by=doc.produced_by,
             position=doc.position,
             created_at=doc.created_at,
             updated_at=doc.updated_at,
@@ -74,6 +82,33 @@ class DocumentResponse(BaseModel):
                 [float(x) for x in doc.embed] if include_embed and doc.embed is not None else None
             ),
         )
+
+
+class DocumentEvidenceResponse(BaseModel):
+    """Everything the ingest pipeline knows about one node.
+
+    ``SPRINT_JOBS.md`` 13.3, and it exists because that decision took the evidence OUT of
+    ``DocumentResponse.structured_content`` and put nothing back. Before Phase 2b a client
+    read ``matched.patterns`` and the attempt log out of that column; the column is now
+    exactly what a caller put there, and this is where the pipeline's own facts are served.
+
+    A separate route rather than a field on ``DocumentResponse``, because a field would put
+    a join on every document read INCLUDING every search hit — which is the cost 13.3's
+    option 1 was rejected for. A caller that wants evidence asks for it.
+
+    ``evidence`` is keyed by the registry name (``jmfts_core.evidence.REGISTRY``), not by
+    the ``structured_content`` key the value used to live under. Two of them differ:
+    ``anchor`` is ``source_anchor`` and ``anchor_unresolved`` is
+    ``source_anchor.unresolved``.
+
+    A name whose value is ``null`` IS PRESENT, and a name that is absent from the dict was
+    never attempted. 3.2 makes those different facts — an atom writes every name it produces
+    on success, null included, because producing nothing is a result — so a client must not
+    read a missing key and a null key as the same thing.
+    """
+
+    document_id: int
+    evidence: dict[str, Any]
 
 
 # ============================================================================

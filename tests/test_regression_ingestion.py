@@ -13,14 +13,18 @@ import numpy as np
 import pytest
 from sqlalchemy import text as sa_text
 
-from jmfts_core.pipeline import execute_pipeline
+from jmfts_client.contracts.ingest import IngestRequest
+from jmfts_core.ingest_tasks import TASK_INDEX_BM25
+from jmfts_core.repositories.task_queue import TaskQueueRepository
+from jmfts_core.models.document import USETYPE_FILE
+from jmfts_core.services.ingest_service import IngestService
 
 # ---------------------------------------------------------------------------
 # DB availability check (same pattern as test_raptor.py)
 # ---------------------------------------------------------------------------
 
 try:
-    from jmfts_core.database import get_session_factory, get_engine
+    from jmfts_core.database import get_engine
     from jmfts_core.repositories.document import DocumentRepository
     from jmfts_core.repositories.search import SearchRepository
     from jmfts_core.embedding import EmbeddingResult, TokenEmbeddingResult
@@ -46,6 +50,30 @@ def _run(coro):
         return loop.run_until_complete(coro)
     finally:
         loop.close()
+
+
+def _attempt_detail(session, node_id, task):
+    """The handler's own detail for ``task``, from the node's durable attempt log."""
+    repo = DocumentRepository(session)
+    entries = [e for e in repo.attempt_log(repo.get(node_id)) if e["task"] == task]
+    assert len(entries) == 1, f"{task}: {entries}"
+    return entries[0]["detail"]
+
+
+def _ingest(session, content, usetype, **kwargs):
+    """One ingest through the real service. ``SPRINT_JOBS.md`` 15.4 S5.
+
+    These tests used to call ``execute_pipeline`` directly. ``markdown`` and ``raw`` are
+    served by the ingest queue now, so the entry point is the service — which stores the
+    content as a file node, drains that document's tasks, and returns the same response.
+    The claims below are unchanged: chunks parent onto the root, carry ``usetype='chunk'``,
+    and have the root in their ``path``.
+    """
+    return _run(
+        IngestService(session).ingest_content(
+            IngestRequest(content=content, usetype=usetype, **kwargs)
+        )
+    )
 
 
 class MockEmbeddingService:
@@ -92,16 +120,16 @@ class MockEmbeddingService:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def db_session():
-    if not _DB_AVAILABLE:
-        pytest.skip("Database not available")
-    SessionLocal = get_session_factory()
-    session = SessionLocal()
-    session.begin_nested()  # SAVEPOINT
-    yield session
-    session.rollback()
-    session.close()
+# THE LOCAL `db_session` FIXTURE WAS HERE, and it leaked. It was a plain session with a
+# nested SAVEPOINT, so `session.commit()` committed for real — which nothing in this file
+# used to do, because it called `execute_pipeline` and that only flushes. SPRINT_JOBS.md
+# 15.4 S5 routed these tests through `IngestService`, which commits the file node before
+# the queue can see it, and the committed rows then outlived the test and were claimed by
+# whatever ran next.
+#
+# `tests/conftest.py`'s `db_session` is the one that contains a commit: it binds the
+# session to a connection-level transaction with `join_transaction_mode="create_savepoint"`,
+# so an endpoint's commit releases a savepoint inside a transaction the fixture rolls back.
 
 
 @pytest.fixture
@@ -133,15 +161,7 @@ class TestIngestionParentIdAndUsetype:
             "Third section with additional text for chunking purposes.\n"
         )
 
-        result = _run(
-            execute_pipeline(
-                db_session,
-                content,
-                "markdown",
-                title="Parent ID Test",
-                pipeline_config={"summarize": False, "extract_facts": False},
-            )
-        )
+        result = _ingest(db_session, content, "markdown", title="Parent ID Test")
 
         root_id = result.source_document_id
         repo = DocumentRepository(db_session)
@@ -153,65 +173,55 @@ class TestIngestionParentIdAndUsetype:
                 child.parent_id == root_id
             ), f"Child {child.id} has parent_id={child.parent_id}, expected {root_id}"
 
-    def test_markdown_chunks_have_chunk_usetype(self, db_session, mock_embedding):
-        """Markdown chunks should have usetype='chunk'."""
+    def test_markdown_leaves_have_chunk_usetype(self, db_session, mock_embedding):
+        """The LEAVES carry `usetype='chunk'`.
+
+        WAS "the root's direct children". Path A chunked a markdown document flat under
+        its root; the queue's `structure:declared` rung builds the tree the headings
+        describe — a `section` per declared heading, with the chunks under it — so the
+        children of the root are sections and the chunks are one level further down.
+        `USETYPE_CHUNK` is still what a retrievable leaf is.
+        """
         content = (
             "# Alpha\n\nAlpha section with enough content to chunk properly.\n\n"
             "# Beta\n\nBeta section with enough content to chunk properly.\n"
         )
 
-        result = _run(
-            execute_pipeline(
-                db_session,
-                content,
-                "markdown",
-                title="Usetype Test",
-                pipeline_config={"summarize": False, "extract_facts": False},
-            )
-        )
+        result = _ingest(db_session, content, "markdown", title="Usetype Test")
 
         repo = DocumentRepository(db_session)
-        children = repo.get_children(result.source_document_id, depth=1, limit=100)
-        for child in children:
+        subtree = [d for d in repo.get_subtree(result.source_document_id, include_in_flight=True)]
+        parents = {d.parent_id for d in subtree}
+        leaves = [d for d in subtree if d.id not in parents and d.id != result.source_document_id]
+        assert leaves, "the rung produced no leaves"
+        for leaf in leaves:
             assert (
-                child.usetype == "chunk"
-            ), f"Child {child.id} has usetype='{child.usetype}', expected 'chunk'"
+                leaf.usetype == "chunk"
+            ), f"Leaf {leaf.id} has usetype='{leaf.usetype}', expected 'chunk'"
 
-    def test_raw_root_has_correct_usetype(self, db_session, mock_embedding):
-        """Raw pipeline root document should have usetype='raw'."""
+    def test_raw_root_is_a_file_node(self, db_session, mock_embedding):
+        """WAS `usetype == "raw"`. SPRINT_JOBS.md 15.4 S5 moved the usetype onto the ingest
+        queue, where the content string is stored as bytes and the root is the `file` node
+        that holds them — which is what it really is. The response still reports `raw` as
+        the usetype that was ASKED for."""
         content = (
             "The quick brown fox jumped over the lazy dog. "
             "This is a test of the raw text ingestion pipeline. "
-            "It should create a root document with usetype raw."
+            "It should create a root document holding the bytes it was sent."
         )
 
-        result = _run(
-            execute_pipeline(
-                db_session,
-                content,
-                "raw",
-                title="Usetype Raw Test",
-                pipeline_config={"summarize": False, "extract_facts": False},
-            )
-        )
+        result = _ingest(db_session, content, "raw", title="Usetype Raw Test")
 
         repo = DocumentRepository(db_session)
         root = repo.get(result.source_document_id)
-        assert root.usetype == "raw"
+        assert root.usetype == USETYPE_FILE
+        assert result.usetype == "raw"
 
     def test_chunk_path_includes_root(self, db_session, mock_embedding):
         """Chunk documents should have root_id in their path array."""
         content = "# Heading\n\n" "Some paragraph text long enough to be ingested as a chunk.\n"
 
-        result = _run(
-            execute_pipeline(
-                db_session,
-                content,
-                "markdown",
-                title="Path Test",
-                pipeline_config={"summarize": False, "extract_facts": False},
-            )
-        )
+        result = _ingest(db_session, content, "markdown", title="Path Test")
 
         root_id = result.source_document_id
         repo = DocumentRepository(db_session)
@@ -229,66 +239,93 @@ class TestIngestionParentIdAndUsetype:
 
 
 @requires_db
-class TestBM25AutoIndexing:
-    """After ingest, the document subtree should be searchable via BM25."""
+class TestBM25MembershipFollowsTheTree:
+    """``INGEST_SPEC.md`` 11.5, arrived at by ``SPRINT_JOBS.md`` 15.4 S5.
 
-    def test_ingest_creates_bm25_index(self, db_session, mock_embedding):
-        """Pipeline creates a 'default' BM25 index and populates it."""
+    WAS ``TestBM25AutoIndexing``, and the rule it asserted is the one 11.5 removes. Path A
+    ran ``_index_subtree_bm25`` at the end of every ingest and indexed unconditionally into
+    ``"default"``, creating that index if it was absent — so every ingestion joined one
+    corpus whether or not anybody asked. The queue's ``index:bm25`` task reads the file
+    node's ``path`` instead and joins every index whose registered root is the node or one
+    of its ancestors.
+
+    So a file uploaded into a folder somebody has indexed joins that index, and a file
+    uploaded anywhere else joins nothing. The second half is the deliberate part: the
+    document is findable by vector search and not by BM25 until an operator indexes
+    something above it, which is the same shape as the rest of the appliance (1.3: a
+    subtree "does not appear in BM25 results by default").
+    """
+
+    def test_an_ingest_with_no_indexed_ancestor_joins_nothing_and_says_so(
+        self, db_session, mock_embedding
+    ):
         content = (
             "PostgreSQL vector search with pgvector extension is powerful. "
             "It supports HNSW and IVFFlat index types for similarity search. "
             "Combined with BM25, it provides hybrid retrieval capabilities."
         )
 
-        result = _run(
-            execute_pipeline(
-                db_session,
-                content,
-                "raw",
-                title="BM25 Auto-Index Test",
-                pipeline_config={"summarize": False, "extract_facts": False},
-            )
-        )
+        result = _ingest(db_session, content, "raw", title="BM25 Membership Test")
 
-        # Check that the bm25_index stage ran successfully
-        bm25_stage = [s for s in result.stages if s.stage == "bm25_index"]
-        assert len(bm25_stage) == 1
-        assert bm25_stage[0].status == "completed"
-        assert bm25_stage[0].detail["documents_indexed"] >= 1
+        stage = [s for s in result.stages if s.stage == TASK_INDEX_BM25]
+        assert len(stage) == 1, [s.stage for s in result.stages]
+        # Skipped, with the reason and the roots it looked for. Silence would be the same
+        # response as "indexed nothing because there was nothing to index".
+        assert stage[0].status == "skipped"
+        assert stage[0].error is None
+        detail = _attempt_detail(db_session, result.source_document_id, TASK_INDEX_BM25)
+        assert detail["reason"]
+        assert detail["candidate_roots"] == [result.source_document_id]
+        assert TaskQueueRepository(db_session).unfinished_tasks_for(result.source_document_id) == []
 
-    def test_ingest_then_bm25_search_finds_document(self, db_session, mock_embedding):
-        """After ingesting a document, BM25 search for a keyword returns it."""
+    def test_an_ingest_under_an_indexed_ancestor_joins_that_index_and_is_findable(
+        self, db_session, mock_embedding
+    ):
         unique_keyword = "xylophoneRegression"
+        repo = DocumentRepository(db_session)
+        folder = repo.create(title="An indexed folder", content=None, auto_embed=False)
+        db_session.flush()
+
+        search_repo = SearchRepository(db_session)
+        search_repo.create_index("regression-corpus", description="11.5 membership test")
+        assert search_repo.add_root_to_index("regression-corpus", folder.id)
+        db_session.flush()
+
         content = (
             f"The {unique_keyword} is a very specific term used only in this test. "
             "This document should be findable after BM25 indexing completes. "
             "No other document in the database contains this unique term."
         )
-
-        result = _run(
-            execute_pipeline(
-                db_session,
-                content,
-                "raw",
-                title="BM25 Search After Ingest",
-                pipeline_config={"summarize": False, "extract_facts": False},
-            )
-        )
+        result = _ingest(db_session, content, "raw", title="Findable", parent_id=folder.id)
         db_session.flush()
 
-        # Search for the unique keyword
-        search_repo = SearchRepository(db_session)
-        results = search_repo.bm25_search(unique_keyword, index_name="default", limit=10)
+        stage = [s for s in result.stages if s.stage == TASK_INDEX_BM25][0]
+        assert stage.status == "completed"
+        # The response's `stages` are a rollup — one entry per task with per-status counts
+        # — so the handler's own detail is read from the node's attempt log, which is where
+        # it durably lives (INGEST_SPEC.md 3.4).
+        assert _attempt_detail(db_session, result.source_document_id, TASK_INDEX_BM25)[
+            "indexes"
+        ] == ["regression-corpus"]
 
+        results = search_repo.bm25_search(unique_keyword, index_name="regression-corpus", limit=10)
         assert len(results) >= 1, "BM25 search should find the ingested document"
         found_ids = {r.document.id for r in results}
-        # The result should include the root or one of its chunks
-        root_id = result.source_document_id
-        repo = DocumentRepository(db_session)
-        subtree_ids = {d.id for d in repo.get_subtree(root_id)}
+        subtree_ids = {d.id for d in repo.get_subtree(result.source_document_id)}
         assert (
             found_ids & subtree_ids
         ), f"BM25 results {found_ids} should overlap with subtree {subtree_ids}"
+
+    def test_the_default_index_is_no_longer_created_as_a_side_effect(
+        self, db_session, mock_embedding
+    ):
+        """The behaviour being removed, stated directly."""
+        before = SearchRepository(db_session).get_index("default")
+
+        _ingest(db_session, "Alpha beta gamma delta epsilon. " * 20, "raw")
+
+        after = SearchRepository(db_session).get_index("default")
+        assert (before is None) == (after is None)
 
 
 # ---------------------------------------------------------------------------

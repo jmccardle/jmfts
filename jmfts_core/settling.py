@@ -67,6 +67,7 @@ from jmfts_core.models.document import (
     SETTLED_SETTLED,
     USETYPE_FILE,
 )
+from jmfts_core.repositories.evidence import EvidenceRepository
 from jmfts_core.repositories.task_queue import TaskQueueRepository
 from jmfts_core.task_routing import BADGE_FROM_POLICY, BadgeRequest
 
@@ -135,7 +136,7 @@ class AttemptDiffPlanner:
     """Enqueue the declared rollup tasks the node's attempt log does not already record.
 
     This is spec 6.1's diff — ``(task_name, param_fingerprint)`` against
-    ``structured_content['attempts']`` — applied at the rollup boundary, and it is what
+    the ``attempts`` evidence row — applied at the rollup boundary, and it is what
     makes the walk terminate.
 
     The termination argument, in full, because it is the property the whole design turns
@@ -247,7 +248,7 @@ def _record_if_yielded_nothing(session: Session, node: Document) -> None:
 
     It is, however, invisible otherwise. ``settled`` means retrievable, and a file node
     with an empty ``content`` contributes nothing to the full-text and vector indexes, so
-    the only trace of the upload is a title. This writes ``structured_content['yield']``
+    the only trace of the upload is a title. This writes the ``yield`` evidence row
     so the state is auditable — "which of my uploads produced no document?" is one query,
     not a full-corpus scan — and carries the probe's own patterns forward as the evidence
     for why, rather than restating a guess.
@@ -266,13 +267,16 @@ def _record_if_yielded_nothing(session: Session, node: Document) -> None:
     if children:
         return
 
-    structured = dict(node.structured_content or {})
-    structured["yield"] = {
-        "documents": 0,
-        "reason": "no content and no children when the node settled",
-        "matched": (structured.get("matched") or {}).get("patterns"),
-    }
-    node.structured_content = structured
+    evidence = EvidenceRepository(session)
+    evidence.write(
+        node.id,
+        "yield",
+        {
+            "documents": 0,
+            "reason": "no content and no children when the node settled",
+            "matched": evidence.read(node.id, "matched.patterns") or None,
+        },
+    )
 
 
 def enqueue_batch(

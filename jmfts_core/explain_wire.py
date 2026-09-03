@@ -34,6 +34,7 @@ def task_response(task: ExplainedTask) -> ExplainedTaskResponse:
         if_condition_holds=task.if_condition_holds,
         reason=task.reason,
         write_mode=task.write_mode,
+        scope=task.scope,
         after=list(task.after),
         after_any=list(task.after_any),
         requires=list(task.requires),

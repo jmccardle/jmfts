@@ -27,6 +27,7 @@ from jmfts_client.contracts.document import ChunkRequest
 from jmfts_client.contracts.document import ChunkResponse
 from jmfts_client.contracts.document import DocumentCellsResponse
 from jmfts_client.contracts.document import DocumentCreate
+from jmfts_client.contracts.document import DocumentEvidenceResponse
 from jmfts_client.contracts.document import DocumentResponse
 from jmfts_client.contracts.document import DocumentTokensResponse
 from jmfts_client.contracts.document import DocumentUpdate
@@ -502,7 +503,6 @@ class _GeneratedVerbs(_VerbTransport):
         Raises on 404 (server: LookupError).
         Raises on 409 (server: NotASheetNode, SheetSourceUnavailable).
         Raises on 413 (server: TooManyCells).
-        Raises on 501 (server: OfficeStackNotInstalled).
         """
         return self._call(
             "GET",
@@ -510,6 +510,23 @@ class _GeneratedVerbs(_VerbTransport):
             path={"document_id": document_id},
             query={"ref": ref},
             response=DocumentCellsResponse,
+        )
+
+    def get_document_evidence(
+        self,
+        document_id: int,
+    ) -> DocumentEvidenceResponse:
+        """Everything the ingest pipeline knows about a document
+
+        ``GET /documents/{document_id}/evidence`` — DocumentService.get_document_evidence
+
+        Raises on 404 (server: LookupError).
+        """
+        return self._call(
+            "GET",
+            "/documents/{document_id}/evidence",
+            path={"document_id": document_id},
+            response=DocumentEvidenceResponse,
         )
 
     def get_document_tokens(
@@ -1163,7 +1180,7 @@ class _GeneratedVerbs(_VerbTransport):
     def list_registered_pipelines(
         self,
     ) -> list[PipelineInfo]:
-        """List all registered pipeline definitions
+        """List the entry points POST /ingest accepts
 
         ``GET /ingest/pipelines`` — IngestService.list_registered_pipelines
         """

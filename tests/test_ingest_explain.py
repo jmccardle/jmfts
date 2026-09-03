@@ -19,7 +19,12 @@ from fastapi.testclient import TestClient
 
 from jmfts_core.rest.main import app
 from jmfts_core.database import get_db
-from jmfts_core.ingest_options import ROLLUP_PARAMS, STRUCTURE_CHUNK_PARAMS
+from jmfts_core.ingest_options import (
+    FACTS_PARAMS,
+    ROLLUP_PARAMS,
+    STRUCTURE_CHUNK_PARAMS,
+    TASK_PARAM_DEFAULTS,
+)
 from jmfts_core.ingest_tasks import (
     DECLARED_STRUCTURE_PATTERN,
     DEFERRED_REASON,
@@ -113,60 +118,88 @@ def _by_task(plan) -> dict:
 # ---------------------------------------------------------------------------
 
 
+#: Every scope the table declares, derived rather than listed. `SPRINT_JOBS.md` Part 14:
+#: "no phase adds a second list of something the code already knows". A scope written here
+#: by hand would silently stop covering a row the day one was added at a new one.
+SCOPES = list(dict.fromkeys(row.scope for row in TASK_ROWS))
+
+
 class TestExplainAgreesWithThePlanner:
+    """`EXPLAIN` covers every scope; a plan covers one. The comparison is per scope.
+
+    Before Phase 3 there was one scope, so `explain_plan` could be held against a single
+    `plan_after_probe` call. A row can name its scope now, so the same claim — "EXPLAIN
+    describes the run that would actually happen" — is the same claim made once per node
+    kind the table plans for.
+    """
+
     @pytest.mark.parametrize("fmt,patterns", AGREEMENT_GRID)
     @pytest.mark.parametrize("options", OPTIONS_GRID)
     def test_explanation_matches_what_the_queue_would_do(self, fmt, patterns, options):
-        plan = plan_after_probe(fmt, patterns, options)
-        runnable, deferred = _split_by_handler(plan.eligible)
         explained = explain_plan(fmt, options, patterns)
         tasks = _by_task(explained)
+        at_scope = {task.task: task.scope for task in explained.tasks}
 
-        # Same tasks enqueued, in the same order — `enqueue_batch` resolves `after` by
-        # position, so an explanation that reordered them would describe a different run.
-        assert [
-            task.task
-            for task in explained.tasks
-            if task.outcome == OUTCOME_ENQUEUED and task.task != TASK_PROBE
-        ] == [spec.task_type for spec in runnable]
+        for scope in SCOPES:
+            plan = plan_after_probe(fmt, patterns, options, scope=scope)
+            runnable, deferred = _split_by_handler(plan.eligible)
 
-        # Same params on each. These are what `param_fingerprint` is taken over (6.1), so
-        # a plan that reported different ones would misdescribe re-ingest as well as ingest.
-        for spec in runnable:
-            assert tasks[spec.task_type].params == spec.params
-            assert tasks[spec.task_type].write_mode == spec.write_mode
+            # Same tasks enqueued, in the same order — `enqueue_batch` resolves `after` by
+            # position, so an explanation that reordered them would describe a different
+            # run. Filtered to this scope, because a batch is one node's tasks.
+            assert [
+                task.task
+                for task in explained.tasks
+                if task.outcome == OUTCOME_ENQUEUED
+                and task.task != TASK_PROBE
+                and at_scope[task.task] == str(scope)
+            ] == [spec.task_type for spec in runnable]
 
-        for entry in plan.skipped:
-            assert tasks[entry.task_type].outcome == OUTCOME_SKIPPED
-            assert tasks[entry.task_type].reason == entry.reason
+            # Same params on each. These are what `param_fingerprint` is taken over (6.1),
+            # so a plan reporting different ones would misdescribe re-ingest as well as
+            # ingest.
+            for spec in runnable:
+                assert tasks[spec.task_type].params == spec.params
+                assert tasks[spec.task_type].write_mode == spec.write_mode
 
-        for task_type, reason in deferred.items():
-            assert tasks[task_type].outcome == OUTCOME_DEFERRED
-            assert tasks[task_type].reason == reason
+            for entry in plan.skipped:
+                assert tasks[entry.task_type].outcome == OUTCOME_SKIPPED
+                assert tasks[entry.task_type].reason == entry.reason
 
-        for task_type, reason in plan.not_applicable.items():
-            task = tasks[task_type]
-            assert task.outcome in {OUTCOME_NOT_APPLICABLE, OUTCOME_IMPOSSIBLE}
-            if task.outcome == OUTCOME_NOT_APPLICABLE:
-                assert task.reason == reason
-            else:
-                # `impossible` refines not-applicable. Its reason is either the one the run
-                # records or the sentence naming the requirement no file of this format can
-                # satisfy — never a third wording invented by the explainer.
-                #
-                # Built from SENTINEL_REASONS rather than from a hand-written list, so a
-                # new sentinel arrives here with its own sentence instead of failing this
-                # test into a wider allowance.
-                sentinel_reasons = {builder(fmt) for builder in SENTINEL_REASONS.values()}
-                assert task.reason in {reason} | sentinel_reasons
+            for task_type, reason in deferred.items():
+                assert tasks[task_type].outcome == OUTCOME_DEFERRED
+                assert tasks[task_type].reason == reason
+
+            for task_type, reason in plan.not_applicable.items():
+                task = tasks[task_type]
+                assert task.outcome in {OUTCOME_NOT_APPLICABLE, OUTCOME_IMPOSSIBLE}
+                if task.outcome == OUTCOME_NOT_APPLICABLE:
+                    assert task.reason == reason
+                else:
+                    # `impossible` refines not-applicable. Its reason is either the one the
+                    # run records or the sentence naming the requirement no file of this
+                    # format can satisfy — never a third wording invented by the explainer.
+                    #
+                    # Built from SENTINEL_REASONS rather than from a hand-written list, so
+                    # a new sentinel arrives here with its own sentence instead of failing
+                    # this test into a wider allowance.
+                    sentinel_reasons = {builder(fmt) for builder in SENTINEL_REASONS.values()}
+                    assert task.reason in {reason} | sentinel_reasons
 
     @pytest.mark.parametrize("fmt,patterns", AGREEMENT_GRID)
     def test_no_task_is_explained_as_something_the_plan_did_not_decide(self, fmt, patterns):
-        """The converse direction: every claim in the explanation has a source in the plan."""
-        plan = plan_after_probe(fmt, patterns, None)
-        runnable, deferred = _split_by_handler(plan.eligible)
-        enqueued = {spec.task_type for spec in runnable}
-        skipped = {entry.task_type for entry in plan.skipped}
+        """The converse direction: every claim in the explanation has a source in a plan."""
+        enqueued: set[str] = set()
+        skipped: set[str] = set()
+        deferred: set[str] = set()
+        not_applicable: set[str] = set()
+        for scope in SCOPES:
+            plan = plan_after_probe(fmt, patterns, None, scope=scope)
+            runnable, scope_deferred = _split_by_handler(plan.eligible)
+            enqueued.update(spec.task_type for spec in runnable)
+            skipped.update(entry.task_type for entry in plan.skipped)
+            deferred.update(scope_deferred)
+            not_applicable.update(plan.not_applicable)
 
         for task in explain_plan(fmt, None, patterns).tasks:
             if task.task == TASK_PROBE:
@@ -179,7 +212,25 @@ class TestExplainAgreesWithThePlanner:
                 assert task.task in deferred
             else:
                 assert task.outcome in {OUTCOME_NOT_APPLICABLE, OUTCOME_IMPOSSIBLE}
-                assert task.task in plan.not_applicable
+                assert task.task in not_applicable
+
+    @pytest.mark.parametrize("fmt,patterns", AGREEMENT_GRID)
+    def test_every_row_is_reported_at_the_scope_it_declares(self, fmt, patterns):
+        """A plan that said `profile:sheet` runs on the file node would be a wrong answer
+        about how many times it runs — once, or once per sheet."""
+        declared = {row.task: str(row.scope) for row in TASK_ROWS}
+        for task in explain_plan(fmt, None, patterns).tasks:
+            if task.task == TASK_PROBE:
+                continue
+            assert task.scope == declared[task.task]
+
+    def test_a_plan_reports_only_its_own_scope(self):
+        """A scope's plan is a batch for one node. The sheet tier decided in the file
+        node's batch would be work enqueued onto a node that cannot hold it."""
+        patterns = {"has_sheets": True, "sheet_count": 3}
+        root = plan_after_probe("xlsx", patterns)
+        assert {spec.task_type for spec in root.eligible} == {"structure:sheets"}
+        assert "profile:sheet" not in root.not_applicable
 
     @pytest.mark.parametrize("fmt,patterns", AGREEMENT_GRID)
     @pytest.mark.parametrize("options", OPTIONS_GRID)
@@ -383,11 +434,13 @@ class TestSuppliedPatterns:
             "page_count",
             "outline_depth",
             "image_count",
-            "is_damaged",
         }
-        # And the keys that DO decide something are not in the list.
+        # And the keys that DO decide something are not in the list. `is_damaged` joined
+        # them in Phase 4 — `extract:text` forbids it — and its leaving this set is the
+        # readable form of a measurement becoming load-bearing.
         assert "has_text_layer" not in plan.patterns_ignored
         assert "has_outline" not in plan.patterns_ignored
+        assert "is_damaged" not in plan.patterns_ignored
 
     def test_a_misspelled_pattern_shows_up_as_a_key_that_decided_nothing(self):
         plan = explain_plan("pdf", patterns={"has_text_lyer": True})
@@ -411,11 +464,27 @@ class TestSuppliedPatterns:
 
 class TestOptions:
     def test_resolved_options_are_reported_in_full(self):
+        """Every group, whether or not this format's rows read it. Compared against
+        `TASK_PARAM_DEFAULTS` rather than a list of groups written here: three of the six
+        arrived with Phase 3, and a hand-written list would have reported the answer as
+        wrong rather than reporting the new groups."""
         plan = explain_plan("pdf")
         assert plan.options == {
-            "structure": dict(STRUCTURE_CHUNK_PARAMS),
-            "rollup": dict(ROLLUP_PARAMS),
+            group: dict(params) for group, params in TASK_PARAM_DEFAULTS.items()
         }
+        # Named explicitly too, because "it equals the defaults table" is a weaker claim
+        # than "these particular groups are what a caller can set".
+        assert set(plan.options) == {
+            "structure",
+            "rollup",
+            "facts",
+            "embed",
+            "sheet_profile",
+            "sheet_records",
+        }
+        assert plan.options["structure"] == dict(STRUCTURE_CHUNK_PARAMS)
+        assert plan.options["rollup"] == dict(ROLLUP_PARAMS)
+        assert plan.options["facts"] == dict(FACTS_PARAMS)
 
     def test_overrides_reach_the_structure_rows_params(self):
         plan = explain_plan(

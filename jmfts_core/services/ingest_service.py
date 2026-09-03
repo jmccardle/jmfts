@@ -1,28 +1,34 @@
 """IngestService — the general-ingest operations, transport-neutral.
 
-Logic lifted verbatim from ``api/routers/ingest.py`` so the behaviour is identical; the only
-structural change is that the domain→HTTP status mapping is now declared per-op in
-``@expose(errors=...)`` and keyed by EXCEPTION TYPE rather than by inline ``HTTPException``:
+Every entry point runs on the ingest queue (``SPRINT_JOBS.md`` Part 15). A request stores
+its content as a file node, or names a locator for a ``fetch:*`` task to store, and then
+drains THAT DOCUMENT'S tasks before returning the finished tree — the same tasks, handlers
+and settling walk the background worker runs, with the request acting as the worker.
 
-- ``ValueError``  → 400 — bad input: unknown pipeline ``usetype``, empty ``content``, an
-  ingest option that names an unknown group or key or carries a value of the wrong type
-  (``jmfts_core.ingest_options``), or a ``ValueError`` raised by ``execute_pipeline``.
-  Detail strings preserved verbatim. ``upload_file`` adds two of its own: a
+The domain→HTTP status mapping is declared per-op in ``@expose(errors=...)`` and keyed by
+EXCEPTION TYPE rather than by inline ``HTTPException``:
+
+- ``ValueError``  → 400 — bad input: an unknown ``usetype``, empty ``content``, an ingest
+  option that names an unknown group or key or carries a value of the wrong type
+  (``jmfts_core.ingest_options``), a ``pipeline_config`` (the deleted pipeline's stage
+  vocabulary), or an unknown source kind. ``upload_file`` adds two of its own: a
   ``private=True`` upload that also names a ``parent_id``, and one made by a caller with
   no principal to grant to (see the method).
 - ``LookupError`` → 404 — a supplied ``parent_id`` does not resolve to a document. Detail
   string ``"Parent document <id> not found"`` preserved verbatim.
 
-The service takes a ``Session`` and returns typed contracts — no FastAPI here. ``ingest_content``
-is a coroutine (it awaits ``execute_pipeline``), so the adapter emits an ``async def`` endpoint
-that runs it on the event loop; ``list_registered_pipelines`` is a plain ``def`` FastAPI runs in
-a threadpool.
+The service takes a ``Session`` and returns typed contracts — no FastAPI here.
+``ingest_content`` is a coroutine so that it can ``await asyncio.to_thread(...)``: the
+drain must not hold the event loop, and an in-process caller needs that as much as an HTTP
+one. The other operations are plain ``def`` and FastAPI runs them in a threadpool.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
+from uuid import uuid4
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -40,19 +46,25 @@ from jmfts_client.contracts.explain import (
     ProbeFailure,
 )
 from jmfts_core.explain_wire import analyzed_file_from_detection, explain_response_from_plan
-from jmfts_client.contracts.ingest import (
-    IngestRequest,
-    IngestResponse,
-    IngestStageResult,
-    PipelineInfo,
-    PipelineStageInfo,
-)
+from jmfts_client.contracts.ingest import IngestRequest, IngestResponse, PipelineInfo
 from jmfts_client.contracts.upload import FileUploadResponse, IngestFrontierResponse, UploadedFile
-from jmfts_core.ingest_options import resolve_options
+from jmfts_core.config import get_settings
+from jmfts_core.fetch_tasks import SOURCE_KIND_TASKS
+from jmfts_core.ingest_options import (
+    INGEST_USETYPES,
+    SOURCE_CONTENT,
+    Usetype,
+    get_usetype,
+    resolve_options,
+    resolve_usetype_options,
+)
+from jmfts_core.ingest_summary import summarize_tree
+from jmfts_core.ingest_worker import IngestWorker, borrowed_session
 from jmfts_core.ingest_tasks import (
     OPTIONS_KEY,
     PATTERNS_PROBED,
     PROBE_WRITE_MODE,
+    SOURCE_KEY,
     TASK_PROBE,
     explain_plan,
 )
@@ -65,12 +77,13 @@ from jmfts_core.models.document import (
     DocumentLink,
 )
 from jmfts_core.models.principal import AccessGrant
-from jmfts_core.pipeline import execute_pipeline, get_pipeline, list_pipelines
 from jmfts_core.principal_context import get_current_principal
 from jmfts_core.probe import detect_format, probe_patterns
 from jmfts_core.registry import expose, register_service
+from jmfts_core.rollup_tasks import IngestRollupPlanner
 from jmfts_core.repositories.blob import BlobRepository
 from jmfts_core.repositories.document import DocumentRepository
+from jmfts_core.repositories.evidence import EvidenceRepository, evidence_value
 from jmfts_core.repositories.task_queue import TaskQueueRepository
 from jmfts_core.task_errors import classify_exception
 
@@ -103,20 +116,31 @@ class IngestService:
         "/ingest/pipelines",
         response_model=list[PipelineInfo],
         tags=["ingest"],
-        summary="List all registered pipeline definitions",
+        summary="List the entry points POST /ingest accepts",
     )
     def list_registered_pipelines(self) -> list[PipelineInfo]:
-        """List all registered pipeline definitions."""
+        """The entry points ``POST /ingest``'s ``usetype`` accepts, and what each one does.
+
+        Answers from ``jmfts_core.ingest_options.INGEST_USETYPES`` — the one list of entry
+        points (``SPRINT_JOBS.md`` 15.4 S1). ``options`` is the resolved set a request
+        under that usetype runs with, resolved against the empty format because a usetype
+        names no format: ``probe`` measures one from the bytes, and a format profile that
+        deviates would apply on top of what is reported here.
+
+        A ``stages`` list was here until ``SPRINT_JOBS.md`` 15.4 S9. It carried the
+        deprecated pipeline's per-stage defaults, and there are no stages — there are
+        tasks, and which of them a document runs is decided from what ``probe`` measured.
+        ``POST /ingest/explain`` is the operation that answers that, and it answers it for
+        a format and a set of options rather than for a name.
+        """
         return [
             PipelineInfo(
-                name=p.name,
-                description=p.description,
-                stages=[
-                    PipelineStageInfo(name=name, enabled=cfg.enabled, params=cfg.params)
-                    for name, cfg in p.default_stages.items()
-                ],
+                name=name,
+                description=usetype.description,
+                source=usetype.source,
+                options=resolve_usetype_options(name, ""),
             )
-            for p in list_pipelines()
+            for name, usetype in INGEST_USETYPES.items()
         ]
 
     @expose(
@@ -131,24 +155,38 @@ class IngestService:
         self,
         request: IngestRequest,
     ) -> IngestResponse:
-        """Ingest content through a named pipeline.
+        """Ingest content through a named entry point, and return the finished tree.
 
-        The ``usetype`` selects which pipeline to run.  Use
-        ``GET /ingest/pipelines`` to see available pipelines and their
-        default stage configurations.
+        The ``usetype`` selects the entry point. ``GET /ingest/pipelines`` lists them, and
+        says for each one where its content comes from and what options it resolves to.
 
-        Optionally override stage settings via ``pipeline_config``::
+        **Synchronous, and staying that way** (``SPRINT_JOBS.md`` 15.2 decision 1). The
+        content becomes a file node with stored bytes — fetched first, when the usetype
+        names a locator rather than a document — and this request then drains THAT
+        DOCUMENT'S tasks before returning. Same tasks, same handlers, same settling walk as
+        the background worker, with the request acting as the worker. The wire does not
+        move; the work does.
 
-            {
-                "summarize": false,
-                "chunk": {"strategy": "paragraph", "max_tokens": 300}
-            }
+        Override the ingest options with ``options``::
+
+            {"structure": {"chunk_strategy": "paragraph", "max_tokens": 300}}
+
+        ``pipeline_config`` was the deprecated pipeline's stage vocabulary and is REFUSED.
+        There is no translation between the two — path A's ``summarize`` stage was RAPTOR
+        clustering and the queue's is what gives a container its vectors — so accepting one
+        and doing something else would be the swallowed failure this codebase does not
+        ship. The 400 names the field to use instead.
+
+        ``llm_model`` still works and sets ``rollup.llm_model`` and ``facts.llm_model``.
         """
         db = self.session
 
-        # Validate pipeline exists
-        if get_pipeline(request.usetype) is None:
-            available = [p.name for p in list_pipelines()]
+        # The entry point exists. Asked of INGEST_USETYPES rather than of the deprecated
+        # pipeline registry, because that table is what `GET /ingest/pipelines` answers
+        # from and the two lists a caller is told about must be the same list.
+        usetype = get_usetype(request.usetype)
+        if usetype is None:
+            available = list(INGEST_USETYPES)
             raise ValueError(
                 f"Unknown pipeline usetype: {request.usetype!r}. Available: {available}"
             )
@@ -163,38 +201,138 @@ class IngestService:
             if not repo.get(request.parent_id):
                 raise LookupError(f"Parent document {request.parent_id} not found")
 
-        result = await execute_pipeline(
-            session=db,
-            content=request.content,
-            usetype=request.usetype,
-            title=request.title,
-            parent_id=request.parent_id,
-            pipeline_config=request.pipeline_config,
-            llm_model=request.llm_model,
-        )
+        # OFF THE EVENT LOOP, and this is not an optimisation. Task handlers are
+        # synchronous by contract, and the ones that call an LLM reach
+        # `llm_client.complete_sync`, which owns an `asyncio.run` for the duration of one
+        # call and REFUSES to run in a thread that already has a loop. It is also a drain
+        # that can last minutes, and holding the loop for that would stall every other
+        # request in the process.
+        #
+        # The method stays `async def` so that `await asyncio.to_thread(...)` is what puts
+        # it there. A plain `def` would give the same threadpool from FastAPI and would
+        # NOT give it to an in-process caller, of which the test suite is one.
+        return await asyncio.to_thread(self._ingest_through_the_queue, request, usetype)
 
-        db.commit()
+    def _ingest_through_the_queue(self, request: IngestRequest, usetype: Usetype) -> IngestResponse:
+        """One content string, stored, queued, drained here, and reported. 15.4 S5.
+
+        Four steps, and only the third is new machinery:
+
+        1. :meth:`store_text_as_file` writes the bytes, the ``file`` block and the ``probe``
+           row — the same function ``POST /ingest/file`` uses, so the node is
+           indistinguishable from an upload of the same text. A usetype whose ``source`` is
+           a locator goes through :meth:`store_source_as_file` instead, and the bytes
+           arrive one task later.
+        2. If those bytes were already here, nothing is drained. The tree is finished
+           already, by whoever uploaded it first, and re-running it is 6.1's re-ingest.
+        3. :meth:`~jmfts_core.ingest_worker.IngestWorker.drain_document` runs this
+           document's tasks to quiet, on this request's session.
+        4. :func:`~jmfts_core.ingest_summary.summarize_tree` reads the counts back.
+
+        **A plain ``def``, run in a thread.** Nothing on this path awaits anything — the
+        queue's handlers are synchronous by contract and the drain is a loop — so the
+        caller hands it to ``asyncio.to_thread``. See there for why a loop in this thread
+        would break the handlers that call an LLM.
+
+        WHAT MOVES, that a caller can see. The root node's ``usetype`` is ``file``, not
+        ``raw`` / ``markdown`` / ``transcript`` — it is a file node holding stored bytes,
+        which is what it now really is; the response's ``usetype`` field still reports what
+        was asked for. Deduplication is by sha256 across everything the caller can read
+        rather than by content hash under the same parent, so re-sending the same text
+        under a different parent links rather than copies. And the same bytes sent with
+        DIFFERENT options is a 400 rather than a silent hit, which is
+        :meth:`_place_existing_file`'s rule and spec 6.1's.
+        """
+        if request.pipeline_config is not None:
+            raise ValueError(
+                f"usetype {request.usetype!r} runs on the ingest queue, which takes "
+                "`options` (ingest option groups, e.g. {'structure': {'max_tokens': 300}}) "
+                "rather than `pipeline_config` (stage names). The two are not "
+                "translatable: the queue has no `summarize` stage to switch off, its "
+                "`summarize` task is what gives a container node its vectors."
+            )
+
+        overrides = dict(request.options or {})
+        if request.llm_model:
+            # The one field of the old vocabulary that maps cleanly, because it names the
+            # same thing in both: which model answers. Its own description says
+            # "summarization and extraction", so it sets BOTH groups — they are separate
+            # options because summarizing and extracting are separate tasks a deployment
+            # may route differently, and this field predates that split. Merged rather than
+            # assigned, so a caller who set `options.rollup` keeps the rest of that group.
+            for group in ("rollup", "facts"):
+                merged = dict(overrides.get(group) or {})
+                merged["llm_model"] = request.llm_model
+                overrides[group] = merged
+
+        resolved = resolve_usetype_options(request.usetype, "", overrides)
+
+        if usetype.source == SOURCE_CONTENT:
+            word_count = len(request.content.split())
+            # Path A's default title, preserved exactly: the response carries a `title` and
+            # a caller who did not send one got this string. It is also the file node's
+            # filename, which needs no extension — see `store_text_as_file`.
+            title = request.title or f"{request.usetype.capitalize()} ({word_count} words)"
+            stored = self.store_text_as_file(
+                request.content,
+                filename=title,
+                parent_id=request.parent_id,
+                options=resolved,
+            )
+        else:
+            # `content` is a locator for these — the usetype table says which kind, and the
+            # kind selects the fetch task. The document does not exist yet and this request
+            # will wait for it, exactly as it waited for path A's inline fetch; what is
+            # different is that a flaky server is now a retry with a backoff and an entry
+            # in the attempt log rather than a 400 with no record (15.2 decision 4).
+            stored = self.store_source_as_file(
+                usetype.source,
+                request.content,
+                title=request.title,
+                parent_id=request.parent_id,
+                options=resolved,
+            )
+
+        if not stored.was_existing:
+            worker = IngestWorker(
+                # Unique per request. `requeue_stale_claims` is scoped to a worker's own id
+                # and runs at ITS startup, so a shared id would let a restarting appliance
+                # fail a task an in-flight request is running. A request that dies holding
+                # a task is recovered by the lease reaper instead, which is what that
+                # mechanism is for.
+                worker_id=f"inline-ingest-{uuid4().hex[:12]}",
+                session_factory=lambda: borrowed_session(self.session),
+                planner=IngestRollupPlanner(),
+            )
+            worker.drain_document(
+                stored.document_id,
+                timeout_seconds=get_settings().ingest_sync_timeout_seconds,
+            )
+
+        # The drain committed several times through the borrowed session, so this session's
+        # identity map holds rows from before the tasks ran.
+        self.session.expire_all()
+        summary = summarize_tree(self.session, stored.document_id)
+        if summary is None:
+            raise RuntimeError(
+                f"document {stored.document_id} was ingested and then could not be read "
+                "back; the tree it describes is gone"
+            )
 
         return IngestResponse(
-            source_document_id=result.source_document_id,
-            title=result.title,
+            source_document_id=stored.document_id,
+            title=summary.title,
             usetype=request.usetype,
-            message_count=result.message_count,
-            segment_count=result.segment_count,
-            summary_count=result.summary_count,
-            triple_count=result.triple_count,
-            tree_depth=result.tree_depth,
-            stages=[
-                IngestStageResult(
-                    stage=s.stage,
-                    status=s.status,
-                    detail=s.detail,
-                    error=s.error,
-                )
-                for s in result.stages
-            ],
-            was_existing=result.was_existing,
-            existing_document_id=result.existing_document_id,
+            message_count=summary.message_count,
+            segment_count=summary.segment_count,
+            summary_count=summary.summary_count,
+            triple_count=summary.triple_count,
+            tree_depth=summary.tree_depth,
+            stages=summary.stages,
+            was_existing=stored.was_existing,
+            # Set only on a hit, matching path A: on a fresh ingest there is no OTHER
+            # document to name, and `source_document_id` already carries the new one.
+            existing_document_id=stored.document_id if stored.was_existing else None,
         )
 
     @expose(
@@ -346,8 +484,204 @@ class IngestService:
             if not DocumentRepository(db).get(parent_id):
                 raise LookupError(f"Parent document {parent_id} not found")
 
+        return self._store_file(
+            data,
+            filename=filename,
+            declared_mime=(file.content_type or "").strip() or None,
+            parent_id=parent_id,
+            options=options,
+            private=private,
+            principal_id=principal.id if private else None,
+        )
+
+    def store_text_as_file(
+        self,
+        content: str,
+        *,
+        filename: str,
+        parent_id: Optional[int] = None,
+        options: Optional[dict] = None,
+    ) -> FileUploadResponse:
+        """A content STRING becomes a file node holding its bytes. ``SPRINT_JOBS.md`` 15.4 S2.
+
+        The one thing path A had that path B did not: an entry point that takes text rather
+        than an upload. ``POST /ingest`` sends a JSON string; the queue starts from stored
+        bytes and a ``probe`` row. This is the join, and it is deliberately a re-encoding
+        rather than a second ingest path — the string is UTF-8 encoded, stored as a blob
+        exactly as an upload would be, and probed by the same task. Nothing downstream can
+        tell the two apart, which is the property that makes it safe for S5 to move callers.
+
+        **The filename carries no extension and does not need one.** ``detect_format``
+        reads the extension only for bytes nothing else recognised, and text that came from
+        a ``str`` is UTF-8 by construction — ``_sniff_text`` reports ``text`` from the bytes.
+        A caller who sends a markdown document gets ``format=text`` with ``has_headings``
+        measured, which is exactly what uploading the same file as ``.md`` gets, and Part
+        4's table picks the declared rung from the measurement either way.
+
+        The one input this cannot characterise is a string containing ``U+0000``: JSON
+        permits it, ``_sniff_text`` rejects it as the binary marker it is, and with no
+        extension to fall back on the format comes out ``unknown``. That is reported rather
+        than repaired — the plan says which rows were not applicable and why — because a
+        NUL-bearing string is not text and pretending otherwise is what would hide it.
+
+        ``private`` is not a parameter. Path A has no privacy flag, so a text ingest lands
+        the way it always has: readable, or governed by the parent it was given.
+        """
+        return self._store_file(
+            content.encode("utf-8"),
+            filename=filename,
+            # A claim, and a true one — this really is what the caller sent. Detection
+            # still reads the bytes first, so the claim decides nothing except what the
+            # stored object is served back as when the bytes are unrecognisable.
+            declared_mime="text/plain; charset=utf-8",
+            parent_id=parent_id,
+            options=options,
+            private=False,
+            principal_id=None,
+        )
+
+    def store_source_as_file(
+        self,
+        kind: str,
+        locator: str,
+        *,
+        title: Optional[str] = None,
+        parent_id: Optional[int] = None,
+        options: Optional[dict] = None,
+    ) -> FileUploadResponse:
+        """A LOCATOR becomes a file node with no bytes yet, and a ``fetch:*`` task.
+
+        ``SPRINT_JOBS.md`` 15.4 S8. The mirror of :meth:`store_text_as_file`: that one has
+        the document and stores it, this one has only a name for it and queues the work of
+        getting it. Everything after the fetch is identical — the same ``probe``, the same
+        Part 4 batch, the same rungs — because ``fetch:*`` writes the same ``blob`` and
+        ``file`` block an upload writes and then enqueues ``probe`` itself.
+
+        **Deduplicated on the LOCATOR, not on the bytes.** An upload can compare sha256
+        because it holds the content; here the content is what has not been fetched yet, so
+        the only question this can ask is "have I already been asked for this URL", and
+        that is also the question a caller means by re-sending it. A hit returns the
+        existing node and enqueues nothing — the tree it grew is that node's, and rebuilding
+        it because the page may have changed is spec 6.1's re-ingest, which is not built.
+
+        **``settled`` is ``in_flight`` and there is no blob**, which is a state no upload
+        can produce. It is honest: the node exists because somebody asked for this document,
+        the bytes are on their way, and nothing may treat it as retrievable until they
+        arrive. A fetch that permanently fails leaves the node ``failed`` with the reason,
+        which is exactly what 2.1's ``failed`` is for and is more than path A left behind.
+
+        ``private`` is not a parameter, for the reason :meth:`store_text_as_file` gives.
+        """
+        db = self.session
+        task_type = SOURCE_KIND_TASKS.get(kind)
+        if task_type is None:
+            raise ValueError(
+                f"unknown source kind {kind!r}; the kinds this appliance fetches are "
+                f"{sorted(SOURCE_KIND_TASKS)}"
+            )
+        locator = (locator or "").strip()
+        if not locator:
+            raise ValueError(f"a {kind} source needs a locator; none was given")
+
+        if parent_id is not None and not DocumentRepository(db).get(parent_id):
+            raise LookupError(f"Parent document {parent_id} not found")
+
+        # Resolved against the EMPTY format, unlike an upload's — probe has not run and
+        # there are no bytes to detect one from. A format profile that deviates therefore
+        # cannot apply to a fetched document until 6.1 can re-resolve after the fetch;
+        # `INGEST_PROFILES` is empty today, so nothing is lost yet and this is where it
+        # would be noticed.
+        resolved_options = resolve_options("", options)
+
+        repo = DocumentRepository(db)
+        existing = repo.find_readable_file_by_source(kind, locator)
+        if existing is not None:
+            return self._describe_source_node(existing, already_fetched=True)
+
+        node = repo.create(
+            title=title or locator,
+            content=None,
+            parent_id=parent_id,
+            usetype=USETYPE_FILE,
+            structured_content={},
+            auto_embed=False,
+            embed_tokens=False,
+            settled=SETTLED_IN_FLIGHT,
+        )
+        EvidenceRepository(db).write_all(
+            node.id,
+            {
+                SOURCE_KEY: {"kind": kind, "locator": locator, "requested_at": _utc_now_iso()},
+                OPTIONS_KEY: resolved_options,
+            },
+        )
+        db.flush()
+
+        # No params, for the reason `probe` has none: the locator is on the node, and
+        # re-fetching the same locator is not a different attempt because a parameter
+        # changed. A re-fetch is 6.1's, and it is a different question.
+        TaskQueueRepository(db).enqueue(task_type, node.id, PROBE_WRITE_MODE, params={})
+        db.commit()
+
+        return self._describe_source_node(node, already_fetched=False)
+
+    def _describe_source_node(self, node: Document, *, already_fetched: bool) -> FileUploadResponse:
+        """A ``FileUploadResponse`` for a node whose bytes may not have arrived yet.
+
+        The `file` block is absent until ``fetch:*`` writes it, so the byte fields describe
+        an empty file rather than a wrong one. A caller polls the node, or
+        ``GET /ingest/file/{id}/frontier``, the same way they would after an upload.
+        """
+        evidence = EvidenceRepository(self.session).read_all(node.id)
+        block = evidence.get("file") or {}
+        return FileUploadResponse(
+            document_id=node.id,
+            filename=block.get("filename") or node.title,
+            usetype=USETYPE_FILE,
+            settled=node.settled,
+            byte_size=block.get("byte_size", 0),
+            content_hash=block.get("content_hash", ""),
+            blob_ref=block.get("blob_ref", ""),
+            declared_mime=block.get("declared_mime"),
+            detected_mime=block.get("detected_mime"),
+            detected_by=block.get("detected_by"),
+            attempts=[
+                AttemptRecord.model_validate(entry) for entry in evidence.get("attempts") or []
+            ],
+            was_existing=already_fetched,
+            linked_into_parent=False,
+        )
+
+    def _store_file(
+        self,
+        data: bytes,
+        *,
+        filename: str,
+        declared_mime: Optional[str],
+        parent_id: Optional[int],
+        options: Optional[dict],
+        private: bool,
+        principal_id: Optional[int],
+    ) -> FileUploadResponse:
+        """Detect, deduplicate, store, and enqueue ``probe``. The shared body of an ingest.
+
+        Split out of :meth:`upload_file` by ``SPRINT_JOBS.md`` 15.4 S2 so that
+        :meth:`store_text_as_file` reaches the SAME code rather than a parallel copy of it.
+        Everything above this point is per-entry-point validation; everything below is what
+        happens to bytes, and there is one of it.
+
+        ``principal_id`` is required when ``private`` and refused otherwise: the caller has
+        already established that a grantee exists, and passing the principal rather than
+        re-reading the contextvar keeps that check and its use in one place.
+        """
+        db = self.session
+        if private and principal_id is None:
+            raise ValueError(
+                "a private file needs a principal to grant to; the caller must establish "
+                "one before storing bytes"
+            )
+
         digest = hashlib.sha256(data).hexdigest()
-        declared_mime = (file.content_type or "").strip() or None
         detection = detect_format(data, filename=filename, declared_mime=declared_mime)
 
         # Resolved against the DETECTED format, before a node, a blob or a queue row
@@ -373,7 +707,7 @@ class IngestService:
         # not "has anybody" — because readable includes every ungoverned node and those are
         # readable by all. See `find_own_granted_file_by_blob_hash`.
         if private:
-            existing = repo.find_own_granted_file_by_blob_hash(digest, principal.id)
+            existing = repo.find_own_granted_file_by_blob_hash(digest, principal_id)
         else:
             existing = repo.find_readable_file_by_blob_hash(digest)
         if existing is not None:
@@ -414,7 +748,7 @@ class IngestService:
             # `write`, not `read`: the uploader owns what they uploaded. A read-only grant
             # on your own file means every correction, re-ingest or deletion needs the
             # appliance owner.
-            db.add(AccessGrant(document_id=node.id, principal_id=principal.id, level="write"))
+            db.add(AccessGrant(document_id=node.id, principal_id=principal_id, level="write"))
 
         blob = BlobRepository(db).store(
             node.id,
@@ -441,15 +775,14 @@ class IngestService:
             "detected_by": detection.detected_by,
             "uploaded_at": _utc_now_iso(),
         }
-        sc = dict(node.structured_content or {})
-        sc["file"] = file_block
         # The RESOLVED options, not the overrides, and always written even when empty. A
         # node that says `{"structure": {...}}` in full answers "what was this ingested
         # with?" without anyone having to know which version of the profile was in effect
         # at the time; a node that says `{}` states that its format has nothing to tune,
-        # which is a different and equally real answer from an absent key.
-        sc[OPTIONS_KEY] = resolved_options
-        node.structured_content = sc
+        # which is a different and equally real answer from an absent row.
+        EvidenceRepository(db).write_all(
+            node.id, {"file": file_block, OPTIONS_KEY: resolved_options}
+        )
         db.flush()
 
         # --- enqueue probe -----------------------------------------------------
@@ -479,7 +812,7 @@ class IngestService:
             detected_by=detection.detected_by,
             attempts=[
                 AttemptRecord.model_validate(entry)
-                for entry in (node.structured_content or {}).get("attempts") or []
+                for entry in DocumentRepository(db).attempt_log(node)
             ],
             was_existing=False,
             linked_into_parent=False,
@@ -524,7 +857,8 @@ class IngestService:
         and it is the kind of quiet wrong answer this codebase does not ship.
         """
         db = self.session
-        recorded_options = (node.structured_content or {}).get(OPTIONS_KEY) or {}
+        evidence = EvidenceRepository(db)
+        recorded_options = evidence.read(node.id, OPTIONS_KEY) or {}
         if recorded_options != resolved_options:
             raise ValueError(
                 f"Document {node.id} already holds these exact bytes, ingested with "
@@ -536,12 +870,12 @@ class IngestService:
         # received, and it is what this response IS; a `file` node carrying stored bytes
         # and no block is a corrupt record, and answering an upload out of the fields that
         # happen to be there would publish that corruption as a normal 201.
-        file_block = (node.structured_content or {}).get("file")
-        if not file_block:
+        file_block = evidence.read(node.id, "file")
+        if not isinstance(file_block, dict) or not file_block:
             raise RuntimeError(
                 f"Document {node.id} is a `file` node holding the uploaded bytes but has no "
-                "`file` block in structured_content (INGEST_SPEC.md 3.3); it cannot be "
-                "reported as the result of an upload"
+                "`file` evidence (INGEST_SPEC.md 3.3); it cannot be reported as the result "
+                "of an upload"
             )
 
         linked = False
@@ -587,7 +921,7 @@ class IngestService:
             # done with these bytes", and this request added nothing to it.
             attempts=[
                 AttemptRecord.model_validate(entry)
-                for entry in (node.structured_content or {}).get("attempts") or []
+                for entry in DocumentRepository(db).attempt_log(node)
             ],
             was_existing=True,
             linked_into_parent=linked,
@@ -765,7 +1099,7 @@ class IngestService:
         return AlreadyStored(
             document_id=existing.id,
             settled=existing.settled,
-            options=(existing.structured_content or {}).get(OPTIONS_KEY),
+            options=evidence_value(self.session, existing.id, OPTIONS_KEY),
         )
 
     @expose(

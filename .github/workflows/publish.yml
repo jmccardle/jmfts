@@ -86,9 +86,15 @@ jobs:
         # they drift. If a future distribution in this tree needs its own cadence, that
         # needs a tag namespace per distribution and a filter here — not a loosened check.
         #
-        # STILL UNBOOTSTRAPPED: neither name exists on PyPI, so neither has a trusted
-        # publisher yet and this workflow cannot be what first creates them. See the note
-        # at the top of this file, and docs/RELEASING.md step 5.
+        # BOOTSTRAPPED, AND NOT YET PUBLISHING. Both names exist on PyPI at 0.2.0, hand
+        # uploaded with an account-scoped token on 2026-08-22. That is what the note above
+        # asked for and it is not sufficient: a hand upload does not consume the *pending*
+        # publisher, which then matches nothing, because a pending row cannot authorise an
+        # upload to a project that already exists. The v0.2.1 tag push therefore built two
+        # clean distributions and failed the token exchange with
+        # `invalid-pending-publisher: valid token, but project already exists`. The fix is
+        # a publisher added under each PROJECT on PyPI and the pending row deleted —
+        # nothing in this file changes. docs/RELEASING.md step 5 has the exact form.
         dist:
           - name: jmfts
             # Directory holding the pyproject.toml to build. The repository root, for now.

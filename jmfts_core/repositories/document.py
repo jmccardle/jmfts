@@ -33,7 +33,7 @@ the partial retrieval indexes of Part 2.2 and left it there.
 import hashlib
 from datetime import datetime
 from typing import Optional, Any, Sequence
-from sqlalchemy import select, func, nullslast, text
+from sqlalchemy import and_, select, func, nullslast, text
 from sqlalchemy.orm import Session, joinedload
 
 from jmfts_core.access import (
@@ -51,30 +51,23 @@ from jmfts_core.models.document import (
     USETYPE_FILE,
 )
 from jmfts_core.models.document_blob import DocumentBlob
+from jmfts_core.models.document_evidence import DocumentEvidence
 from jmfts_core.models.principal import AccessGrant
 from jmfts_core.repositories.blob import BlobRepository
+from jmfts_core.repositories.evidence import EvidenceRepository
 from jmfts_core.models.token_embedding import TokenEmbedding
 from jmfts_core.embedder import get_embedder
 from jmfts_core.embedding import EmbeddingResult
 from jmfts_core.token_selection import importance_from_salience
 
-#: `structured_content` keys the ingest pipeline owns (INGEST_SPEC.md 3.3 and 3.4):
-#: `file` is what was received and never changes after upload, `options` is the resolved
-#: per-format configuration the upload was accepted with (11.2, and the input every
-#: scheduling decision after `probe` is a function of), `matched` is what probing found,
-#: `extraction` is what `extract:text` produced that a later task cannot recompute without
-#: re-parsing the bytes (page offsets, the declared outline), `structure` is the rung
-#: summary of the subtree that resulted, `yield` records that a file node settled holding
-#: nothing (:func:`jmfts_core.settling.settle_node`), and `attempts` is the append-only
-#: durable log. Everything else in the column belongs to the caller.
-#:
-#: `options` is owned rather than caller-writable for the same reason `file` is: `probe`
-#: reads it minutes after the request that set it returned, so a metadata PATCH between
-#: the two would silently change what the run does — and the attempt log would record
-#: parameters nobody asked for with nothing saying where they came from.
-INGEST_OWNED_KEYS = frozenset(
-    {"file", "options", "matched", "extraction", "structure", "yield", "attempts"}
-)
+# THERE IS NO `INGEST_OWNED_KEYS` ANY MORE, AND PHASE 2b IS WHY. `structured_content` used
+# to be two things stitched together — twenty-nine names the ingest pipeline owned, and
+# whatever a caller put beside them — so `update()` needed a gate that told a `PATCH` which
+# keys it could not name, and every key the gate did not know about was deleted by the next
+# metadata edit. `SPRINT_JOBS.md` 13.3 removed the gate by removing the overlap: the blocks
+# are rows in `document_evidence` now (migration 015), the column is wholly the caller's,
+# and there is nothing left for a gate to protect. `options` was the last hard case — probe
+# reads it minutes after the request that set it returned — and it is a row like the rest.
 
 
 def compute_content_hash(content: Optional[str]) -> Optional[str]:
@@ -161,11 +154,13 @@ class DocumentRepository:
         parent_id: Optional[int] = None,
         usetype: Optional[str] = None,
         structured_content: Optional[dict] = None,
+        evidence: Optional[dict] = None,
         auto_embed: bool = True,
         embed_tokens: bool = True,
         sequential: Optional[bool] = None,
         event_time: Optional[datetime] = None,
         settled: str = SETTLED_SETTLED,
+        produced_by: Optional[str] = None,
     ) -> Document:
         """
         Create a new document.
@@ -175,7 +170,13 @@ class DocumentRepository:
             content: Document content
             parent_id: Parent document ID (for tree structure)
             usetype: Document type classification
-            structured_content: Arbitrary JSON metadata
+            structured_content: Arbitrary JSON metadata, owned by the caller. Evidence
+                does not go here — see `evidence` below and `SPRINT_JOBS.md` 13.3.
+            evidence: `{registry name: value}` for a node born already knowing something,
+                written to `document_evidence` after the row exists. Two parameters rather
+                than one because they are two stores and one of them is checked: a name
+                that is not in `jmfts_core.evidence.REGISTRY` raises here, and a value of
+                the wrong type raises here. A dict literal in the column checked neither.
             auto_embed: Whether to generate embeddings automatically
             embed_tokens: Whether to generate token-level (maxsim) embeddings as
                 well as the document vector.  Late interaction operates on leaves,
@@ -205,6 +206,12 @@ class DocumentRepository:
                 than the end of it (an uploaded file whose tree has not been built yet,
                 a chunk whose children are still being written) — it is then excluded
                 from vector, full-text and MaxSim retrieval until something settles it.
+            produced_by: Which rule wrote this node (`SPRINT_JOBS.md` 4.2), which today is
+                the task type of the atom that did it. Default None, meaning ASSERTED — a
+                person, an importer, or an upload created it. That default is correct for
+                every caller outside the ingest handlers and is not a missing value: the
+                stamp is what makes a rule's frontier scope resolvable, and a node no rule
+                produced belongs to no rule's scope.
 
         Returns:
             Created document
@@ -249,6 +256,7 @@ class DocumentRepository:
             content=content,
             parent_id=parent_id,
             usetype=usetype,
+            produced_by=produced_by,
             structured_content=structured_content or {},
             path=path,
             position=position,
@@ -259,6 +267,12 @@ class DocumentRepository:
 
         self.session.add(doc)
         self.session.flush()  # Get the ID
+
+        # AFTER the flush, because an evidence row needs a document id to point at. The
+        # names and types are checked in EvidenceRepository.write, so a handler that
+        # misspells a block finds out here rather than at the read that comes up empty.
+        if evidence:
+            EvidenceRepository(self.session).write_all(doc.id, evidence)
 
         # NOTHING HAPPENS TO THE PARENT HERE. A settled node that gains a child keeps its
         # own `settled`; see the module note on where ingestion starts.
@@ -309,9 +323,29 @@ class DocumentRepository:
     ) -> Optional[Document]:
         """Update a document.
 
-        ``structured_content`` REPLACES the caller-owned part of the column and leaves the
-        ingest-owned blocks alone — see :data:`INGEST_OWNED_KEYS`. Naming one of those keys
-        in the update is a ``ValueError``.
+        ``structured_content`` REPLACES the column, and after Phase 2b that is the whole
+        story. It used to merge, because the column was two things stitched together and a
+        plain assignment deleted the ingest pipeline's half — a ``PATCH`` with
+        ``{"tag": "q3"}`` on a node under ingestion took the ``file`` block, the ``matched``
+        block and the entire append-only attempt log with it. Evidence is in
+        ``document_evidence`` now (13.3), nothing shares this column, and a whole-object
+        assignment is what a caller asking to replace their metadata meant.
+
+        **Writing ``content`` clears ``produced_by``** — ``SPRINT_JOBS.md`` 9.4, and it is
+        the recommendation that section makes rather than an addition to it. Idempotence
+        cannot tell "my output changed" from "somebody edited my output": both read as a
+        mismatch when a rule re-derives its children, so a re-run would silently overwrite
+        the edit. ``NULL`` already means asserted, so clearing the stamp takes the node out
+        of the rule's match set entirely — the re-run neither keeps it nor deletes it, and
+        the rule creates a sibling instead. The person's edit survives, the machine's output
+        is regenerated, and both are visible. What nothing yet does is reconcile the two;
+        9.4 records that as a review task rather than something the walk should decide.
+
+        Only ``content``, and not ``title``, ``usetype`` or ``structured_content``. What a
+        rule PRODUCED is the text of the node — a chunk's prose, a record's rendering — so
+        that is what a person can have overwritten. Retitling a produced chunk or tagging it
+        is metadata about a node the rule still owns, and clearing the stamp for that would
+        exclude it from every future pass over its own tree.
         """
         doc = self.get(document_id)
         if not doc:
@@ -322,51 +356,17 @@ class DocumentRepository:
             doc.title = title
         if content is not None:
             doc.content = content
+            doc.produced_by = None
         if usetype is not None:
             doc.usetype = usetype
         if structured_content is not None:
-            doc.structured_content = self._merge_structured_content(doc, structured_content)
+            doc.structured_content = structured_content
 
         # Re-embed if content changed
         if re_embed and content is not None and len(content) > 10:
             self.embed_document(doc.id, with_tokens=True)
 
         return doc
-
-    @staticmethod
-    def _merge_structured_content(doc: Document, incoming: dict) -> dict:
-        """The caller's ``structured_content``, with the ingest-owned blocks carried over.
-
-        A plain whole-object assignment was a data-loss bug the moment ingestion started
-        keeping state in this column. ``PATCH /documents/{id}`` with ``{"tag": "q3"}`` —
-        the ordinary way to add metadata — replaced the whole JSONB value, which on a node
-        under ingestion deleted the ``file`` block, the ``matched`` block and the entire
-        append-only attempt log. That is not a recoverable edit: ``run_probe`` then fails
-        the node permanently (no ``file`` block, a ``ValueError``, classified PERMANENT),
-        the uploaded bytes stay in a large object nothing points at, and spec 6.1's
-        ``(task, fingerprint)`` diff — which reads that log and nothing else — has lost the
-        history it decides from. Spec 5.6 and 6.2 call the log durable and append-only;
-        a metadata PATCH is not the thing that gets to end it.
-
-        So the reserved keys are carried over from the stored value rather than taken from
-        the caller, and a caller that NAMES one is refused instead of quietly ignored — an
-        edit that does not do what it says is the failure mode this refusal exists for. A
-        client adding a tag has no reason to name them; a client trying to rewrite the log
-        wants an error.
-        """
-        stored = dict(doc.structured_content or {})
-        offending = sorted(INGEST_OWNED_KEYS & set(incoming))
-        if offending:
-            raise ValueError(
-                f"structured_content keys {offending} are written by the ingest pipeline "
-                "(INGEST_SPEC.md 3.3/3.4) and cannot be set through a document update; "
-                "the attempt log in particular is append-only"
-            )
-        merged = dict(incoming)
-        for key in INGEST_OWNED_KEYS:
-            if key in stored:
-                merged[key] = stored[key]
-        return merged
 
     def delete(self, document_id: int) -> bool:
         """Delete a document and its children (cascade)"""
@@ -390,40 +390,48 @@ class DocumentRepository:
     # Ingest attempt log (INGEST_SPEC.md 3.4)
     # =========================================================================
 
+    def attempt_log(self, document: Document) -> list:
+        """The stored attempt log, as a list. Spec 3.4, `SPRINT_JOBS.md` evidence `attempts`.
+
+        A read of the `attempts` evidence row, which is where the log has lived since Phase
+        2b moved it out of `structured_content`. One place, so no caller has to know that.
+        """
+        found = EvidenceRepository(self.session).read(document.id, "attempts")
+        return list(found) if isinstance(found, list) else []
+
     def attempt_counts(self, document: Document) -> dict[str, int]:
         """How many attempts the stored log already holds, per task name.
 
         The `attempt` field of a new record is this count plus one. Callers that write
         several records for the same task in a single run keep incrementing their own
-        copy — re-reading here between records would return the same (unflushed) number
-        twice.
+        copy — re-reading here between records would return the same number twice, because
+        the records they have written are in the log and the ones they have not are not.
         """
         counts: dict[str, int] = {}
-        for entry in (document.structured_content or {}).get("attempts") or []:
+        for entry in self.attempt_log(document):
             if isinstance(entry, dict) and isinstance(entry.get("task"), str):
                 counts[entry["task"]] = counts.get(entry["task"], 0) + 1
         return counts
 
     def append_attempts(self, document: Document, records: Sequence[AttemptRecord]) -> None:
-        """Append attempt records to ``structured_content['attempts']``. Append-only.
+        """Append attempt records to the `attempts` evidence row. Append-only.
 
         Spec 3.4: a re-ingest ADDS to the log, it never rewrites it, because the log is
         what makes "this file was ingested before a vision model existed" a recoverable
         fact.
 
-        The reassignment is load-bearing. SQLAlchemy's JSONB change tracking only sees a
-        whole-attribute assignment: an in-place ``append`` to the list inside the existing
-        dict is never flushed, and a shallow ``dict()`` copy still shares that same list
-        object. Both the outer dict and the attempts list are rebuilt here. Every writer
-        of this key goes through this method so that discipline lives in one place.
+        ONE STATEMENT, AND IT NO LONGER READS FIRST. While the log was a key in
+        `structured_content` this had to read the list, copy it, append and reassign — and
+        the reassignment was load-bearing, because SQLAlchemy's JSONB change tracking only
+        sees a whole-attribute assignment. That whole discipline is gone: `value || records`
+        against one row is atomic, so two writers appending to one log cannot lose an entry
+        between the read and the write. 13.1's first fact, on the name it mattered most for.
         """
         if not records:
             return
-        current = document.structured_content or {}
-        existing = list(current.get("attempts") or [])
-        sc = dict(current)
-        sc["attempts"] = existing + [r.to_jsonb() for r in records]
-        document.structured_content = sc
+        EvidenceRepository(self.session).append(
+            document.id, "attempts", [r.to_jsonb() for r in records]
+        )
         self.session.flush()
 
     def upsert_attempt(self, document: Document, record: AttemptRecord) -> None:
@@ -445,10 +453,16 @@ class DocumentRepository:
         A record with no ``task_id`` (a stage of the synchronous pipeline, or a skip that
         never had a queue row) always appends; there is nothing to match it against.
 
-        The reassignment discipline is :meth:`append_attempts`', for the same reason.
+        THIS IS THE ONE READ-MODIFY-WRITE LEFT ON THE LOG, and it is not one this migration
+        could remove. :meth:`append_attempts` became a single ``value || records`` because
+        appending needs nothing from the stored list; replacing an entry needs to find it
+        first, and "the last non-terminal entry with this task_id" is not a predicate a
+        JSONB update expresses. It races only with another write to the SAME row — Phase 2b
+        removed the race with a write to a DIFFERENT name, which is the one 13.1 measured —
+        and the queue serialises a task's own writes.
         """
-        current = document.structured_content or {}
-        entries = list(current.get("attempts") or [])
+        repo = EvidenceRepository(self.session)
+        entries = self.attempt_log(document)
 
         target: Optional[int] = None
         if record.task_id is not None:
@@ -460,13 +474,11 @@ class DocumentRepository:
                     break
 
         if target is None:
-            entries.append(record.to_jsonb())
+            # Nothing to replace, so this is an ordinary append and takes the atomic path.
+            repo.append(document.id, "attempts", [record.to_jsonb()])
         else:
             entries[target] = record.to_jsonb()
-
-        sc = dict(current)
-        sc["attempts"] = entries
-        document.structured_content = sc
+            repo.write(document.id, "attempts", entries)
         self.session.flush()
 
     def find_by_hash_and_parent(
@@ -474,7 +486,7 @@ class DocumentRepository:
     ) -> Optional[Document]:
         """Idempotency lookup: existing document with the same content under the same parent.
 
-        Returns the most recently created match if any. Used by execute_pipeline
+        Returns the most recently created match if any. Used by ``create_document``
         to short-circuit re-ingestion of identical content.
 
         ONLY NODES WHOSE `content_hash` IS THE HASH OF THEIR `content`. `content_hash` used
@@ -553,6 +565,52 @@ class DocumentRepository:
             stmt = stmt.where(pred)
         # created_at ties are real — two uploads in one transaction share a clock reading —
         # so `id` is the tiebreak that makes "the most recent match" a single row.
+        stmt = stmt.order_by(Document.created_at.desc(), Document.id.desc()).limit(1)
+        return self.session.execute(stmt).scalars().first()
+
+    def find_readable_file_by_source(self, kind: str, locator: str) -> Optional[Document]:
+        """The newest `file` node fetched from this locator THAT THE CALLER MAY READ.
+
+        `SPRINT_JOBS.md` 15.4 S8's deduplication, and it asks a different question from
+        :meth:`find_readable_file_by_blob_hash` because it has to. That one compares the
+        bytes; here the bytes are precisely what has not been fetched yet, so the only
+        thing available to compare is the locator — which is also what a caller means when
+        they send the same URL twice.
+
+        NO BLOB JOIN, unlike the hash lookup, and the difference is deliberate. A source
+        node exists before its bytes do, so requiring a blob row would mean two concurrent
+        requests for one URL both create a node and both fetch it. Matching a node whose
+        fetch is still in flight is the right answer: the work is queued, and the second
+        caller wants the same document.
+
+        The RBAC predicate is the same correctness condition it is on the hash lookup, and
+        it is part of the query for the same reason — "no such source" and "a source you
+        may not see" must be one `None`.
+        """
+        if not kind or not locator:
+            return None
+        # A join, since Phase 2b: `source` is an evidence row, not a column key. The
+        # predicate is on `document_evidence.value` and `idx_document_evidence_name` is
+        # what answers it — 13.1 measured this shape of read at ten times the JSONB path
+        # over a full corpus, with the gap widening as the corpus grows.
+        stmt = (
+            select(Document)
+            .join(
+                DocumentEvidence,
+                and_(
+                    DocumentEvidence.document_id == Document.id,
+                    DocumentEvidence.name == "source",
+                ),
+            )
+            .where(
+                Document.usetype == USETYPE_FILE,
+                DocumentEvidence.value["kind"].astext == kind,
+                DocumentEvidence.value["locator"].astext == locator,
+            )
+        )
+        pred = readable_filter(self.session)
+        if pred is not None:
+            stmt = stmt.where(pred)
         stmt = stmt.order_by(Document.created_at.desc(), Document.id.desc()).limit(1)
         return self.session.execute(stmt).scalars().first()
 

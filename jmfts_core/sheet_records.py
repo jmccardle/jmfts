@@ -3,10 +3,10 @@
 8.4 defines the shape exactly and this module produces it and nothing else::
 
     content:  "Deal ID: D-4471. Account: Northwind Freight. Value: 128000."
-    structured_content.record: {"Deal ID": "D-4471",
-                                "Account": "Northwind Freight",
-                                "Value": 128000}
-    structured_content.row_index: 47
+    evidence `record`:    {"Deal ID": "D-4471",
+                           "Account": "Northwind Freight",
+                           "Value": 128000}
+    evidence `row_index`: 47
 
 ``content`` is labelled prose rather than JSON because ``content`` is what gets embedded,
 and braces, quotes and colons carry no meaning for the model while consuming tokens.
@@ -39,10 +39,8 @@ from typing import Optional, Sequence
 
 from jmfts_core.office.cells import RowCells, SheetRows
 
-#: The usetype 8.4's ``records`` shape gives each row node. An open string like every
-#: usetype (spec Part 9). ``record`` and not ``row``: what the node holds is one instance of
-#: whatever the sheet is a table of, and its row NUMBER is a fact about where it was found.
-USETYPE_RECORD = "record"
+# The usetype 8.4's `records` shape gives each row node is `USETYPE_RECORD`, and it is
+# DEFINED on the model with every other ingest usetype. See `jmfts_core.models.document`.
 
 #: The name of the shape, as 8.4 names it, written onto the sheet node.
 SHAPE_RECORDS = "records"
@@ -176,7 +174,6 @@ __all__ = [
     "NO_HEADER_REASON",
     "SHAPE_BASIS",
     "SHAPE_RECORDS",
-    "USETYPE_RECORD",
     "HeaderDoesNotCoverTheRow",
     "Record",
     "build_records",

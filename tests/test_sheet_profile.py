@@ -45,7 +45,13 @@ from jmfts_core.ingest_tasks import (  # noqa: E402
     TASK_PROFILE_SHEET,
     TASK_STRUCTURE_SHEETS,
 )
-from jmfts_core.models.document import Document, SETTLED_SETTLED  # noqa: E402
+from jmfts_core.ingest_options import resolve_options  # noqa: E402
+from jmfts_core.models.document import (  # noqa: E402
+    Document,
+    SETTLED_SETTLED,
+    USETYPE_SHEET,
+    USETYPE_SUMMARY,
+)
 from jmfts_core.models.task_queue import WRITE_CHILDREN  # noqa: E402
 from jmfts_core.office.sheets import (  # noqa: E402
     TYPE_DATE,
@@ -67,16 +73,10 @@ from jmfts_core.sketch import (  # noqa: E402
     load_sketch,
 )
 from jmfts_core.sheet_profile import (  # noqa: E402
-    USETYPE_SUMMARY,
     build_profile_content,
-    sheet_structured_content,
+    sheet_evidence_block,
 )
-from jmfts_core.sheet_tasks import (  # noqa: E402
-    EXTRACT_SHEET_SPEC,
-    PROFILE_SHEET_SPEC,
-    USETYPE_SHEET,
-    run_profile_sheet,
-)
+from jmfts_core.sheet_tasks import run_profile_sheet  # noqa: E402
 from tests.conftest import drain_ingest_queue  # noqa: E402
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -171,11 +171,17 @@ def _children(session, node_id: int) -> list:
 
 
 class _ScopedTask:
-    """The two fields a handler reads off its queue row. See ``test_sheet_tasks.py``."""
+    """The two fields a handler reads off its queue row. See ``test_sheet_tasks.py``.
+
+    ``params`` is the RESOLVED ``sheet_profile`` group with the test's overrides on top.
+    Since Phase 3 the group is complete on every queue row `plan_frontier` writes, and the
+    handler reads ``params["sketch_columns"]`` rather than defaulting — so a stand-in row
+    carrying an empty dict would exercise a shape the queue never produces.
+    """
 
     def __init__(self, document_id: int, params: dict | None = None):
         self.scope_document_id = document_id
-        self.params: dict = params or {}
+        self.params: dict = {**resolve_options("xlsx")["sheet_profile"], **(params or {})}
 
 
 # ---------------------------------------------------------------------------
@@ -475,7 +481,7 @@ class TestMergedCellCount:
 
 
 def _block(measurement, rendered_tokens=120):
-    return sheet_structured_content(
+    return sheet_evidence_block(
         measurement,
         rendered_tokens=rendered_tokens,
         token_window=512,
@@ -743,32 +749,86 @@ class TestSketch:
 # ---------------------------------------------------------------------------
 
 
+def _row(task: str):
+    """The one `TASK_ROWS` entry for `task`. `_check_task_rows` guarantees there is one."""
+    return next(row for row in jmfts_core.ingest_tasks.TASK_ROWS if row.task == task)
+
+
 class TestSchedule:
-    def test_the_two_tasks_are_not_rows_of_part_4s_table(self):
-        """8.2's dependency is not a queue dependency in this codebase's terms. Both tasks
-        are scoped to a SHEET node, and `TASK_ROWS` is evaluated once per uploaded FILE
-        from probe's patterns, so neither can be a row there — the same reason `embed` is
-        not one."""
-        assert all(
-            row.task not in (TASK_PROFILE_SHEET, TASK_EXTRACT_SHEET)
-            for row in jmfts_core.ingest_tasks.TASK_ROWS
-        )
+    def test_the_two_tasks_are_rows_scoped_to_the_sheets_the_rung_produced(self):
+        """`SPRINT_JOBS.md` Phase 3. This class used to assert the OPPOSITE — that neither
+        task could be a row, because `TASK_ROWS` was evaluated once per uploaded file and
+        both are scoped to a sheet node. The second half is still true and the first half
+        was a fact about the table rather than about the tasks: Part 0 names it as the
+        shoehorning, and 4.1 gave a row a scope. 8.2's "depends on the declared rung" is
+        that scope."""
+        for task in (TASK_PROFILE_SHEET, TASK_EXTRACT_SHEET):
+            scope = _row(task).scope
+            assert scope.kind == jmfts_core.ingest_tasks.SCOPE_CHILDREN
+            assert scope.produced_by == (TASK_STRUCTURE_SHEETS,)
+            assert scope.usetypes == (USETYPE_SHEET,)
 
     def test_profile_declares_children_where_8_2_says_self(self):
         """A deliberate divergence, and the reason is that a write mode is a concurrency
         declaration the claim query acts on (5.3). 8.5 makes the profile a CHILD of the
         sheet node, so this task writes children; declaring `self` would tell the queue it
         is safe to run a children-writer beside it."""
-        assert PROFILE_SHEET_SPEC.write_mode == WRITE_CHILDREN
+        assert _row(TASK_PROFILE_SHEET).write_mode == WRITE_CHILDREN
 
     def test_extract_is_ordered_after_profile(self):
-        assert EXTRACT_SHEET_SPEC.after == (TASK_PROFILE_SHEET,)
+        """`after` and not a second scope: both rows are scoped to the same node, so this
+        is ordinary within-node ordering and resolves to a real `dependencies` id."""
+        assert _row(TASK_EXTRACT_SHEET).after == (TASK_PROFILE_SHEET,)
 
     def test_sketching_is_on_by_default_and_is_in_the_fingerprint(self):
         """In `params` rather than read from configuration so that it lands in the row's
         `param_fingerprint` (6.1): a re-ingest that turns sketching on is a different
-        request from the one that ran without it."""
-        assert PROFILE_SHEET_SPEC.params == {"sketch_columns": True}
+        request from the one that ran without it. Phase 3 is what made that claim TRUE —
+        the value came from a literal dict on a module constant, so no request could move
+        the fingerprint it was supposedly part of."""
+        assert _row(TASK_PROFILE_SHEET).params_key == "sheet_profile"
+        assert resolve_options("xlsx")["sheet_profile"] == {"sketch_columns": True}
+
+    def test_the_sheet_knobs_are_reachable_from_a_callers_options(self):
+        """Part 0's first measured consequence, closed. `max_rows`, `with_cell_notes` and
+        `sketch_columns` "are not reachable from any caller"; they are three options in two
+        groups now, and what reaches a queue row is what the caller asked for."""
+        resolved = resolve_options(
+            "xlsx",
+            {"sheet_records": {"max_rows": 500}, "sheet_profile": {"sketch_columns": False}},
+        )
+        assert resolved["sheet_records"]["max_rows"] == 500
+        assert resolved["sheet_records"]["with_cell_notes"] is True
+        assert resolved["sheet_profile"] == {"sketch_columns": False}
+
+    def test_max_rows_refuses_a_bool(self):
+        """Part 0's fourth measured consequence, closed. `int(True)` is 1, so `max_rows:
+        true` from a JSON caller would have written one record node for a whole sheet. It
+        was latent while nothing could feed the task anything; making the knob reachable is
+        what makes `_positive_int` load-bearing."""
+        with pytest.raises(ValueError, match="sheet_records.max_rows"):
+            resolve_options("xlsx", {"sheet_records": {"max_rows": True}})
+
+    def test_explain_no_longer_stops_at_the_sheet_list(self):
+        """Part 0's third measured consequence, closed. A `.xlsx` forecast used to end at
+        `structure:sheets`; both per-sheet rows are in it now, carrying the scope that says
+        they are one batch per sheet rather than two more tasks on the file."""
+        plan = jmfts_core.ingest_tasks.explain_plan(
+            "xlsx", patterns={"has_sheets": True, "sheet_count": 3}
+        )
+        rows = {task.task: task for task in plan.tasks}
+        assert rows[TASK_PROFILE_SHEET].outcome == jmfts_core.ingest_tasks.OUTCOME_ENQUEUED
+        assert rows[TASK_EXTRACT_SHEET].outcome == jmfts_core.ingest_tasks.OUTCOME_ENQUEUED
+        assert rows[TASK_PROFILE_SHEET].scope != rows[TASK_STRUCTURE_SHEETS].scope
+        assert rows[TASK_EXTRACT_SHEET].params["max_rows"] == 10_000
+
+    def test_a_format_with_no_sheet_list_reports_them_impossible(self):
+        """Not "the condition was false this time". A PDF names no worksheet list, so no
+        sheet node can exist and neither row can ever fire for one."""
+        plan = jmfts_core.ingest_tasks.explain_plan("pdf", patterns={"has_text_layer": True})
+        rows = {task.task: task for task in plan.tasks}
+        for task in (TASK_PROFILE_SHEET, TASK_EXTRACT_SHEET):
+            assert rows[task].outcome == jmfts_core.ingest_tasks.OUTCOME_IMPOSSIBLE
 
 
 # ---------------------------------------------------------------------------
@@ -792,26 +852,25 @@ class TestProfileSheetTask:
             assert len(summaries) == 1
             assert summaries[0].content
 
-    def test_the_sheet_node_records_the_profile_it_wrote(self, db_session, workbook_bytes):
+    def test_the_sheet_node_records_the_profile_it_wrote(
+        self, db_session, evidence, workbook_bytes
+    ):
         node = _ingest(db_session, workbook_bytes)
         sheet = _children(db_session, node.id)[0]
 
-        assert (
-            sheet.structured_content["sheet"]["profile_node_id"]
-            == _children(db_session, sheet.id)[0].id
-        )
+        assert evidence(sheet)["sheet"]["profile_node_id"] == _children(db_session, sheet.id)[0].id
 
-    def test_the_measurements_land_where_8_7_puts_them(self, db_session, workbook_bytes):
+    def test_the_measurements_land_where_8_7_puts_them(self, db_session, evidence, workbook_bytes):
         node = _ingest(db_session, workbook_bytes)
         sheet = _children(db_session, node.id)[0]
-        measurements = sheet.structured_content["sheet"]["measurements"]
+        measurements = evidence(sheet)["sheet"]["measurements"]
 
-        assert sheet.structured_content["sheet"]["name"] == "Pipeline"
+        assert evidence(sheet)["sheet"]["name"] == "Pipeline"
         assert (measurements["rows"], measurements["cols"]) == (5, 6)
         assert measurements["header_row"] is True
         assert measurements["rendered_tokens"] > 0
 
-    def test_the_profile_pass_itself_chooses_no_shape(self, db_session, workbook_bytes):
+    def test_the_profile_pass_itself_chooses_no_shape(self, db_session, evidence, workbook_bytes):
         """8.8 leaves 8.4's four thresholds unset and this pass invents none of them.
 
         This used to assert that no `shape` key reached the database at all. It does now:
@@ -825,7 +884,7 @@ class TestProfileSheetTask:
         for sheet in _children(db_session, node.id):
             attempt = next(
                 entry
-                for entry in sheet.structured_content["attempts"]
+                for entry in evidence(sheet)["attempts"]
                 if entry["task"] == TASK_PROFILE_SHEET
             )
             # 8.7 makes the rung a function of the shape, so a pass that chose no shape
@@ -833,14 +892,14 @@ class TestProfileSheetTask:
             assert attempt["rung"] is None
             assert "8.8" in attempt["detail"]["no_rung"]
 
-            decision = sheet.structured_content["sheet"]["shape_decision"]
+            decision = evidence(sheet)["sheet"]["shape_decision"]
             assert "8.8" in decision["reason"]
             # Present whatever the verdict came out as. What 6.2 asks for is that the
             # values the branch READS survive, so that moving a threshold is a query over
             # stored profiles rather than a re-ingest.
             assert (
                 decision["inputs"]["header_row"]
-                == sheet.structured_content["sheet"]["measurements"]["header_row"]
+                == evidence(sheet)["sheet"]["measurements"]["header_row"]
             )
             assert "fill_ratio" in decision["inputs"]
 
@@ -858,14 +917,12 @@ class TestProfileSheetTask:
         assert node.settled == SETTLED_SETTLED
 
     def test_the_attempt_records_what_it_measured_and_what_it_did_not(
-        self, db_session, workbook_bytes
+        self, db_session, evidence, workbook_bytes
     ):
         node = _ingest(db_session, workbook_bytes)
         sheet = _children(db_session, node.id)[0]
         attempt = next(
-            entry
-            for entry in sheet.structured_content["attempts"]
-            if entry["task"] == TASK_PROFILE_SHEET
+            entry for entry in evidence(sheet)["attempts"] if entry["task"] == TASK_PROFILE_SHEET
         )
 
         assert attempt["detail"]["sheet"] == "Pipeline"
@@ -881,7 +938,7 @@ class TestProfileSheetTask:
         assert attempt["rung"] is None
 
     def test_both_per_sheet_tasks_are_queued_now_that_both_have_handlers(
-        self, db_session, workbook_bytes
+        self, db_session, evidence, workbook_bytes
     ):
         """`_split_by_handler` decides this from what is registered, not from a list.
 
@@ -891,9 +948,7 @@ class TestProfileSheetTask:
         reported."""
         node = _ingest(db_session, workbook_bytes)
         attempt = next(
-            entry
-            for entry in node.structured_content["attempts"]
-            if entry["task"] == TASK_STRUCTURE_SHEETS
+            entry for entry in evidence(node)["attempts"] if entry["task"] == TASK_STRUCTURE_SHEETS
         )
 
         assert attempt["detail"]["queued_per_sheet"] == [TASK_PROFILE_SHEET, TASK_EXTRACT_SHEET]
@@ -915,7 +970,7 @@ class TestProfileSheetTask:
             content=None,
             parent_id=parent.id,
             usetype=USETYPE_SHEET,
-            structured_content={"sheet": {"name": "Pipeline", "index": 0, "state": "visible"}},
+            evidence={"sheet": {"name": "Pipeline", "index": 0, "state": "visible"}},
             auto_embed=False,
         )
         db_session.flush()

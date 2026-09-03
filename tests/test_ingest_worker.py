@@ -35,12 +35,15 @@ from jmfts_client.contracts.upload import UploadedFile
 from jmfts_core.database import get_db, get_session
 from jmfts_core.ingest_options import OPTION_CHECKS, STRUCTURE_CHUNK_PARAMS
 from jmfts_core.ingest_tasks import (
+    ROOT_SCOPE,
     SENTINEL_PATTERNS,
+    Option,
     TASK_CITATION,
     TASK_EMBED,
     TASK_EXTRACT_IMAGES,
     TASK_EXTRACT_TABLES,
     TASK_EXTRACT_TEXT,
+    TASK_INDEX_BM25,
     TASK_OCR,
     TASK_PROBE,
     TASK_ROWS,
@@ -62,16 +65,18 @@ from jmfts_core.models.document import (
     SETTLED_IN_FLIGHT,
     SETTLED_SETTLED,
 )
+from jmfts_core.atoms import ATOMS, COST_CPU
 from jmfts_core.models.task_queue import (
     TASK_COMPLETED,
     TASK_FAILED,
     TASK_PENDING,
     TASK_RUNNING,
+    WRITE_SELF,
 )
 from jmfts_core.repositories.document import DocumentRepository
 from jmfts_core.repositories.task_queue import TaskQueueRepository
 from jmfts_core.services.ingest_service import IngestService
-from jmfts_core.structure_tasks import USETYPE_CHUNK
+from jmfts_core.models.document import USETYPE_CHUNK
 from tests.conftest import AUTH_HEADERS, DB_READY, _borrowed_session, drain_ingest_queue
 
 # ---------------------------------------------------------------------------
@@ -124,13 +129,25 @@ def temp_handler():
     registered: list[str] = []
 
     def _register(task_type, handler):
-        register_task_handler(task_type)(handler)
+        # `register_task_handler` requires an atom declaration (SPRINT_JOBS.md Part 2), so
+        # a stand-in handler declares the emptiest true one: it reads nothing, writes
+        # nothing to the tree, and costs nothing. `ATOMS` is popped beside `TASK_HANDLERS`
+        # for the reason the docstring gives about the registry — a test declaration left
+        # behind would appear in the audit's derivation as an atom nothing ships.
+        register_task_handler(
+            task_type,
+            consumes=(),
+            produces=(),
+            write_mode=WRITE_SELF,
+            cost_class=COST_CPU,
+        )(handler)
         registered.append(task_type)
         return handler
 
     yield _register
     for task_type in registered:
         TASK_HANDLERS.pop(task_type, None)
+        ATOMS.pop(task_type, None)
 
 
 def _upload(session, data, filename="annual.pdf", mime="application/pdf", parent_id=None):
@@ -178,7 +195,12 @@ class TestEnqueueConditions:
         plan = plan_after_probe("pdf", {"has_text_layer": True, "has_outline": True})
 
         names = [spec.task_type for spec in plan.eligible]
-        assert names == [TASK_EXTRACT_TEXT, TASK_STRUCTURE_DECLARED, TASK_CITATION]
+        assert names == [
+            TASK_EXTRACT_TEXT,
+            TASK_STRUCTURE_DECLARED,
+            TASK_CITATION,
+            TASK_INDEX_BM25,
+        ]
         after = dict((s.task_type, s.after) for s in plan.eligible)
         # 5.5's within-node ordering: structure:declared depends on extract:text.
         assert after[TASK_STRUCTURE_DECLARED] == (TASK_EXTRACT_TEXT,)
@@ -186,6 +208,8 @@ class TestEnqueueConditions:
         # came out eligible, so the queue gates it on THAT row being completed. Naming both
         # rungs in `after` would name two rows that can never both fire.
         assert after[TASK_CITATION] == (TASK_STRUCTURE_DECLARED,)
+        # INGEST_SPEC.md 11.5's row reads the same `after_any` and collapses the same way.
+        assert after[TASK_INDEX_BM25] == (TASK_STRUCTURE_DECLARED,)
 
     def test_citation_follows_whichever_structure_rung_ran(self):
         inferred = plan_after_probe("pdf", {"has_text_layer": True})
@@ -284,12 +308,26 @@ class TestEnqueueConditions:
 
         assert plan.eligible == ()
         assert plan.skipped == ()
-        # EVERY row, taken from the table rather than typed out. The claim in the name is
-        # "everything", and a hand-written list quietly weakens it to "these seven" the day
-        # a row is added — which is exactly what `structure:sheets` did to the list that
-        # used to be here. Derived, the test keeps making the claim it says it makes: no
-        # row of Part 4's table may come out eligible from no patterns at all.
-        assert set(plan.not_applicable) == {row.task for row in TASK_ROWS}
+        # EVERY row AT THIS SCOPE, taken from the table rather than typed out. The claim in
+        # the name is "everything", and a hand-written list quietly weakens it to "these
+        # seven" the day a row is added — which is exactly what `structure:sheets` did to
+        # the list that used to be here. Derived, the test keeps making the claim it says
+        # it makes: no row may come out eligible from no patterns at all.
+        #
+        # SCOPED SINCE PHASE 3. A plan describes one node's batch, and the rows scoped to
+        # children are decided in the same evaluation but reported in the plan for the node
+        # they run on. `test_every_scopes_rows_are_decided` below is the whole-table claim.
+        assert set(plan.not_applicable) == {
+            row.task for row in TASK_ROWS if row.scope == ROOT_SCOPE
+        }
+
+    def test_no_scope_has_an_eligible_row_when_nothing_was_measured(self):
+        """The claim the test above makes about the file node, made about every scope: a
+        format probe could not look inside schedules nothing, anywhere in the tree."""
+        for scope in {row.scope for row in TASK_ROWS}:
+            plan = plan_after_probe("docx", {}, scope=scope)
+            assert plan.eligible == ()
+            assert set(plan.not_applicable) == {row.task for row in TASK_ROWS if row.scope == scope}
 
     def test_an_unknown_format_says_it_declares_no_structure_pattern(self):
         """The sentinel's asymmetry: unsatisfiable as a requirement, satisfied as a
@@ -328,13 +366,16 @@ class TestTaskTable:
     def test_every_row_is_decided_exactly_once(self):
         """Eligible, skipped and not-applicable partition the table — no row falls through
         the loop unrecorded, which is what makes the plan an answer rather than a sample."""
+        scopes = {row.scope for row in TASK_ROWS}
         for fmt, patterns in self.SAMPLES:
-            plan = plan_after_probe(fmt, patterns)
-            decided = (
-                [spec.task_type for spec in plan.eligible]
-                + [entry.task_type for entry in plan.skipped]
-                + list(plan.not_applicable)
-            )
+            # Over every scope, because that is the table. One scope's plan covers one
+            # node's batch, and the union of them is what has to partition the rows.
+            decided: list[str] = []
+            for scope in scopes:
+                plan = plan_after_probe(fmt, patterns, scope=scope)
+                decided += [spec.task_type for spec in plan.eligible]
+                decided += [entry.task_type for entry in plan.skipped]
+                decided += list(plan.not_applicable)
             assert sorted(decided) == sorted(row.task for row in TASK_ROWS), (fmt, patterns)
 
     def test_every_condition_is_decidable_from_the_patterns_alone(self):
@@ -344,13 +385,19 @@ class TestTaskTable:
         for row in TASK_ROWS:
             for dependency in row.after + row.after_any:
                 assert dependency in seen, f"{row.task} comes after a row below it"
-            for name in row.requires + row.forbids:
-                # Either a pattern probe writes, or a sentinel the planner resolves. An
-                # unregistered "@..." would be evaluated as a literal pattern name, which is
-                # always absent — a condition that silently never holds. Checked against
+            for producer in row.scope.produced_by:
+                assert producer in seen, f"{row.task} is scoped to a row below it"
+            for guard in row.requires + row.forbids:
+                # A term's left side is a pattern, a sentinel the planner resolves, or an
+                # option — the three inputs 11.2 names, and nothing else. An unregistered
+                # "@..." would be evaluated as a literal pattern name, which is always
+                # absent — a condition that silently never holds. Checked against
                 # SENTINEL_PATTERNS rather than against a list spelled here, so adding a
                 # sentinel to the planner is what makes it legal in a row.
-                assert name and (name in SENTINEL_PATTERNS or not name.startswith("@")), name
+                left = guard.left
+                if isinstance(left, Option):
+                    continue
+                assert left and (left in SENTINEL_PATTERNS or not left.startswith("@")), left
             seen.add(row.task)
         assert len(seen) == len(TASK_ROWS), "a task is declared twice"
 
@@ -383,7 +430,13 @@ class TestHandlerRegistry:
         temp_handler("test:collide", lambda session, task: TaskOutcome())
 
         with pytest.raises(ValueError, match="already has a handler"):
-            register_task_handler("test:collide")(lambda session, task: TaskOutcome())
+            register_task_handler(
+                "test:collide",
+                consumes=(),
+                produces=(),
+                write_mode=WRITE_SELF,
+                cost_class=COST_CPU,
+            )(lambda session, task: TaskOutcome())
 
 
 # ---------------------------------------------------------------------------
@@ -403,24 +456,27 @@ class TestUploadIsAsynchronous:
         # `pending` is the one status with nothing measured yet.
         assert probe.started_at is None and probe.finished_at is None
 
-    def test_probe_is_queued_and_not_run(self, db_session, pdf_bytes):
+    def test_probe_is_queued_and_not_run(self, db_session, evidence, pdf_bytes):
         response = _upload(db_session, pdf_bytes)
 
         node = DocumentRepository(db_session).get(response.document_id)
         assert node.settled == SETTLED_IN_FLIGHT
         # The decisive assertion: nothing opened the document.
-        assert "matched" not in (node.structured_content or {})
+        assert "matched" not in evidence(node)
 
         queued = TaskQueueRepository(db_session).unfinished_tasks_for(node.id)
         assert [(t.task_type, t.status, t.write_mode) for t in queued] == [
             (TASK_PROBE, TASK_PENDING, "self")
         ]
 
-    def test_the_text_pipeline_stays_synchronous(self, db_session):
-        """Spec 5.7: the file pipeline is the FIRST asynchronous one; the others are not.
+    def test_the_text_pipeline_still_returns_a_finished_tree(self, db_session, evidence):
+        """Spec 5.7 draws the line at the WIRE, not at the machinery behind it.
 
-        `POST /ingest` still runs to completion inside the call and hands back a finished,
-        settled tree with no queue rows behind it.
+        `POST /ingest` is still synchronous: it runs to completion inside the call and
+        hands back a settled tree with nothing left queued. What SPRINT_JOBS.md 15.4 S5
+        changed is that the work is now queue tasks, drained by the request itself
+        (`IngestWorker.drain_document`) rather than a stage list running inline. The
+        assertion below is the same one it always was, and that is the point.
         """
         result = _run_coroutine(
             IngestService(db_session).ingest_content(
@@ -428,7 +484,6 @@ class TestUploadIsAsynchronous:
                     content="# Heading\n\nA paragraph of prose for the markdown pipeline.",
                     usetype="markdown",
                     title="sync",
-                    pipeline_config={"summarize": False, "extract_facts": False},
                 )
             )
         )
@@ -436,6 +491,9 @@ class TestUploadIsAsynchronous:
         node = DocumentRepository(db_session).get(result.source_document_id)
         assert node.settled == SETTLED_SETTLED
         assert TaskQueueRepository(db_session).unfinished_tasks_for(node.id) == []
+        # And it really went through the queue: a stage list leaves no attempt log naming
+        # `probe`, and no node has an empty one.
+        assert evidence(node)["attempts"][0]["task"] == TASK_PROBE
 
 
 # ---------------------------------------------------------------------------
@@ -445,7 +503,7 @@ class TestUploadIsAsynchronous:
 
 class TestWorkerDrainsTheQueue:
     def test_draining_runs_the_whole_file_pipeline_and_settles_the_file_node(
-        self, db_session, pdf_bytes
+        self, db_session, evidence, pdf_bytes
     ):
         """probe, extract:text, the rung probe's patterns chose, citation, and an embed
         per chunk.
@@ -459,17 +517,25 @@ class TestWorkerDrainsTheQueue:
         ran = drain_ingest_queue(db_session)
 
         node = DocumentRepository(db_session).get(response.document_id)
-        assert node.structured_content["matched"]["patterns"]["has_outline"] is True
+        assert evidence(node)["matched"]["patterns"]["has_outline"] is True
         # The file node's OWN attempts are unchanged by the embed split: `embed` is scoped
         # to each chunk, so its attempt records land there.
-        assert [e["task"] for e in node.structured_content["attempts"]] == [
+        assert [e["task"] for e in evidence(node)["attempts"]] == [
             TASK_PROBE,
             TASK_EXTRACT_TEXT,
             TASK_STRUCTURE_DECLARED,
-            # OFFICE_SPEC.md Part 5. Last, and it has to be: its `subtree` reservation
-            # conflicts with every `embed` under this node, so it is the only task in the
-            # file's pipeline that cannot be claimed until the chunks have finished.
+            # These two are the file node's post-structuring pair, and they come out in
+            # `TASK_ROWS` order because the claim orders by `created_at` and probe enqueued
+            # the whole batch at once. OFFICE_SPEC.md Part 5 first, INGEST_SPEC.md 11.5
+            # second.
+            #
+            # Citation's `subtree` reservation conflicts with every `embed` under this
+            # node, so under a CONCURRENT fleet it is the last of the file's own tasks to
+            # be claimable. This drain is single-threaded, so no embed holds a claim at the
+            # moment citation is offered and it goes first — which is why the order here is
+            # the table's and not the reservation's.
             TASK_CITATION,
+            TASK_INDEX_BM25,
         ]
 
         chunks = (
@@ -482,9 +548,9 @@ class TestWorkerDrainsTheQueue:
             .all()
         )
         assert chunks, "the declared rung wrote no chunks"
-        assert ran == 4 + len(chunks)  # probe, extract:text, the rung, citation
+        assert ran == 5 + len(chunks)  # probe, extract:text, the rung, index:bm25, citation
         for chunk in chunks:
-            assert [e["task"] for e in chunk.structured_content["attempts"]] == [TASK_EMBED]
+            assert [e["task"] for e in evidence(chunk)["attempts"]] == [TASK_EMBED]
             assert chunk.embed is not None, "the embed task did not write a vector"
 
         # Every chunk's own task drained, so each settled, so the walk reached the file
@@ -493,7 +559,7 @@ class TestWorkerDrainsTheQueue:
         assert node.settled == SETTLED_SETTLED
 
     def test_the_pending_entry_becomes_the_outcome_rather_than_gaining_a_sibling(
-        self, db_session, pdf_bytes
+        self, db_session, evidence, pdf_bytes
     ):
         """Spec 3.4: one entry per task ATTEMPT. Pending → completed is one attempt."""
         response = _upload(db_session, pdf_bytes)
@@ -502,19 +568,21 @@ class TestWorkerDrainsTheQueue:
         drain_ingest_queue(db_session)
 
         node = DocumentRepository(db_session).get(response.document_id)
-        probes = [e for e in node.structured_content["attempts"] if e["task"] == TASK_PROBE]
+        probes = [e for e in evidence(node)["attempts"] if e["task"] == TASK_PROBE]
         assert len(probes) == 1
         assert probes[0]["status"] == "completed"
         assert probes[0]["task_id"] == task_id
         assert probes[0]["attempt"] == 1
 
-    def test_probe_records_what_it_decided_about_every_downstream_task(self, db_session, pdf_bytes):
+    def test_probe_records_what_it_decided_about_every_downstream_task(
+        self, db_session, evidence, pdf_bytes
+    ):
         """Part 4's decision is auditable from the node, not only from the code."""
         response = _upload(db_session, pdf_bytes)
         drain_ingest_queue(db_session)
 
         node = DocumentRepository(db_session).get(response.document_id)
-        detail = node.structured_content["attempts"][0]["detail"]
+        detail = evidence(node)["attempts"][0]["detail"]
         # What it enqueued, with the real queue ids. A SET: this dict came back out of a
         # `jsonb` column, and `jsonb` stores object keys sorted by length and then by bytes
         # rather than in insertion order, so the sequence here is Postgres's and not the
@@ -524,6 +592,7 @@ class TestWorkerDrainsTheQueue:
             TASK_EXTRACT_TEXT,
             TASK_STRUCTURE_DECLARED,
             TASK_CITATION,
+            TASK_INDEX_BM25,
         }
         # The ids are the queue's own, and citation's row must be gated on the rung that
         # wrote the chunks rather than merely enqueued after it.
@@ -535,7 +604,7 @@ class TestWorkerDrainsTheQueue:
         assert TASK_EXTRACT_IMAGES in detail["not_applicable"]
         assert TASK_STRUCTURE_INFERRED in detail["not_applicable"]
 
-    def test_a_scanned_pdf_writes_the_skipped_ocr_attempt(self, db_session, temp_handler):
+    def test_a_scanned_pdf_writes_the_skipped_ocr_attempt(self, db_session, evidence, temp_handler):
         """Part 4's one spec-mandated `skipped`, written to the node's durable log."""
         pymupdf = pytest.importorskip("pymupdf")
         doc = pymupdf.open()
@@ -550,8 +619,8 @@ class TestWorkerDrainsTheQueue:
         drain_ingest_queue(db_session)
 
         node = DocumentRepository(db_session).get(response.document_id)
-        assert node.structured_content["matched"]["patterns"]["is_scanned"] is True
-        ocr = [e for e in node.structured_content["attempts"] if e["task"] == TASK_OCR]
+        assert evidence(node)["matched"]["patterns"]["is_scanned"] is True
+        ocr = [e for e in evidence(node)["attempts"] if e["task"] == TASK_OCR]
         assert len(ocr) == 1
         assert ocr[0]["status"] == "skipped"
         # 3.4: a skip without a reason is an unexplained gap and is rejected outright.
@@ -584,7 +653,7 @@ class TestWorkerDrainsTheQueue:
         assert calls == ["first", "second"]
 
     def test_the_recorded_duration_is_the_work_and_not_the_transaction(
-        self, db_session, temp_handler
+        self, db_session, evidence, temp_handler
     ):
         """``started_at``/``completed_at`` must measure the handler, not two BEGINs.
 
@@ -614,9 +683,7 @@ class TestWorkerDrainsTheQueue:
         ).one()
         assert (row.completed_at - row.started_at).total_seconds() >= 0.25
 
-        attempt = (DocumentRepository(db_session).get(node.id).structured_content or {})[
-            "attempts"
-        ][-1]
+        attempt = evidence(node)["attempts"][-1]
         started = datetime.fromisoformat(attempt["started_at"])
         finished = datetime.fromisoformat(attempt["finished_at"])
         assert (finished - started).total_seconds() >= 0.25
@@ -668,7 +735,7 @@ class TestFailureClassification:
         # And the claim will not offer it again.
         assert drain_ingest_queue(db_session) == 0
 
-    def test_the_permanent_failure_is_in_the_nodes_durable_log(self, db_session):
+    def test_the_permanent_failure_is_in_the_nodes_durable_log(self, db_session, evidence):
         docs = DocumentRepository(db_session)
         node = _node(docs)
         db_session.flush()
@@ -676,7 +743,7 @@ class TestFailureClassification:
 
         drain_ingest_queue(db_session)
 
-        entries = docs.get(node.id).structured_content["attempts"]
+        entries = evidence(docs.get(node.id))["attempts"]
         assert len(entries) == 1
         assert entries[0]["status"] == "failed"
         assert entries[0]["error_type"] == "permanent"
@@ -745,7 +812,9 @@ class TestFailureClassification:
         assert succeeded.retry_count == 1
         assert attempts == [0, 1]
 
-    def test_the_retry_does_not_erase_the_failure_it_followed(self, db_session, temp_handler):
+    def test_the_retry_does_not_erase_the_failure_it_followed(
+        self, db_session, evidence, temp_handler
+    ):
         """Two attempts are two entries. Replacing by task_id alone would lose the first."""
         docs = DocumentRepository(db_session)
         node = _node(docs)
@@ -768,7 +837,7 @@ class TestFailureClassification:
         db_session.flush()
         drain_ingest_queue(db_session)
 
-        entries = docs.get(node.id).structured_content["attempts"]
+        entries = evidence(docs.get(node.id))["attempts"]
         assert [(e["status"], e["attempt"]) for e in entries] == [
             ("failed", 1),
             ("completed", 2),
@@ -821,7 +890,9 @@ class TestStaleClaimRecovery:
         assert TaskQueueRepository(db_session).get(task_id).status == TASK_COMPLETED
         assert docs.get(node.id).settled == SETTLED_SETTLED
 
-    def test_the_lost_run_is_in_the_durable_log_and_costs_a_retry(self, db_session, temp_handler):
+    def test_the_lost_run_is_in_the_durable_log_and_costs_a_retry(
+        self, db_session, evidence, temp_handler
+    ):
         """Recorded as a failure rather than silently flipped back to `pending`: spec 5.6
         wants the durable record, and the retry cap is what stops a task that kills the
         process from crash-looping the appliance forever."""
@@ -829,7 +900,7 @@ class TestStaleClaimRecovery:
 
         TaskQueueRepository(db_session).requeue_stale_claims("dead-worker")
 
-        entries = docs.get(node.id).structured_content["attempts"]
+        entries = evidence(docs.get(node.id))["attempts"]
         assert [e["status"] for e in entries] == ["failed"]
         assert "was holding this task" in entries[0]["error"]
         assert entries[0]["detail"]["requeued_from"] == "running"
@@ -1086,7 +1157,9 @@ class TestHeartbeatLease:
         assert tasks.requeue_expired_claims(90) == []
         assert tasks.get(task_id).status == TASK_RUNNING
 
-    def test_the_reaped_run_is_in_the_durable_log_and_costs_a_retry(self, db_session, temp_handler):
+    def test_the_reaped_run_is_in_the_durable_log_and_costs_a_retry(
+        self, db_session, evidence, temp_handler
+    ):
         """Through `fail()`, exactly as `requeue_stale_claims` goes: spec 5.6 wants the
         record, and the retry cap is what stops a task that reliably kills its worker from
         crash-looping the whole fleet."""
@@ -1095,7 +1168,7 @@ class TestHeartbeatLease:
 
         TaskQueueRepository(db_session).requeue_expired_claims(90)
 
-        entries = docs.get(node.id).structured_content["attempts"]
+        entries = evidence(docs.get(node.id))["attempts"]
         assert [e["status"] for e in entries] == ["failed"]
         assert "stopped reporting in" in entries[0]["error"]
         assert entries[0]["detail"]["reason"] == "lease expired"
@@ -1315,3 +1388,125 @@ class TestWorkerProcessShutdown:
 
         with pytest.raises(ValueError, match="at least"):
             build_worker(args)
+
+
+class TestScopedDrain:
+    """``SPRINT_JOBS.md`` 15.4 S3 — claiming inside one document's tree, and the loop that
+    knows when that tree is finished.
+
+    Driven with a stand-in handler on hand-built nodes rather than through an upload. What
+    is being tested is which ROWS a claim is willing to take, and a real pipeline would
+    make the assertion about chunk counts and embeddings instead.
+    """
+
+    @staticmethod
+    def _worker(session, worker_id="scoped-worker"):
+        from jmfts_core.settling import NO_ROLLUP
+        from tests.conftest import _borrowed_session
+
+        session.commit()
+        return IngestWorker(
+            worker_id=worker_id,
+            session_factory=lambda: _borrowed_session(session),
+            planner=NO_ROLLUP,
+        )
+
+    @staticmethod
+    def _two_trees(session, temp_handler):
+        """Document A with a child, document B on its own. One task on each of the three."""
+        ran: list[int] = []
+
+        def handler(sess, task):
+            ran.append(task.scope_document_id)
+            return TaskOutcome(detail={})
+
+        temp_handler("test:scoped", handler)
+
+        docs = DocumentRepository(session)
+        a = _node(docs, title="a")
+        a_child = _node(docs, parent=a, title="a-child")
+        b = _node(docs, title="b")
+        session.flush()
+
+        tasks = TaskQueueRepository(session)
+        for node in (a, a_child, b):
+            tasks.enqueue("test:scoped", node.id, WRITE_SELF, params={}, service_badge=None)
+        session.commit()
+        return a, a_child, b, ran
+
+    def test_a_scoped_claim_will_not_take_another_documents_task(self, db_session, temp_handler):
+        a, a_child, b, ran = self._two_trees(db_session, temp_handler)
+
+        worker = self._worker(db_session)
+        assert worker.drain_document(a.id, timeout_seconds=5) == 2
+
+        assert sorted(ran) == sorted([a.id, a_child.id])
+        # B's row is untouched — it was never eligible for this claim.
+        remaining = TaskQueueRepository(db_session).unfinished_tasks_for(b.id)
+        assert [t.status for t in remaining] == [TASK_PENDING]
+
+    def test_the_scope_reaches_descendants_by_path_not_just_direct_children(
+        self, db_session, temp_handler
+    ):
+        """The claim matches `path` containment, the same region `subtree` reserves, so a
+        grandchild created by a structuring task is inside the drain."""
+        a, a_child, b, ran = self._two_trees(db_session, temp_handler)
+        docs = DocumentRepository(db_session)
+        grandchild = _node(docs, parent=a_child, title="a-grandchild")
+        db_session.flush()
+        TaskQueueRepository(db_session).enqueue(
+            "test:scoped", grandchild.id, WRITE_SELF, params={}, service_badge=None
+        )
+
+        worker = self._worker(db_session)
+        assert worker.drain_document(a.id, timeout_seconds=5) == 3
+        assert grandchild.id in ran
+
+    def test_an_unscoped_drain_still_takes_everything(self, db_session, temp_handler):
+        """The parameter is opt-in; the background worker's behaviour does not move."""
+        a, a_child, b, ran = self._two_trees(db_session, temp_handler)
+
+        worker = self._worker(db_session)
+        assert worker.drain(max_tasks=100) == 3
+        assert sorted(ran) == sorted([a.id, a_child.id, b.id])
+
+    def test_an_empty_claim_is_not_read_as_completion(self, db_session, temp_handler):
+        """The failure S3 exists to prevent. Another worker holds a task under this root,
+        so the scoped claim comes back empty while the tree is nowhere near finished.
+        Returning zero here would report a half-built tree as complete."""
+        a, a_child, b, ran = self._two_trees(db_session, temp_handler)
+
+        held = TaskQueueRepository(db_session).claim_next(
+            "the-background-worker", root_document_id=a_child.id
+        )
+        assert held is not None and held.scope_document_id == a_child.id
+        db_session.commit()
+
+        worker = self._worker(db_session)
+        with pytest.raises(TimeoutError, match="still has 1 unfinished task"):
+            worker.drain_document(a.id, timeout_seconds=0.2, poll_seconds=0.01)
+
+        # It did not silently skip a's own task on the way to the timeout.
+        assert ran == [a.id]
+
+    def test_a_timeout_does_not_claim_to_have_finished(self, db_session, temp_handler):
+        """The queue row is still there and still owes work; nothing was marked complete
+        to make the count come out right."""
+        a, a_child, b, ran = self._two_trees(db_session, temp_handler)
+        TaskQueueRepository(db_session).claim_next(
+            "the-background-worker", root_document_id=a_child.id
+        )
+        db_session.commit()
+
+        worker = self._worker(db_session)
+        with pytest.raises(TimeoutError):
+            worker.drain_document(a.id, timeout_seconds=0.2, poll_seconds=0.01)
+
+        assert TaskQueueRepository(db_session).unfinished_task_count_under(a.id) == 1
+
+    def test_the_bound_raises_rather_than_returning_a_count(self, db_session, temp_handler):
+        a, a_child, b, ran = self._two_trees(db_session, temp_handler)
+
+        worker = self._worker(db_session)
+        with pytest.raises(RuntimeError, match="ran its bound of 1 tasks"):
+            worker.drain_document(a.id, timeout_seconds=5, max_tasks=1)

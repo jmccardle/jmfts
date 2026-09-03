@@ -302,6 +302,10 @@ _PROBED_FORMATS: dict[str, tuple[str, ...]] = {
     "heading_count": ("text",),
     "max_heading_level": ("text",),
     "has_markup": ("text",),
+    # SPRINT_JOBS.md 15.4 S7. A transcript is a `text` file whose first line decodes as a
+    # message object, and `text` is the only format it can be: a PDF of a chat log is a
+    # PDF, and nothing here reads turn boundaries out of one.
+    "is_conversation": ("text",),
     "char_count": ("text",),
     "line_count": ("text",),
     # --- the office probers (OFFICE_SPEC.md Part 11 step 4) -----------------------

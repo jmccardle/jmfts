@@ -1,18 +1,29 @@
-"""Tests for conversation ingestion endpoint (#59).
+"""Conversation ingestion (#59), on the ingest queue since ``SPRINT_JOBS.md`` 15.4 S7.
 
-Tier 1: Unit tests — parsers, no DB.
-Tier 2: Integration tests — real DB (savepoint rollback), mocked LLM + embedding.
+Tier 1: the parsers, no DB. Unchanged — they are still the one place that decides what a
+message is, and they are what ``probe``'s ``is_conversation`` and
+``structure:conversation`` both read through.
+
+Tier 2: the whole ingest, through ``ConversationService`` against a real database. It used
+to drive ``conversation_ingest.ingest_conversation`` directly with a mocked embedding
+service; that function is deleted, and the assertions moved onto what the queue produces:
+a ``file`` node holding the JSONL, one ``chunk`` per turn, and a settled tree.
+
+The embedding service is REAL here (CPU, tokenizer plus the cached model) rather than
+mocked. The mock existed to keep a stage list fast, and the queue's `embed` task is what
+writes vectors now — mocking `get_embedder` in one module while the task resolves its own
+would assert something no deployment does.
 """
 
 import asyncio
 from unittest.mock import patch
 
-import numpy as np
 import pytest
 
 from jmfts_core.conversation_ingest import (
     ParsedMessage,
-    ingest_conversation,
+    conversation_markdown,
+    messages_to_jsonl,
     parse_adjutant_jsonl,
     parse_message_array,
 )
@@ -109,12 +120,68 @@ class TestParseMessageArray:
 
 
 # ============================================================================
-# Tier 2 — Integration Tests (DB + mocked embedding/LLM)
+# Tier 1 — the two round trips
+# ============================================================================
+
+
+class TestMessagesToJsonl:
+    """``SPRINT_JOBS.md`` 15.4 S7 — the bytes a JSON array becomes."""
+
+    def test_it_round_trips_through_the_parser(self):
+        messages = [
+            ParsedMessage(role="user", content="Hello there", turn_index=0),
+            ParsedMessage(role="assistant", content="Hi yourself", turn_index=1),
+        ]
+
+        back = parse_adjutant_jsonl(messages_to_jsonl(messages))
+
+        assert [(m.role, m.content, m.turn_index) for m in back] == [
+            ("user", "Hello there", 0),
+            ("assistant", "Hi yourself", 1),
+        ]
+
+    def test_a_timestamp_survives_and_an_absent_one_is_not_invented(self):
+        messages = [
+            ParsedMessage(role="user", content="a", timestamp="2025-01-01T10:00:00Z"),
+            ParsedMessage(role="user", content="b"),
+        ]
+
+        lines = messages_to_jsonl(messages).splitlines()
+
+        assert "2025-01-01T10:00:00Z" in lines[0]
+        assert "timestamp" not in lines[1]
+
+    def test_the_result_is_what_probe_calls_a_conversation(self):
+        """The property the whole cut-over rests on: what this writes, probe recognises."""
+        from jmfts_core.probe import detect_format, probe_patterns
+
+        data = messages_to_jsonl(
+            [ParsedMessage(role="user", content="Hello", turn_index=0)]
+        ).encode("utf-8")
+
+        patterns, _ = probe_patterns(data, detect_format(data))
+        assert patterns["is_conversation"] is True
+
+    def test_non_ascii_content_is_not_escaped_away(self):
+        messages = [ParsedMessage(role="user", content="café ☕")]
+        assert "café ☕" in messages_to_jsonl(messages)
+
+
+class TestConversationMarkdown:
+    def test_it_is_the_readable_concatenation(self):
+        messages = [
+            ParsedMessage(role="user", content="Question?"),
+            ParsedMessage(role="assistant", content="Answer."),
+        ]
+        assert conversation_markdown(messages) == "[user]: Question?\n\n[assistant]: Answer."
+
+
+# ============================================================================
+# Tier 2 — Integration, through the queue
 # ============================================================================
 
 try:
-    from jmfts_core.database import get_session_factory
-    from jmfts_core.embedding import EmbeddingResult, TokenEmbeddingResult
+    from jmfts_core.database import get_session_factory  # noqa: F401
     from jmfts_core.repositories.document import DocumentRepository
 
     _DB_AVAILABLE = True
@@ -124,332 +191,237 @@ except Exception:
 requires_db = pytest.mark.skipif(not _DB_AVAILABLE, reason="Database not available")
 
 
-class MockEmbeddingService:
-    def __init__(self, dim=768):
-        self.dim = dim
+def _ingest(session, messages=None, jsonl=None, **kwargs):
+    """One conversation through the real service, which drains its own queue."""
+    from jmfts_client.contracts.conversation import ConversationIngestRequest
+    from jmfts_core.services.conversation_service import ConversationService
 
-    def embed_text(self, text, normalize=True, prefix=""):
-        rng = np.random.default_rng(hash(text) % (2**31))
-        vec = rng.standard_normal(self.dim).astype(np.float32)
-        vec /= np.linalg.norm(vec)
-        return vec
-
-    def embed_with_tokens(self, text, top_percent=0.35, token_selector=None, prefix=""):
-        doc_emb = self.embed_text(text)
-        words = (text.split() or ["empty"])[:3]
-        token_embs = []
-        for i, w in enumerate(words):
-            rng = np.random.default_rng(hash(f"{text}_{i}") % (2**31))
-            tok_emb = rng.standard_normal(self.dim).astype(np.float32)
-            tok_emb /= np.linalg.norm(tok_emb)
-            token_embs.append(
-                TokenEmbeddingResult(
-                    token_idx=i, token_text=w, importance_score=1.0 - i * 0.2, embedding=tok_emb
-                )
-            )
-        return EmbeddingResult(document_embedding=doc_emb, token_embeddings=token_embs)
-
-    def truncate_embedding(self, embedding, target_dim, normalize=True):
-        trunc = embedding[:target_dim].copy()
-        if normalize:
-            n = np.linalg.norm(trunc)
-            if n > 0:
-                trunc /= n
-        return trunc
+    return ConversationService(session).ingest_conversation(
+        ConversationIngestRequest(messages=messages, jsonl=jsonl, **kwargs)
+    )
 
 
-@pytest.fixture
-def db_session():
-    if not _DB_AVAILABLE:
-        pytest.skip("Database not available")
-    SessionLocal = get_session_factory()
-    session = SessionLocal()
-    session.begin_nested()
-    yield session
-    session.rollback()
-    session.close()
-
-
-@pytest.fixture
-def mock_embedding():
-    if not _DB_AVAILABLE:
-        pytest.skip("Database not available")
-    svc = MockEmbeddingService()
-    with patch("jmfts_core.repositories.document.get_embedder", return_value=svc):
-        yield svc
-
-
-async def _fake_llm_summarize(texts, settings, llm_model):
-    parts = []
-    for t in texts:
-        first = t.split(".")[0].strip()
-        if first:
-            parts.append(first)
-    return ". ".join(parts) + "." if parts else "Summary placeholder."
-
-
-async def _fake_llm_extract(text, settings, llm_model=None):
-    return [
-        {
-            "subject": "user",
-            "predicate": "discussed",
-            "object": "topic",
-            "confidence": 0.9,
-            "fact_type": "atemporal",
-        }
-    ]
-
-
-@pytest.fixture
-def mock_llm():
-    with patch("jmfts_core.summarization._llm_summarize", side_effect=_fake_llm_summarize):
-        with patch("jmfts_core.fact_extraction._llm_extract", side_effect=_fake_llm_extract):
-            yield
-
-
-# ---- Tests -----------------------------------------------------------------
+def _msgs(*pairs):
+    return [{"role": role, "content": content} for role, content in pairs]
 
 
 @requires_db
-class TestConversationIngestH1:
-    """H1: Basic conversation creates root + message chunks."""
-
-    def test_basic_ingest_no_llm(self, db_session, mock_embedding):
-        messages = [
-            ParsedMessage(role="user", content="Hello, how are you today?", turn_index=0),
-            ParsedMessage(role="assistant", content="I am doing well, thanks!", turn_index=1),
-            ParsedMessage(role="user", content="Can you help me with Python?", turn_index=2),
-        ]
-
-        result = _run(
-            ingest_conversation(
-                db_session, messages, title="Test Chat", summarize=False, extract_triples=False
-            )
+class TestTheTreeTheQueueBuilds:
+    def test_a_conversation_becomes_a_file_node_with_one_chunk_per_turn(self, db_session, evidence):
+        response = _ingest(
+            db_session,
+            messages=_msgs(
+                ("user", "Hello, how are you today?"),
+                ("assistant", "I am doing well, thanks!"),
+                ("user", "Can you help me with Python?"),
+            ),
+            title="Test Chat",
+            extract_facts=False,
         )
 
-        assert result.source_document_id > 0
-        assert result.message_count == 3
-        assert result.title == "Test Chat"
+        assert response.message_count == 3
+        assert response.title == "Test Chat"
 
-        # Check root document
         repo = DocumentRepository(db_session)
-        root = repo.get(result.source_document_id)
-        assert root.usetype == "conversation"
-        assert root.structured_content["participants"] == ["assistant", "user"]
-        assert root.structured_content["turn_count"] == 3
+        root = repo.get(response.source_document_id)
+        # WAS `usetype == "conversation"`. The root holds the stored JSONL now, which is
+        # what a `file` node is; what it holds is a transcript, and `matched.patterns`
+        # says so.
+        assert root.usetype == "file"
+        assert evidence(root)["matched"]["patterns"]["is_conversation"] is True
+        assert evidence(root)["structure"]["source"] == "conversation_turns"
+        assert root.settled == "settled"
 
-        # Check children
-        children = repo.get_children(result.source_document_id, depth=1, limit=100)
+        children = repo.get_children(root.id, depth=1, limit=100)
         assert len(children) == 3
         for child in children:
             assert child.usetype == "chunk"
-            assert "speaker" in child.structured_content
-            assert "turn_index" in child.structured_content
-            assert child.embed is not None
+            assert "speaker" in evidence(child)
+            assert "turn_index" in evidence(child)
+            assert child.embed is not None, "the embed task did not run"
 
-    def test_speaker_attribution_preserved(self, db_session, mock_embedding):
-        messages = [
-            ParsedMessage(
-                role="alice", content="First speaker message content here.", turn_index=0
-            ),
-            ParsedMessage(role="bob", content="Second speaker message content here.", turn_index=1),
-        ]
-        result = _run(
-            ingest_conversation(db_session, messages, summarize=False, extract_triples=False)
+    def test_the_file_node_reads_as_the_conversation_not_as_json(self, db_session, evidence):
+        """`extract:text`'s conversation reader. A search hit on the root shows the turns,
+        not the braces — which is also what the BM25 index would hold."""
+        response = _ingest(
+            db_session,
+            messages=_msgs(("user", "A question about foxes."), ("assistant", "An answer.")),
+            extract_facts=False,
         )
-        repo = DocumentRepository(db_session)
-        children = repo.get_children(result.source_document_id, depth=1, limit=100)
-        speakers = [c.structured_content["speaker"] for c in children]
+
+        root = DocumentRepository(db_session).get(response.source_document_id)
+        assert root.content == "[user]: A question about foxes.\n\n[assistant]: An answer."
+        assert evidence(root)["extraction"]["source"] == "conversation_transcript"
+
+    def test_speaker_attribution_preserved(self, db_session, evidence):
+        response = _ingest(
+            db_session,
+            messages=_msgs(
+                ("alice", "First speaker message content here."),
+                ("bob", "Second speaker message content here."),
+            ),
+            extract_facts=False,
+        )
+        children = DocumentRepository(db_session).get_children(
+            response.source_document_id, depth=1, limit=100
+        )
+        speakers = [evidence(c)["speaker"] for c in children]
         assert "alice" in speakers
         assert "bob" in speakers
 
-    def test_turn_index_monotonic(self, db_session, mock_embedding):
-        messages = [
-            ParsedMessage(role="user", content=f"Message number {i} content.", turn_index=i)
-            for i in range(5)
-        ]
-        result = _run(
-            ingest_conversation(db_session, messages, summarize=False, extract_triples=False)
+    def test_turn_index_monotonic(self, db_session, evidence):
+        response = _ingest(
+            db_session,
+            messages=_msgs(*[("user", f"Message number {i} content.") for i in range(5)]),
+            extract_facts=False,
         )
-        repo = DocumentRepository(db_session)
-        children = repo.get_children(result.source_document_id, depth=1, limit=100)
-        indices = [c.structured_content["turn_index"] for c in children]
+        children = DocumentRepository(db_session).get_children(
+            response.source_document_id, depth=1, limit=100
+        )
+        indices = [evidence(c)["turn_index"] for c in children]
         assert indices == sorted(indices)
+        assert indices == list(range(5))
 
-
-@requires_db
-class TestConversationIngestH2:
-    """H2: Conversation with RAPTOR produces summaries."""
-
-    def test_with_raptor(self, db_session, mock_embedding, mock_llm):
-        messages = [
-            ParsedMessage(
-                role="user", content=f"Turn {i}: discussing topic alpha bravo.", turn_index=i
-            )
-            for i in range(6)
-        ]
-        result = _run(
-            ingest_conversation(
-                db_session,
-                messages,
-                title="RAPTOR Test",
-                summarize=True,
-                extract_triples=False,
-            )
+    def test_a_single_message_is_a_conversation_of_one(self, db_session):
+        response = _ingest(
+            db_session,
+            messages=_msgs(("user", "Just one message in the conversation.")),
+            extract_facts=False,
         )
-        assert result.summary_count >= 0  # may be 0 if all cluster into one
-        summarize_stage = next(s for s in result.stages if s.stage == "summarize")
-        assert summarize_stage.status in ("completed", "skipped")
-
-
-@requires_db
-class TestConversationIngestH3:
-    """H3: Conversation with fact extraction produces triples."""
-
-    def test_with_fact_extraction(self, db_session, mock_embedding, mock_llm):
-        messages = [
-            ParsedMessage(
-                role="user", content="Python is a programming language used widely.", turn_index=0
-            ),
-            ParsedMessage(
-                role="assistant",
-                content="Yes, Python is great for data science work.",
-                turn_index=1,
-            ),
-        ]
-        result = _run(
-            ingest_conversation(
-                db_session,
-                messages,
-                summarize=False,
-                extract_triples=True,
-            )
+        assert response.message_count == 1
+        children = DocumentRepository(db_session).get_children(
+            response.source_document_id, depth=1, limit=100
         )
-        extract_stage = next(s for s in result.stages if s.stage == "extract_facts")
-        assert extract_stage.status == "completed"
-        assert result.triple_count >= 0
-
-
-@requires_db
-class TestConversationIngestA1:
-    """A1: Empty conversation rejected."""
-
-    def test_empty_messages_raises(self, db_session, mock_embedding):
-        with pytest.raises(ValueError, match="No messages"):
-            _run(ingest_conversation(db_session, [], summarize=False, extract_triples=False))
-
-
-@requires_db
-class TestConversationIngestA2:
-    """A2: Single message creates root + 1 chunk, no crash."""
-
-    def test_single_message(self, db_session, mock_embedding):
-        messages = [
-            ParsedMessage(
-                role="user", content="Just one message in the conversation.", turn_index=0
-            )
-        ]
-        result = _run(
-            ingest_conversation(db_session, messages, summarize=False, extract_triples=False)
-        )
-        assert result.message_count == 1
-        repo = DocumentRepository(db_session)
-        children = repo.get_children(result.source_document_id, depth=1, limit=100)
         assert len(children) == 1
 
-
-@requires_db
-class TestConversationIngestStages:
-    """Stage reporting and resilience."""
-
-    def test_all_stages_reported(self, db_session, mock_embedding, mock_llm):
-        messages = [
-            ParsedMessage(role="user", content="Hello there how are you doing?", turn_index=0),
-            ParsedMessage(role="assistant", content="I am good thanks for asking!", turn_index=1),
-        ]
-        result = _run(
-            ingest_conversation(
-                db_session,
-                messages,
-                summarize=True,
-                extract_triples=True,
-            )
+    def test_jsonl_and_the_equivalent_array_reach_the_same_node(self, db_session):
+        """The re-encoding is faithful: the two spellings of one transcript deduplicate."""
+        first = _ingest(
+            db_session,
+            messages=_msgs(("user", "Hello there friend"), ("assistant", "Hi how are you")),
+            extract_facts=False,
         )
-        stage_names = [s.stage for s in result.stages]
-        assert "parse" in stage_names
-        assert "chunk" in stage_names
-        assert "summarize" in stage_names
-        assert "extract_facts" in stage_names
-
-    def test_disabled_stages_skipped(self, db_session, mock_embedding):
-        messages = [
-            ParsedMessage(role="user", content="Simple test message content here.", turn_index=0),
-            ParsedMessage(role="assistant", content="Simple response content here.", turn_index=1),
-        ]
-        result = _run(
-            ingest_conversation(
-                db_session,
-                messages,
-                summarize=False,
-                extract_triples=False,
-            )
+        jsonl = messages_to_jsonl(
+            [
+                ParsedMessage(role="user", content="Hello there friend"),
+                ParsedMessage(role="assistant", content="Hi how are you"),
+            ]
         )
-        for s in result.stages:
-            if s.stage in ("summarize", "extract_facts"):
-                assert s.status == "skipped"
+
+        second = _ingest(db_session, jsonl=jsonl, extract_facts=False)
+
+        assert second.source_document_id == first.source_document_id
 
 
 @requires_db
-class TestOversizeRootContainer:
-    """The container that holds the whole conversation concatenated is routinely
-    over the 8192-token document-vector window. The embedder now refuses over-window
-    text (KNOWN-DEFECTS D1), so embedding the container whole raised TextTooLongError
-    and failed the whole ingest. The root must instead be left unembedded when it does
-    not fit — its children (and its RAPTOR summary) remain retrievable.
+class TestTheStagesAreTasks:
+    def test_the_reported_stages_are_the_queue_tasks(self, db_session):
+        response = _ingest(
+            db_session,
+            messages=_msgs(("user", "Hello there how are you doing?"), ("assistant", "Good!")),
+            extract_facts=False,
+        )
 
-    check_fit here uses the real tokenizer (no model weights), as it already does for
-    the per-message over-window decision.
+        names = [s.stage for s in response.stages]
+        assert names[0] == "probe"
+        assert "extract:text" in names
+        assert "structure:conversation" in names, names
+        # The two prose rungs must NOT have run: a transcript's leaves are its turns.
+        assert "structure:declared" not in names
+        assert "structure:inferred" not in names
+        assert all(s.status in ("completed", "skipped") for s in response.stages), names
+
+    def test_fact_extraction_is_scheduled_when_asked_for(self, db_session):
+        response = _ingest(
+            db_session,
+            messages=_msgs(("user", "Python is a programming language used widely.")),
+            extract_facts=True,
+        )
+
+        stage = [s for s in response.stages if s.stage == "extract:facts"]
+        assert len(stage) == 1
+        # The suite runs with no LLM configured, so the honest outcome is a skip with a
+        # reason rather than a failure. See tests/test_ingest_queued_usetypes.py.
+        assert stage[0].status == "skipped"
+
+    def test_fact_extraction_is_not_scheduled_when_declined(self, db_session):
+        response = _ingest(
+            db_session,
+            messages=_msgs(("user", "Python is a programming language used widely.")),
+            extract_facts=False,
+        )
+        assert "extract:facts" not in [s.stage for s in response.stages]
+
+
+@requires_db
+class TestTheRefusals:
+    def test_empty_messages_raises(self, db_session):
+        with pytest.raises(ValueError, match="Provide either"):
+            _ingest(db_session, messages=[])
+
+    def test_both_formats_raises(self, db_session):
+        with pytest.raises(ValueError, match="not both"):
+            _ingest(db_session, messages=_msgs(("user", "Hi")), jsonl='{"prompt": "Hi"}')
+
+    def test_a_raptor_depth_is_refused_rather_than_ignored(self, db_session):
+        """The rollup segments in document order and does not cluster, so there is nothing
+        for the value to tune. A run that built a different tree and reported success would
+        have told the caller nothing."""
+        with pytest.raises(ValueError, match="raptor_max_depth describes RAPTOR"):
+            _ingest(db_session, messages=_msgs(("user", "Hi there")), raptor_max_depth=3)
+
+    def test_a_min_cluster_size_is_refused_too(self, db_session):
+        with pytest.raises(ValueError, match="raptor_min_cluster_size describes RAPTOR"):
+            _ingest(db_session, messages=_msgs(("user", "Hi there")), raptor_min_cluster_size=4)
+
+    def test_summarize_false_is_refused(self, db_session):
+        """Path A's `summarize` was optional RAPTOR clustering. The queue's `summarize`
+        task is what gives a container its content and vectors, so honouring the flag by
+        doing nothing would leave the rollup's containers unretrievable."""
+        with pytest.raises(ValueError, match="summarize=False cannot be honoured"):
+            _ingest(db_session, messages=_msgs(("user", "Hi there")), summarize=False)
+
+    def test_an_unknown_parent_is_a_lookup_error(self, db_session):
+        """WAS a warning and a silent degrade to a root document. The queue refuses: a
+        caller who named a parent and got an orphan was told nothing."""
+        with pytest.raises(LookupError, match="Parent document 999999999 not found"):
+            _ingest(db_session, messages=_msgs(("user", "Hi there")), parent_id=999999999)
+
+
+@requires_db
+class TestOversizeTurns:
+    """KNOWN-DEFECTS D1, carried across from the deprecated pipeline.
+
+    Most assistant messages exceed the 512-token token/maxsim window. Such a turn becomes a
+    container with chunk children that fit; before that shape existed it was embedded as a
+    ~2000-character prefix and reported as fully embedded.
     """
 
-    def test_oversize_conversation_ingests_with_root_unembedded(self, db_session, mock_embedding):
-        # Each message is under the 512-token maxsim window (embeds simply), but 40 of
-        # them concatenate to well over the 8192-token document-vector window.
-        messages = [
-            ParsedMessage(role="user", content="word " * 300, turn_index=i) for i in range(40)
-        ]
-        result = _run(
-            ingest_conversation(db_session, messages, summarize=False, extract_triples=False)
+    def test_an_over_window_turn_gets_children_that_fit(self, db_session, evidence):
+        response = _ingest(
+            db_session,
+            messages=_msgs(("assistant", "word " * 600), ("user", "A short reply.")),
+            extract_facts=False,
         )
 
         repo = DocumentRepository(db_session)
-        root = repo.get(result.source_document_id)
-        assert root is not None
-        assert root.embed is None, (
-            "an over-window container must not be embedded — there is no honest "
-            "whole-text vector for it; its children and summary carry retrieval"
-        )
-        chunk_stage = next(s for s in result.stages if s.stage == "chunk")
-        assert chunk_stage.detail["root_document_vector"] == "skipped_over_doc_window"
-        # The children are still fully embedded — the ingest did not lose them.
-        children = repo.get_children(root.id, usetype="chunk", depth=1, limit=10000)
-        assert len(children) == 40
-        assert all(c.embed is not None for c in children)
+        turns = repo.get_children(response.source_document_id, depth=1, limit=100)
+        big = next(t for t in turns if evidence(t)["over_token_window"])
+        parts = repo.get_children(big.id, depth=1, limit=100)
+        assert parts, "an over-window turn must be split into pieces that fit"
+        assert all(evidence(p)["part_index"] == i for i, p in enumerate(parts))
+        assert all(p.embed is not None for p in parts)
 
-    def test_small_conversation_still_embeds_the_root(self, db_session, mock_embedding):
-        # The fits-path must be preserved: a small conversation's container still gets
-        # a document vector (mocked here), so small conversations stay directly
-        # vector-matchable at the container level.
-        messages = [
-            ParsedMessage(role="user", content="A short question about foxes.", turn_index=0),
-            ParsedMessage(role="assistant", content="A short answer about foxes.", turn_index=1),
-        ]
-        result = _run(
-            ingest_conversation(db_session, messages, summarize=False, extract_triples=False)
+    def test_a_turn_that_fits_gets_no_children(self, db_session, evidence):
+        response = _ingest(
+            db_session,
+            messages=_msgs(("user", "A short question about foxes.")),
+            extract_facts=False,
         )
-        root = DocumentRepository(db_session).get(result.source_document_id)
-        assert root.embed is not None
-        chunk_stage = next(s for s in result.stages if s.stage == "chunk")
-        assert chunk_stage.detail["root_document_vector"] == "embedded"
+        repo = DocumentRepository(db_session)
+        turn = repo.get_children(response.source_document_id, depth=1, limit=100)[0]
+        assert evidence(turn)["over_token_window"] is False
+        assert repo.get_children(turn.id, depth=1, limit=100) == []
 
 
 # ============================================================================
@@ -468,56 +440,72 @@ except Exception:
     _APP_AVAILABLE = False
 
 
+@pytest.fixture
+def client_with_db(db_session):
+    """A ``TestClient`` bound to the rolled-back session.
+
+    Not a bare ``TestClient(app)``, and the difference is load-bearing since
+    ``SPRINT_JOBS.md`` 15.4 S7. These routes commit — they always did — and without the
+    override the commit goes to the real connection and the rows outlive the test. That was
+    invisible while a conversation's root was a ``conversation`` node, because the counts
+    other modules assert are over ``file`` nodes; a transcript's root is a ``file`` node
+    now, so the leak started failing `tests/test_file_upload.py` a hundred tests later.
+    """
+    from jmfts_core.database import get_db
+
+    def _override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = _override_get_db
+    client = TestClient(app, headers=AUTH_HEADERS)
+    yield client
+    app.dependency_overrides.pop(get_db, None)
+
+
 @pytest.mark.skipif(not (_DB_AVAILABLE and _APP_AVAILABLE), reason="DB or app unavailable")
 class TestConversationEndpoint:
-    def test_requires_input(self):
-        with TestClient(app, headers=AUTH_HEADERS) as client:
-            resp = client.post("/conversations/ingest", json={})
-            assert resp.status_code == 400
+    def test_requires_input(self, client_with_db):
+        client = client_with_db
+        resp = client.post("/conversations/ingest", json={})
+        assert resp.status_code == 400
 
-    def test_rejects_both_formats(self):
-        with TestClient(app, headers=AUTH_HEADERS) as client:
-            resp = client.post(
-                "/conversations/ingest",
-                json={
-                    "messages": [{"role": "user", "content": "Hi"}],
-                    "jsonl": '{"prompt": "Hi", "response": "Hey"}',
-                },
-            )
-            assert resp.status_code == 400
+    def test_rejects_both_formats(self, client_with_db):
+        client = client_with_db
+        resp = client.post(
+            "/conversations/ingest",
+            json={
+                "messages": [{"role": "user", "content": "Hi"}],
+                "jsonl": '{"prompt": "Hi", "response": "Hey"}',
+            },
+        )
+        assert resp.status_code == 400
 
-    def test_message_array_accepted(self, mock_embedding):
-        with TestClient(app, headers=AUTH_HEADERS) as client:
-            resp = client.post(
-                "/conversations/ingest",
-                json={
-                    "messages": [
-                        {"role": "user", "content": "Hello there how are you?"},
-                        {"role": "assistant", "content": "I'm doing great thanks!"},
-                    ],
-                    "summarize": False,
-                    "extract_facts": False,
-                },
-            )
-            assert resp.status_code == 200
-            data = resp.json()
-            assert data["message_count"] == 2
-            assert data["source_document_id"] > 0
+    def test_message_array_accepted(self, client_with_db):
+        client = client_with_db
+        resp = client.post(
+            "/conversations/ingest",
+            json={
+                "messages": [
+                    {"role": "user", "content": "Hello there how are you?"},
+                    {"role": "assistant", "content": "I'm doing great thanks!"},
+                ],
+                "extract_facts": False,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["message_count"] == 2
+        assert data["source_document_id"] > 0
 
-    def test_jsonl_accepted(self, mock_embedding):
+    def test_jsonl_accepted(self, client_with_db):
         jsonl = '{"prompt": "Hello there friend", "response": "Hi how are you doing"}\n'
-        with TestClient(app, headers=AUTH_HEADERS) as client:
-            resp = client.post(
-                "/conversations/ingest",
-                json={
-                    "jsonl": jsonl,
-                    "summarize": False,
-                    "extract_facts": False,
-                },
-            )
-            assert resp.status_code == 200
-            data = resp.json()
-            assert data["message_count"] == 2
+        resp = client_with_db.post(
+            "/conversations/ingest",
+            json={"jsonl": jsonl, "extract_facts": False},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["message_count"] == 2
 
 
 class TestDocumentCreateEmbedTokens:
@@ -534,11 +522,10 @@ class TestDocumentCreateEmbedTokens:
         assert DocumentCreate(embed_tokens=False).embed_tokens is False
 
     @pytest.mark.skipif(not (_DB_AVAILABLE and _APP_AVAILABLE), reason="DB or app unavailable")
-    def test_route_threads_embed_tokens(self):
-        from unittest.mock import patch
-
+    def test_route_threads_embed_tokens(self, client_with_db):
+        client = client_with_db
         with patch.object(DocumentRepository, "embed_document", return_value=None) as m:
-            with TestClient(app, headers=AUTH_HEADERS) as client:
+            if True:
                 r1 = client.post(
                     "/documents",
                     json={"content": "a small document", "auto_embed": True, "embed_tokens": False},

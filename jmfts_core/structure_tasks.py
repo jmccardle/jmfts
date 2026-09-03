@@ -51,30 +51,51 @@ from typing import Callable, Optional, Sequence
 
 from sqlalchemy.orm import Session
 
+from jmfts_core.atoms import (
+    COST_CPU,
+    EV_BLOB,
+    EV_EXTRACTION,
+    EV_MATCHED,
+    EV_SOURCE_SPAN,
+    EV_STRUCTURE,
+    EV_TEXT,
+    KEY_POSITION,
+    ChildKey,
+    Fanout,
+)
+from jmfts_core.conversation_ingest import conversation_markdown, parse_adjutant_jsonl
 from jmfts_core.chunking import ChunkStrategy, chunk_text
 from jmfts_core.embedding import get_embedding_service
 from jmfts_core.ingest_options import STRUCTURE_CHUNK_PARAMS
 from jmfts_core.ingest_tasks import (
-    TASK_EMBED,
     TASK_EXTRACT_TEXT,
     TASK_STRUCTURE_DECLARED,
     TASK_STRUCTURE_INFERRED,
+    Frontier,
     TaskOutcome,
+    enqueue_frontier,
+    plan_frontier,
     register_task_handler,
 )
-from jmfts_core.models.document import Document, SETTLED_IN_FLIGHT, SETTLED_SETTLED
+from jmfts_core.models.document import (
+    Document,
+    SETTLED_IN_FLIGHT,
+    SETTLED_SETTLED,
+    USETYPE_CHUNK,
+    USETYPE_SECTION,
+)
 
 # The office readers. Importing this module reaches NO office library: every import of
 # python-docx / python-pptx inside it sits behind a require_* guard, at the point of use.
 # tests/test_office_packaging.py::test_starting_the_app_imports_no_office_reader is what
 # holds that, and it covers this import path.
 from jmfts_core.office.extract import docx_to_markdown, pptx_to_markdown
-from jmfts_core.models.task_queue import WRITE_SELF, TaskQueue
+from jmfts_core.models.task_queue import WRITE_CHILDREN, WRITE_SELF, TaskQueue
 from jmfts_core.pdf_extraction import pdf_to_markdown
 from jmfts_core.repositories.blob import BlobRepository
 from jmfts_core.repositories.document import DocumentRepository
+from jmfts_core.repositories.evidence import EvidenceRepository, evidence_value
 from jmfts_core.repositories.task_queue import TaskQueueRepository
-from jmfts_core.settling import TaskSpec, enqueue_batch
 from jmfts_core.structural_splitting import (
     Section,
     SectionNode,
@@ -108,31 +129,21 @@ EXTRACTION_UTF8_TEXT = "utf8_text"
 EXTRACTION_HTML_MARKUP = "html_markup"
 EXTRACTION_DOCX_BODY = "docx_body"
 EXTRACTION_PPTX_SLIDES = "pptx_slides"
+#: A JSONL transcript, read into `[role]: content` blocks. `SPRINT_JOBS.md` 15.4 S7.
+EXTRACTION_CONVERSATION = "conversation_transcript"
 
-#: Usetypes for the two kinds of node these tasks create. Open strings, like every usetype
-#: (spec Part 9) — named here so the several places that mean the same node agree.
-USETYPE_SECTION = "section"
-USETYPE_CHUNK = "chunk"
-
-#: The ``embed`` task every chunk is created with. One shared, frozen spec rather than one
-#: built per chunk, because it is the same request every time and its ``params`` are part
-#: of the ``param_fingerprint`` 6.1 diffs on — two chunks whose embed tasks differed by an
-#: accident of construction would look to a re-ingest like two different requests.
-#:
-#: ``self`` (5.3): it writes this node's own ``embed`` column and its ``token_embeddings``
-#: rows, and creates nothing. That is also what makes a document's chunks embed in
-#: parallel — ``claim_next`` only conflicts a ``self`` task with another ``self`` on the
-#: SAME node, so N chunks are N independently claimable tasks.
-#:
-#: ``with_tokens`` is stated rather than left to the handler's default, so the queue row
-#: records which path was asked for. A chunk is exactly the node the token/maxsim path
-#: exists for: it is a leaf, its text is its own, and it is bounded to the token window by
-#: the chunker above.
-EMBED_CHUNK_SPEC = TaskSpec(
-    task_type=TASK_EMBED,
-    write_mode=WRITE_SELF,
-    params={"with_tokens": True},
-)
+# THE `embed` TASK EVERY CHUNK IS CREATED WITH IS NOT DECLARED HERE ANY MORE. It was
+# `EMBED_CHUNK_SPEC`, a module constant with a literal `params` dict, and `SPRINT_JOBS.md`
+# Part 0 counts it among the six sites that made a second, imperative planner. It is a row
+# of `TASK_ROWS` now — scoped to the leaves of five rules, which is what a scope on a rule
+# made expressible — and `plan_frontier` is what reads it.
+#
+# The reasoning the constant carried is unchanged and is on the row: `self` (5.3), because
+# it writes this node's own `embed` column and its `token_embeddings` rows and creates
+# nothing, which is also what makes a document's chunks embed in parallel — `claim_next`
+# only conflicts a `self` task with another `self` on the SAME node. And `with_tokens` is
+# stated rather than left to the handler's default, so the queue row records which path was
+# asked for; it comes from the `embed` option group now, so a caller can state it too.
 
 #: The lower rungs, and why nothing enqueues them. Recorded in the attempt detail when a
 #: coverage gap remains, because "the gap is 13% and nothing is going to claim it" and
@@ -222,6 +233,34 @@ def _extract_utf8_text(data: bytes) -> Extracted:
         source=EXTRACTION_UTF8_TEXT,
         record={"toc": []},
         detail={"headings_found": len(find_headings(text))},
+    )
+
+
+def _extract_conversation(data: bytes) -> Extracted:
+    """A JSONL transcript. A CONVERSION, like :func:`_extract_html` and not like the decode.
+
+    ``SPRINT_JOBS.md`` 15.4 S7. The bytes are JSON, one message per line, and decoding them
+    as text would put the braces and the escaped newlines into the file node's ``content``
+    — which is what a search hit shows and what the BM25 index holds. So this reads them
+    with the one parser (``conversation_ingest.parse_adjutant_jsonl``) and writes the same
+    ``[role]: content`` concatenation the deprecated pipeline put on its root.
+
+    An empty ``toc``: a transcript declares no headings, and its structure is the turn
+    boundaries, which ``structure:conversation`` reads from the SAME parser over the same
+    bytes rather than from anything written here. Two tasks parsing one file is the cost of
+    keeping each task's evidence its own; one parser is what stops them disagreeing.
+    """
+    text = data.decode("utf-8")
+    messages = parse_adjutant_jsonl(text)
+    return Extracted(
+        text=conversation_markdown(messages),
+        source=EXTRACTION_CONVERSATION,
+        record={"toc": []},
+        detail={
+            "messages": len(messages),
+            "participants": sorted({m.role for m in messages}),
+            "jsonl_chars": len(text),
+        },
     )
 
 
@@ -330,12 +369,27 @@ TEXT_EXTRACTORS: dict[str, Callable[[bytes], Extracted]] = {
 #: The reader that a ``text``-format file gets INSTEAD when ``probe`` called it markup.
 MARKUP_EXTRACTOR: Callable[[bytes], Extracted] = _extract_html
 
+#: And the one it gets when ``probe`` called it a conversation. The same shape as
+#: :data:`MARKUP_EXTRACTOR` and for the same reason: ``text`` is the one format whose files
+#: can be several different things, and a pattern is what tells them apart.
+CONVERSATION_EXTRACTOR: Callable[[bytes], Extracted] = _extract_conversation
 
-@register_task_handler(TASK_EXTRACT_TEXT)
+
+# `matched` is a real consumption and not a formality: this handler dispatches on
+# `matched.format` to pick a reader, and on `matched.patterns.has_markup` to pick a
+# different one for `text`. So `probe` -> `extract:text` is a derived edge, and it is the
+# reason Part 4's whole batch is enqueued BY probe rather than beside it.
+@register_task_handler(
+    TASK_EXTRACT_TEXT,
+    consumes=(f"{EV_MATCHED}@self", f"{EV_BLOB}@self"),
+    produces=(f"{EV_TEXT}@self", f"{EV_EXTRACTION}@self"),
+    write_mode=WRITE_SELF,
+    cost_class=COST_CPU,
+)
 def run_extract_text(session: Session, task: TaskQueue) -> TaskOutcome:
     """Read the stored bytes and write the file node's text and extraction record.
 
-    Writes ``content`` — the whole markdown — and ``structured_content['extraction']``,
+    Writes ``content`` — the whole markdown — and the ``extraction`` evidence row,
     whose ``source`` is what the structure rungs dispatch on. Which reader runs is decided
     by the format ``probe`` measured, from :data:`TEXT_EXTRACTORS`.
 
@@ -368,14 +422,19 @@ def run_extract_text(session: Session, task: TaskQueue) -> TaskOutcome:
     """
     doc = _scope_node(session, task, TASK_EXTRACT_TEXT)
 
-    matched = (doc.structured_content or {}).get("matched") or {}
+    matched = EvidenceRepository(session).read(doc.id, "matched") or {}
     fmt = matched.get("format")
     extractor = TEXT_EXTRACTORS.get(fmt)
     # `has_markup` selects the reader; it does not block the row. It is consulted only for
     # `text`, because that is the one format whose files can be either prose or markup —
     # every other format's identity already decided which reader it gets.
-    if fmt == "text" and (matched.get("patterns") or {}).get("has_markup"):
+    patterns = matched.get("patterns") or {}
+    if fmt == "text" and patterns.get("has_markup"):
         extractor = MARKUP_EXTRACTOR
+    # Checked after markup, and the two cannot both hold: a file whose first non-blank
+    # character is `<` does not have a first line that decodes as a JSON object.
+    if fmt == "text" and patterns.get("is_conversation"):
+        extractor = CONVERSATION_EXTRACTOR
     if extractor is None:
         raise ValueError(
             f"extract:text is scoped to document {doc.id}, whose probed format is {fmt!r}; "
@@ -393,13 +452,15 @@ def run_extract_text(session: Session, task: TaskQueue) -> TaskOutcome:
     extracted = extractor(data)
 
     doc.content = extracted.text
-    structured = dict(doc.structured_content or {})
-    structured["extraction"] = {
-        "source": extracted.source,
-        "characters": len(extracted.text),
-        **extracted.record,
-    }
-    doc.structured_content = structured
+    EvidenceRepository(session).write(
+        doc.id,
+        "extraction",
+        {
+            "source": extracted.source,
+            "characters": len(extracted.text),
+            **extracted.record,
+        },
+    )
     session.flush()
 
     detail = {
@@ -504,6 +565,11 @@ DECLARED_SPLITTERS: dict[str, Callable[[Document, dict], Boundaries]] = {
     EXTRACTION_HTML_MARKUP: _split_atx,
     EXTRACTION_DOCX_BODY: _split_atx,
     EXTRACTION_PPTX_SLIDES: _split_atx,
+    # A transcript reaches neither rung — `structure:conversation` is its rung, and the two
+    # prose rows forbid `@conversation`. The entry is here so that a document that somehow
+    # arrives at one of them (a re-ingest against an older pattern set) splits on the
+    # `[role]:` blocks' own paragraph boundaries rather than raising a KeyError.
+    EXTRACTION_CONVERSATION: _split_atx,
 }
 
 #: ``extraction.source`` -> the splitter for the INFERRED rung. A text file reaches it only
@@ -523,6 +589,11 @@ INFERRED_SPLITTERS: dict[str, Callable[[Document, dict], Boundaries]] = {
     EXTRACTION_HTML_MARKUP: _split_atx,
     EXTRACTION_DOCX_BODY: _split_atx,
     EXTRACTION_PPTX_SLIDES: _split_atx,
+    # A transcript reaches neither rung — `structure:conversation` is its rung, and the two
+    # prose rows forbid `@conversation`. The entry is here so that a document that somehow
+    # arrives at one of them (a re-ingest against an older pattern set) splits on the
+    # `[role]:` blocks' own paragraph boundaries rather than raising a KeyError.
+    EXTRACTION_CONVERSATION: _split_atx,
 }
 
 
@@ -535,7 +606,7 @@ def _run_rung(
 ) -> TaskOutcome:
     """Dispatch on what produced the text, then write the tree the splitter found."""
     doc = _scope_node(session, task, task_type)
-    extraction = (doc.structured_content or {}).get("extraction") or {}
+    extraction = EvidenceRepository(session).read(doc.id, "extraction") or {}
     source = extraction.get("source")
     splitter = splitters.get(source)
     if splitter is None:
@@ -551,9 +622,7 @@ def _run_rung(
     # prober counts headings with the same function the splitter uses, so these two numbers
     # agree unless the extraction changed the text between them — which is exactly the
     # silent mangle this task would otherwise settle over.
-    probed_headings = (
-        ((doc.structured_content or {}).get("matched") or {}).get("patterns") or {}
-    ).get("heading_count")
+    probed_headings = evidence_value(session, doc.id, "matched.patterns.heading_count")
     if probed_headings is not None:
         detail["headings_probed"] = probed_headings
 
@@ -563,18 +632,94 @@ def _run_rung(
         doc,
         boundaries.sections,
         rung=rung,
+        rung_task=task_type,
         source=boundaries.source,
         extra_detail=detail,
     )
 
 
-@register_task_handler(TASK_STRUCTURE_DECLARED)
+def _chunk_ceiling(evidence: dict, params: dict) -> tuple[int, int]:
+    """How many CHUNK nodes a rung may write. ``SPRINT_JOBS.md`` 2.4.
+
+    Chunks, not nodes, because the chunk is what costs: every one carries an ``embed``, and
+    the section containers above them carry nothing until the walk reaches them. A rung
+    that found no prose at all writes none, which is why the floor is zero and is not the
+    interesting half of the interval.
+
+    ``min_chunk_length`` is a character count and so is ``extraction.characters``, so this
+    is the same division ``chunk_text`` cannot exceed rather than an estimate of it.
+    """
+    minimum = int(params["min_chunk_length"])
+    characters = int(evidence["extraction.characters"])
+    return (0, characters // minimum if minimum else characters)
+
+
+#: The two rungs write the same shapes from different boundaries, so they declare the same
+#: atom twice over — same evidence, same fan-out, same key. What differs is the CONDITION
+#: that schedules them, and that is a Part 4 row, not an atom field.
+_RUNG_FANOUT = Fanout(
+    bound=_chunk_ceiling,
+    reads=("extraction.characters",),
+    basis="⌊characters / min_chunk_length⌋ chunks",
+    # The chunks, not the sections. A titled region becomes a `section` node with chunks
+    # under it and an untitled one becomes chunks directly, so the section count varies
+    # with the document's shape while the ceiling is a function of its LENGTH — counting
+    # sections against this interval would compare two different things.
+    counts=USETYPE_CHUNK,
+)
+
+#: Position, and 9.2 records that this is the weakest of the three forms. A chunk has no
+#: natural key — nothing in the source names it — and `content_hash` would match nothing
+#: after any edit to the prose, which is correct for a chunk whose text changed and wrong
+#: for one that merely moved. Open question 4 in 13.2 is about exactly this: a re-run that
+#: renumbers positions matches nothing, and Phase 3 has to answer it before 9.1's saving
+#: is real for the atom that most needs it.
+_RUNG_CHILD_KEY = ChildKey(KEY_POSITION)
+
+
+# `structure@self` and not `structure@children`: what this writes to itself is the RECORD
+# of the rung — coverage, node count, gap regions. The nodes go below, and `text@subtree`
+# is where they are declared, because a chunk under a titled section is a GRANDCHILD. The
+# same asymmetry `TASK_CITATION`'s row already names, seen from the producing side.
+#
+# AND `structure@subtree` BESIDE IT — Phase 2, and the evidence registry's ownership audit
+# is what found it missing. Each chunk carries its own record of how the rung placed it:
+# `rung`, `section_title`, `section_level`, `chunk_index`, `source_line`. Those are written
+# by `_TreeWriter` at create time, so they belonged to no declared evidence name, which
+# made them the CALLER's — and a metadata PATCH on a chunk deleted all five.
+@register_task_handler(
+    TASK_STRUCTURE_DECLARED,
+    consumes=(f"{EV_TEXT}@self", f"{EV_EXTRACTION}@self", f"{EV_MATCHED}@self"),
+    produces=(
+        f"{EV_STRUCTURE}@self",
+        f"{EV_STRUCTURE}@subtree",
+        f"{EV_TEXT}@subtree",
+        f"{EV_SOURCE_SPAN}@subtree",
+    ),
+    write_mode=WRITE_CHILDREN,
+    cost_class=COST_CPU,
+    fanout=_RUNG_FANOUT,
+    child_key=_RUNG_CHILD_KEY,
+)
 def run_structure_declared(session: Session, task: TaskQueue) -> TaskOutcome:
     """Build the tree the document declares for itself. Spec 3.5's top rung."""
     return _run_rung(session, task, TASK_STRUCTURE_DECLARED, DECLARED_SPLITTERS, RUNG_DECLARED)
 
 
-@register_task_handler(TASK_STRUCTURE_INFERRED)
+@register_task_handler(
+    TASK_STRUCTURE_INFERRED,
+    consumes=(f"{EV_TEXT}@self", f"{EV_EXTRACTION}@self", f"{EV_MATCHED}@self"),
+    produces=(
+        f"{EV_STRUCTURE}@self",
+        f"{EV_STRUCTURE}@subtree",
+        f"{EV_TEXT}@subtree",
+        f"{EV_SOURCE_SPAN}@subtree",
+    ),
+    write_mode=WRITE_CHILDREN,
+    cost_class=COST_CPU,
+    fanout=_RUNG_FANOUT,
+    child_key=_RUNG_CHILD_KEY,
+)
 def run_structure_inferred(session: Session, task: TaskQueue) -> TaskOutcome:
     """Build the tree from boundaries this appliance inferred. Spec 3.5's second rung."""
     return _run_rung(session, task, TASK_STRUCTURE_INFERRED, INFERRED_SPLITTERS, RUNG_INFERRED)
@@ -587,6 +732,7 @@ def _build_tree(
     sections: Sequence[Section],
     *,
     rung: str,
+    rung_task: str,
     source: str,
     extra_detail: dict,
 ) -> TaskOutcome:
@@ -595,6 +741,13 @@ def _build_tree(
     Producing NOTHING is a completed task, not a failed one, and the detail says what was
     looked for. Spec 3.4 is explicit that a heuristic which ran and found nothing must
     never look like one that never ran.
+
+    ``rung`` and ``rung_task`` are two different facts about the same run and both are
+    written to the tree. ``rung`` is 3.5's evidence grade — ``declared`` or ``inferred`` —
+    and lands in each node's ``structure`` block. ``rung_task`` is which RULE ran, and lands
+    in ``produced_by`` (``SPRINT_JOBS.md`` 4.2), which is what makes ``embed``'s scope
+    resolvable over the chunks below. Both rungs write ``declared``-or-``inferred`` nodes;
+    only the second column says which of the two rules did it.
     """
     params = dict(task.params or {})
     strategy = ChunkStrategy(params.get("chunk_strategy", STRUCTURE_CHUNK_PARAMS["chunk_strategy"]))
@@ -617,6 +770,10 @@ def _build_tree(
         # be silently wrong the day the traversal changed, and the wrongness would be a
         # rectangle on the wrong page rather than an exception.
         body_offsets=_locate_section_bodies(text, sections),
+        # Planned ONCE per rung run and used for every node it writes: the rows are decided
+        # by `(format, patterns, options)` and every node of one run shares all three.
+        sections=plan_frontier(session, doc, produced_by=rung_task, usetype=USETYPE_SECTION),
+        chunks=plan_frontier(session, doc, produced_by=rung_task, usetype=USETYPE_CHUNK),
     )
     roots = nest(sections)
     for root in roots:
@@ -627,16 +784,18 @@ def _build_tree(
     assigned = covered + uncovered
     coverage = (covered / assigned) if assigned else 0.0
 
-    structured = dict(doc.structured_content or {})
-    structured["structure"] = {
-        "primary_rung": rung,
-        "source": source,
-        "coverage": round(coverage, 4),
-        "node_count": writer.node_count,
-        "max_depth": writer.max_depth,
-        "gap_regions": gap_regions,
-    }
-    doc.structured_content = structured
+    EvidenceRepository(session).write(
+        doc.id,
+        "structure",
+        {
+            "primary_rung": rung,
+            "source": source,
+            "coverage": round(coverage, 4),
+            "node_count": writer.node_count,
+            "max_depth": writer.max_depth,
+            "gap_regions": gap_regions,
+        },
+    )
     session.flush()
 
     detail = {
@@ -714,6 +873,8 @@ class _TreeWriter:
         max_tokens: int,
         min_chunk_length: int,
         body_offsets: dict[int, int],
+        sections: Frontier,
+        chunks: Frontier,
     ):
         self.repo = repo
         self.tasks = tasks
@@ -722,6 +883,22 @@ class _TreeWriter:
         self.max_tokens = max_tokens
         self.min_chunk_length = min_chunk_length
         self.body_offsets = body_offsets
+        #: TWO FRONTIERS, because this writer creates two kinds of node and a scope names
+        #: the kind (`SPRINT_JOBS.md` 4.1). A chunk's is `embed`; a section's is empty
+        #: today, and asking for it anyway is what makes it non-empty the day a rule is
+        #: scoped there — rather than a container that quietly gets nothing because the
+        #: writer never asked. Both are planned once per rung run.
+        self.sections = sections
+        self.chunks = chunks
+        if sections.produced_by != chunks.produced_by:
+            raise ValueError(
+                f"one rung writes both kinds of node, so its two frontiers must name the "
+                f"same rule; got {sections.produced_by!r} and {chunks.produced_by!r}"
+            )
+        #: The RULE name, which is the task type — `structure:declared`, not `declared`.
+        #: :attr:`rung` is 3.5's evidence grade and goes into the node's `structure` block;
+        #: this is 4.2's stamp and goes into `produced_by`. Two facts, two columns.
+        self.rung_task = chunks.produced_by
 
         #: Ids of the section containers, in creation order.
         self.section_ids: list[int] = []
@@ -763,7 +940,8 @@ class _TreeWriter:
                 content=None,
                 parent_id=parent_id,
                 usetype=USETYPE_SECTION,
-                structured_content={
+                produced_by=self.rung_task,
+                evidence={
                     "structure": {
                         "primary_rung": self.rung,
                         "level": section.level,
@@ -774,6 +952,7 @@ class _TreeWriter:
                 sequential=True,
                 settled=SETTLED_IN_FLIGHT,
             )
+            queued_here = bool(enqueue_frontier(self.tasks, container, self.sections))
             self._record(container.id, parent_id)
             self.section_ids.append(container.id)
             host, host_depth = container.id, depth
@@ -782,10 +961,14 @@ class _TreeWriter:
             # There is no title to name a container with, and inventing one would put a
             # word in the tree that is not in the document. Its chunks attach where the
             # container would have.
+            queued_here = False
             host, host_depth = parent_id, depth - 1
 
         self.max_depth = max(self.max_depth, host_depth)
-        queued = self._write_chunks(host, section, depth=host_depth + 1)
+        # `queued_here` is the container's OWN frontier, which is empty today. It is folded
+        # in so that a rule scoped to `section` children would keep the container in flight
+        # by itself, rather than depending on some chunk beneath it also having work.
+        queued = self._write_chunks(host, section, depth=host_depth + 1) | queued_here
         for child in node.children:
             # `|` and not `or`: `write` has to run for every child, and short-circuiting
             # would stop building the tree at the first subsection that queued something.
@@ -819,7 +1002,11 @@ class _TreeWriter:
         label = section.title or f"Section (line {section.source_line})"
         spans = _chunk_spans(body, self.body_offsets.get(id(section)), chunks)
         for chunk, span in zip(chunks, spans):
-            structured = {
+            # FIVE ROWS, NOT FIVE COLUMN KEYS, since Phase 2b. These used to be bare
+            # top-level keys in `structured_content`, which reserved five ordinary English
+            # words from every caller's metadata on every chunk node; 13.3 closed that by
+            # moving them out of the caller's dict entirely.
+            evidence = {
                 "rung": self.rung,
                 "section_title": section.title,
                 "section_level": section.level,
@@ -827,22 +1014,23 @@ class _TreeWriter:
                 "source_line": section.source_line,
             }
             if span is not None:
-                structured["source_span"] = span
+                evidence["source_span"] = span
                 self.spanned_chunk_count += 1
             node = self.repo.create(
                 title=label if len(chunks) == 1 else f"{label} — chunk {chunk.index}",
                 content=chunk.text,
                 parent_id=parent_id,
                 usetype=USETYPE_CHUNK,
-                structured_content=structured,
+                produced_by=self.rung_task,
+                evidence=evidence,
                 # The model does not run here any more. `embed` is its own task and this
                 # node is not retrievable until that task has run, which is what
                 # `in_flight` states — see the class docstring.
                 auto_embed=False,
                 sequential=True,
-                settled=SETTLED_IN_FLIGHT,
+                settled=SETTLED_IN_FLIGHT if self.chunks.in_flight else SETTLED_SETTLED,
             )
-            enqueue_batch(self.tasks, node.id, (EMBED_CHUNK_SPEC,))
+            enqueue_frontier(self.tasks, node, self.chunks)
             self._record(node.id, parent_id)
             self.chunk_count += 1
         self.max_depth = max(self.max_depth, depth)

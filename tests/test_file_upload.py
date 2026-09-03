@@ -40,6 +40,7 @@ from jmfts_core.database import get_db
 from jmfts_core.models.document import SETTLED_IN_FLIGHT, DocumentLink
 from jmfts_core.models.principal import AccessGrant, Principal as PrincipalModel
 from jmfts_core.principal_context import OWNER, CurrentPrincipal, reset_principal, set_principal
+from jmfts_core.ingest_tasks import OPTIONS_KEY
 from jmfts_core.probe import detect_format, probe_patterns
 from jmfts_core.repositories.blob import BlobLeakError, BlobRepository
 from jmfts_core.repositories.document import DocumentRepository
@@ -512,10 +513,10 @@ class TestUploadFile:
         assert response.content_hash == f"sha256:{hashlib.sha256(pdf_bytes).hexdigest()}"
         assert response.byte_size == len(pdf_bytes)
 
-    def test_the_file_block_records_everything_3_3_names(self, db_session, pdf_bytes):
+    def test_the_file_block_records_everything_3_3_names(self, db_session, evidence, pdf_bytes):
         response = _upload(db_session, pdf_bytes, "annual.pdf", "application/pdf")
 
-        block = DocumentRepository(db_session).get(response.document_id).structured_content["file"]
+        block = evidence(response.document_id)["file"]
         assert set(block) == {
             "filename",
             "byte_size",
@@ -534,10 +535,10 @@ class TestUploadFile:
         blob = BlobRepository(db_session).get(response.document_id)
         assert block["blob_ref"] == f"lob:{blob.lob_oid}"
 
-    def test_the_matched_block_carries_the_probe_result(self, db_session, pdf_bytes):
+    def test_the_matched_block_carries_the_probe_result(self, db_session, evidence, pdf_bytes):
         _, node, _ = _upload_and_run_probe(db_session, pdf_bytes, "annual.pdf", "application/pdf")
 
-        matched = node.structured_content["matched"]
+        matched = evidence(node)["matched"]
         assert matched["format"] == "pdf"
         assert matched["patterns"]["has_text_layer"] is True
         assert matched["patterns"]["has_outline"] is True
@@ -564,7 +565,7 @@ class TestUploadFile:
         assert probe.rung is None
         assert probe.produced is None
 
-    def test_a_format_with_no_prober_is_completed_not_skipped(self, db_session):
+    def test_a_format_with_no_prober_is_completed_not_skipped(self, db_session, evidence):
         """Spec 3.4: `skipped` means never attempted. probe ran — it named the format."""
         _, node, attempts = _upload_and_run_probe(
             db_session,
@@ -576,9 +577,9 @@ class TestUploadFile:
         probe = attempts[0]
         assert probe.status == "completed"
         assert probe.detail["no_prober_for_format"] == "epub"
-        assert node.structured_content["matched"]["format"] == "epub"
+        assert evidence(node)["matched"]["format"] == "epub"
 
-    def test_a_mime_disagreement_is_recorded_on_both_sides(self, db_session, pdf_bytes):
+    def test_a_mime_disagreement_is_recorded_on_both_sides(self, db_session, evidence, pdf_bytes):
         """Spec 3.1: record both, do not silently trust one."""
         response, node, attempts = _upload_and_run_probe(
             db_session, pdf_bytes, "annual.txt", "text/plain"
@@ -586,7 +587,7 @@ class TestUploadFile:
 
         assert response.declared_mime == "text/plain"
         assert response.detected_mime == "application/pdf"
-        block = node.structured_content["file"]
+        block = evidence(node)["file"]
         assert block["declared_mime"] == "text/plain"
         assert block["detected_mime"] == "application/pdf"
         conflict = attempts[0].detail["mime_conflict"]
@@ -647,7 +648,7 @@ class TestUploadFile:
 
         assert not _lob_exists(db_session, oid)
 
-    def test_a_corrupt_pdf_fails_the_probe_without_losing_the_upload(self, db_session):
+    def test_a_corrupt_pdf_fails_the_probe_without_losing_the_upload(self, db_session, evidence):
         """The bytes are the client's; the inspection is ours. Only the latter can fail.
 
         Step 3 ran probe inline and had to swallow this exception, because raising would
@@ -669,7 +670,7 @@ class TestUploadFile:
         assert probe.error_type is not None
         # The bytes still landed and are retrievable.
         assert BlobRepository(db_session).read_bytes(response.document_id) == data
-        assert "matched" not in node.structured_content
+        assert "matched" not in evidence(node)
 
 
 # ---------------------------------------------------------------------------
@@ -1033,9 +1034,17 @@ class TestTheIngestRecordIsNotCallerWritable:
     state in it. A whole-object PATCH — the ordinary way to add a tag — used to delete the
     `file` block, `matched`, and the entire append-only attempt log; `probe` then found no
     `file` block, raised, was classified PERMANENT, and the node was dead with its bytes
-    still in a large object nothing pointed at."""
+    still in a large object nothing pointed at.
 
-    def test_a_metadata_edit_keeps_the_file_block_and_the_log(self, db_session, pdf_bytes):
+    PHASE 2b MADE THAT UNREACHABLE RATHER THAN REFUSED. Evidence is in `document_evidence`
+    now (`SPRINT_JOBS.md` 13.3) and the column is wholly the caller's, so a PATCH cannot
+    reach the record at all — including under a key of the same name, which the gate used
+    to have to refuse. These tests keep asserting the outcome; the mechanism under them
+    changed from a carried-over key to a separate store."""
+
+    def test_a_metadata_edit_keeps_the_file_block_and_the_log(
+        self, db_session, evidence, pdf_bytes
+    ):
         response = _upload(db_session, pdf_bytes, "annual.pdf", "application/pdf")
         db_session.commit()
 
@@ -1044,18 +1053,18 @@ class TestTheIngestRecordIsNotCallerWritable:
         )
 
         assert updated.structured_content["tag"] == "q3"
-        assert updated.structured_content["file"]["filename"] == "annual.pdf"
-        assert [a["task"] for a in updated.structured_content["attempts"]] == ["probe"]
+        assert evidence(updated)["file"]["filename"] == "annual.pdf"
+        assert [a["task"] for a in evidence(updated)["attempts"]] == ["probe"]
         # And the node is still ingestible: probe finds its `file` block, and the whole
         # pipeline runs on top of an edit that used to destroy the record it reads.
         assert drain_ingest_queue(db_session) > 1
         node = DocumentRepository(db_session).get(response.document_id)
-        assert node.structured_content["matched"]["format"] == "pdf"
+        assert evidence(node)["matched"]["format"] == "pdf"
         assert node.structured_content["tag"] == "q3"
 
-    def test_a_caller_key_is_still_replaced_wholesale(self, db_session, pdf_bytes):
-        """Only the reserved keys are carried over — the caller's half keeps replace
-        semantics, so a client can still drop a key it no longer wants."""
+    def test_a_caller_key_is_still_replaced_wholesale(self, db_session, evidence, pdf_bytes):
+        """The column keeps replace semantics, so a client can still drop a key it no
+        longer wants. Nothing is carried over any more, because nothing else is in here."""
         response = _upload(db_session, pdf_bytes, "annual.pdf", "application/pdf")
         db_session.commit()
         service = DocumentService(db_session)
@@ -1069,17 +1078,31 @@ class TestTheIngestRecordIsNotCallerWritable:
 
         assert updated.structured_content["tag"] == "q4"
         assert "old" not in updated.structured_content
-        assert "file" in updated.structured_content
+        assert "file" in evidence(updated)
 
-    def test_naming_a_reserved_key_is_refused_rather_than_ignored(self, db_session, pdf_bytes):
-        """An edit that silently does not do what it says is the failure being avoided."""
+    def test_naming_an_evidence_name_writes_a_caller_key_and_nothing_else(
+        self, db_session, evidence, pdf_bytes
+    ):
+        """The refusal this used to assert is gone, and its reason is gone with it.
+
+        While `attempts` was a key in `structured_content`, a PATCH naming it had to be
+        REFUSED: accepting it would have rewritten the append-only log, and ignoring it
+        would have been an edit that does not do what it says. Phase 2b moved the log to a
+        row, so `{"attempts": []}` is now an ordinary caller key that happens to share a
+        word with an evidence name — accepted, stored in the caller's column, and reaching
+        nothing. The log is checked here to prove exactly that.
+        """
         response = _upload(db_session, pdf_bytes, "annual.pdf", "application/pdf")
         db_session.commit()
+        before = evidence(response.document_id)["attempts"]
+        assert before, "the upload wrote no attempt log to protect"
 
-        with pytest.raises(ValueError, match="attempts"):
-            DocumentService(db_session).update_document(
-                response.document_id, DocumentUpdate(structured_content={"attempts": []})
-            )
+        updated = DocumentService(db_session).update_document(
+            response.document_id, DocumentUpdate(structured_content={"attempts": []})
+        )
+
+        assert updated.structured_content == {"attempts": []}
+        assert evidence(response.document_id)["attempts"] == before
 
     def test_the_byte_hash_does_not_short_circuit_a_later_text_ingest(self, db_session):
         """`documents.content_hash` on a file node is the sha256 of the BYTES, and for a
@@ -1252,9 +1275,106 @@ def _upload_and_run_probe(session, data: bytes, filename: str, mime, parent_id=N
     """
     response = _upload(session, data, filename, mime, parent_id)
     drain_ingest_queue(session)
-    node = DocumentRepository(session).get(response.document_id)
-    attempts = [
-        AttemptRecord.model_validate(entry)
-        for entry in (node.structured_content or {}).get("attempts") or []
-    ]
+    repo = DocumentRepository(session)
+    node = repo.get(response.document_id)
+    attempts = [AttemptRecord.model_validate(entry) for entry in repo.attempt_log(node)]
     return response, node, attempts
+
+
+class TestStoreTextAsFile:
+    """``SPRINT_JOBS.md`` 15.4 S2 — a content STRING reaches the queue as stored bytes.
+
+    The property that matters is not that a node was created but that NOTHING DOWNSTREAM
+    CAN TELL the two entry points apart. So every assertion below compares a text ingest
+    against the same text uploaded as a file, rather than against a hand-written
+    expectation: if the two ever diverge, S5 has moved callers onto something that is not
+    the queue.
+    """
+
+    def test_the_string_is_stored_and_comes_back_byte_for_byte(self, db_session):
+        content = "# Title\n\nA paragraph with a café in it.\n"
+
+        response = IngestService(db_session).store_text_as_file(content, filename="note")
+
+        assert response.byte_size == len(content.encode("utf-8"))
+        assert response.content_hash == f"sha256:{_sha256(content.encode('utf-8'))}"
+        stored = BlobRepository(db_session).read_bytes(response.document_id)
+        assert stored.decode("utf-8") == content
+
+    def test_the_node_is_a_file_node_in_flight_with_probe_enqueued(self, db_session):
+        response = IngestService(db_session).store_text_as_file("hello there", filename="note")
+
+        assert response.usetype == USETYPE_FILE
+        assert response.settled == SETTLED_IN_FLIGHT
+        assert [a.task for a in response.attempts] == ["probe"]
+        assert [a.status for a in response.attempts] == ["pending"]
+
+    def test_a_string_with_no_extension_is_still_detected_as_text(self, db_session):
+        """The filename carries no extension and does not need one: `_sniff_text` reads
+        the bytes. This is what makes a title an acceptable filename."""
+        response = IngestService(db_session).store_text_as_file("plain words", filename="note")
+
+        assert response.detected_mime == "text/plain"
+        assert response.detected_by == "content_sniff"
+
+    def test_it_reaches_the_same_place_an_upload_of_the_same_text_reaches(self, db_session):
+        """The whole point of S2. Same bytes, two entry points, one node.
+
+        The second call deduplicates onto the first node — which is itself the assertion:
+        the text ingest wrote a `file` node with the same sha256, so the upload's dedup
+        lookup finds it.
+        """
+        content = "# Heading\n\nSome prose under it.\n"
+        first = IngestService(db_session).store_text_as_file(content, filename="note")
+
+        second = _upload(db_session, content.encode("utf-8"), "note.md", "text/markdown")
+
+        assert second.was_existing is True
+        assert second.document_id == first.document_id
+
+    def test_probe_measures_the_same_patterns_as_an_upload_would(self, db_session, evidence):
+        """Headings are found in a string exactly as they are in an uploaded `.md`, which
+        is what sends the document to `structure:declared` rather than `structure:inferred`.
+        """
+        content = "# One\n\nprose\n\n## Two\n\nmore prose\n"
+
+        response = IngestService(db_session).store_text_as_file(content, filename="note")
+        drain_ingest_queue(db_session)
+        node = DocumentRepository(db_session).get(response.document_id)
+
+        matched = evidence(node).get("matched") or {}
+        assert matched.get("format") == "text"
+        assert matched.get("patterns", {}).get("has_headings") is True
+
+    def test_the_options_the_caller_sent_land_on_the_node(self, db_session, evidence):
+        response = IngestService(db_session).store_text_as_file(
+            "words words words",
+            filename="note",
+            options={"structure": {"max_tokens": 44}},
+        )
+
+        node = DocumentRepository(db_session).get(response.document_id)
+        recorded = evidence(node)[OPTIONS_KEY]
+        assert recorded["structure"]["max_tokens"] == 44
+
+    def test_a_misspelled_option_is_refused_before_anything_is_written(self, db_session):
+        before = _file_node_count(db_session)
+
+        with pytest.raises(ValueError, match="unknown option structure.max_token"):
+            IngestService(db_session).store_text_as_file(
+                "words", filename="note", options={"structure": {"max_token": 44}}
+            )
+
+        assert _file_node_count(db_session) == before
+
+    def test_a_nul_bearing_string_is_reported_not_repaired(self, db_session, evidence):
+        """JSON permits `U+0000`; `_sniff_text` rejects it as the binary marker it is, and
+        with no extension the format comes out `unknown`. The node exists and says so —
+        it does not claim to be text."""
+        response = IngestService(db_session).store_text_as_file("a\x00b", filename="note")
+
+        assert response.detected_mime is None
+        assert response.detected_by is None
+        drain_ingest_queue(db_session)
+        node = DocumentRepository(db_session).get(response.document_id)
+        assert (evidence(node).get("matched") or {}).get("format") == "unknown"

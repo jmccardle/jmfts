@@ -4,12 +4,17 @@
     └── sheet node (usetype="sheet")        <- declared, guaranteed (8.1)
         └── profile node (usetype="summary")<- measured, one per sheet (8.5)
 
-Two of 8.2's three tasks live here. ``structure:sheets`` writes the sheet list a workbook
+All three of 8.2's tasks live here. ``structure:sheets`` writes the sheet list a workbook
 declares about itself, which is the whole of its declared rung; ``profile:sheet`` measures
-one sheet and writes the profile node. The third, ``extract:sheet``, materialises the cells
-according to a representation 8.4 chooses — and **8.8 leaves every threshold that choice
-reads unset**, so it is declared in the batch and has no handler. See
-:data:`EXTRACT_SHEET_SPEC`.
+one sheet and writes the profile node; ``extract:sheet`` materialises the cells according to
+a representation 8.4 chooses — and it runs ONE of 8.4's four shapes, because **8.8 leaves
+every threshold the other three read unset**. See :func:`run_extract_sheet`.
+
+**The two per-sheet tasks are declared in** :data:`~jmfts_core.ingest_tasks.TASK_ROWS`
+**and not here.** They were literal ``TaskSpec`` values in this module until
+``SPRINT_JOBS.md`` Phase 3 gave a rule a scope; they are now rows scoped to the children
+``structure:sheets`` produces, which is what makes their parameters settable, their
+fingerprints movable and their conditions visible to ``EXPLAIN``.
 
 **No shape is chosen anywhere in this module.** What ``profile:sheet`` writes is 8.3's
 measurements plus the exact values a shape decision would consume, so that calibrating the
@@ -44,6 +49,24 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
+from jmfts_core.atoms import (
+    COST_CPU,
+    EV_BLOB,
+    EV_MATCHED,
+    EV_PROFILE,
+    EV_SHEET,
+    EV_SHEET_MEASUREMENTS,
+    EV_RECORD,
+    EV_SHEET_SHAPE,
+    EV_STRUCTURE,
+    EV_TEXT,
+    KEY_NATURAL,
+    KEY_POSITION,
+    LOCUS_ANCESTOR,
+    ChildKey,
+    Fanout,
+    fixed,
+)
 from jmfts_core.config import get_settings
 from jmfts_core.embedding import get_embedding_service
 from jmfts_core.ingest_tasks import (
@@ -51,100 +74,62 @@ from jmfts_core.ingest_tasks import (
     TASK_PROFILE_SHEET,
     TASK_STRUCTURE_SHEETS,
     TaskOutcome,
+    enqueue_frontier,
+    plan_frontier,
     register_task_handler,
-    # Private, and imported anyway — the same import `tests/test_ingest_worker.py` and
-    # `tests/test_ingest_explain.py` already make. It is the one implementation of "a
-    # planned task whose handler is not registered is DEFERRED with a stated reason, and
-    # so is anything ordered after it", and a second copy of that rule here could differ
-    # from the one `run_probe` applies.
-    _split_by_handler,
 )
-from jmfts_core.models.document import Document, SETTLED_IN_FLIGHT, SETTLED_SETTLED
+from jmfts_core.models.document import (
+    Document,
+    SETTLED_IN_FLIGHT,
+    SETTLED_SETTLED,
+    USETYPE_RECORD,
+    USETYPE_SHEET,
+    USETYPE_SUMMARY,
+)
 from jmfts_core.models.task_queue import TaskQueue, WRITE_CHILDREN
 from jmfts_core.office.cells import read_rows
 from jmfts_core.office.sheets import measure_sheet
 from jmfts_core.office.workbook import read_sheets
 from jmfts_core.repositories.blob import BlobRepository
 from jmfts_core.repositories.document import DocumentRepository
+from jmfts_core.repositories.evidence import EvidenceRepository, evidence_value
 from jmfts_core.repositories.task_queue import TaskQueueRepository
-from jmfts_core.settling import TaskSpec, enqueue_batch
-from jmfts_core.sheet_profile import (
-    USETYPE_SUMMARY,
-    build_profile_content,
-    sheet_structured_content,
-)
+from jmfts_core.sheet_profile import build_profile_content, sheet_evidence_block
 from jmfts_core.sheet_records import (
     NO_HEADER_REASON,
     SHAPE_BASIS,
     SHAPE_RECORDS,
-    USETYPE_RECORD,
     build_records,
     header_labels,
 )
-from jmfts_core.structure_tasks import EMBED_CHUNK_SPEC, RUNG_DECLARED, RUNG_INFERRED
-
-#: The usetype 8.1 names. An open string like every usetype (spec Part 9), spelled here so
-#: the tasks 8.2 brings — which select their scope by it — agree with what wrote it.
-USETYPE_SHEET = "sheet"
+from jmfts_core.structure_tasks import RUNG_DECLARED, RUNG_INFERRED
 
 #: What produced these boundaries, recorded beside the rung exactly as the text rungs
 #: record theirs. It names what was READ: the workbook part's own ``<sheets>`` list, not a
 #: count of ``xl/worksheets/`` parts and not anything about the cells.
 SOURCE_WORKBOOK_SHEETS = "workbook_sheet_list"
 
-#: ``INGEST_SPEC.md`` 8.2's first per-sheet task, as it is enqueued beneath every sheet.
-#:
-#: **``children``, where 8.2's table says ``self``, and this is a deliberate divergence.**
-#: A write mode is a concurrency declaration that the claim query acts on (spec 5.3): a
-#: ``self`` task conflicts only with another ``self`` on the same node. But 8.5 makes the
-#: profile a CHILD of the sheet node, so this task writes children, and declaring
-#: otherwise would tell the queue it is safe to run a children-writer beside it. Today the
-#: only other children-writer on a sheet node is ``extract:sheet``, which is ordered after
-#: this one, so the lie would not yet cost anything — which is exactly why it would still
-#: be there when it did.
-#:
-#: ``sketch_columns`` is in the params rather than read from configuration so that it lands
-#: in the row's ``param_fingerprint`` (6.1): a re-ingest that turns sketching on is a
-#: different request from the one that ran without it, and the attempt diff has to see
-#: that. ``true`` is the default because a column with no sketch is invisible to 8.6's
-#: containment search whatever its cardinality — see :mod:`jmfts_core.sketch`.
-PROFILE_SHEET_SPEC = TaskSpec(
-    task_type=TASK_PROFILE_SHEET,
-    write_mode=WRITE_CHILDREN,
-    params={"sketch_columns": True},
-)
-
-#: How many rows one ``extract:sheet`` turns into nodes before it FAILS the task. 6.6 asks
-#: for exactly this — "a named limit that fails the task, not a silent truncation" — because
-#: a sheet whose first ten thousand rows became nodes is indistinguishable, from anywhere
-#: downstream, from a sheet that had ten thousand rows.
-#:
-#: The number is a CEILING, not a measurement. It is round on purpose so that it does not
-#: read as something that was counted, and it clears 8.4's own worked example (1,284 rows)
-#: by an order of magnitude. Raising it is a task parameter; what it costs is one node and
-#: one embedding per row.
-DEFAULT_MAX_ROW_NODES = 10_000
-
-#: 8.2's second per-sheet task: the cells themselves, one node per row.
-#:
-#: **It runs 8.4's ``records`` shape only, and the rule it branches on is not one of 8.8's
-#: thresholds.** See :data:`jmfts_core.sheet_records.SHAPE_BASIS`. A sheet whose
-#: ``header_row`` is false gets no records and says why; the shapes that would cover it are
-#: still waiting on the calibration corpus.
-#:
-#: ``max_rows`` and ``with_cell_notes`` are parameters rather than configuration for the
-#: reason ``sketch_columns`` is: they land in the row's ``param_fingerprint`` (6.1), so a
-#: re-ingest that raises the ceiling is a different request from the one that failed on it.
-EXTRACT_SHEET_SPEC = TaskSpec(
-    task_type=TASK_EXTRACT_SHEET,
-    write_mode=WRITE_CHILDREN,
-    after=(TASK_PROFILE_SHEET,),
-    params={"max_rows": DEFAULT_MAX_ROW_NODES, "with_cell_notes": True},
-)
-
-#: The batch every sheet node gets. In dependency order, because ``enqueue_batch`` resolves
-#: an ``after`` name to the id of a spec EARLIER in the same batch.
-SHEET_TASK_SPECS: tuple[TaskSpec, ...] = (PROFILE_SHEET_SPEC, EXTRACT_SHEET_SPEC)
+# 8.2's TWO PER-SHEET TASKS ARE NOT DECLARED IN THIS MODULE ANY MORE. They were
+# `PROFILE_SHEET_SPEC`, `EXTRACT_SHEET_SPEC` and `SHEET_TASK_SPECS` — literal `TaskSpec`
+# values with literal `params` dicts, which is what `SPRINT_JOBS.md` Part 0 measured as the
+# second of three planners and as the reason the sheet knobs could not be set by anybody.
+# They are rows of `TASK_ROWS` now, scoped to the children `structure:sheets` produces, and
+# `plan_frontier` is what reads them. Four things follow, and each one was a defect:
+#
+#   * `max_rows`, `with_cell_notes` and `sketch_columns` are reachable from a caller's
+#     ingest options (`sheet_records` and `sheet_profile` in `jmfts_core.ingest_options`);
+#   * so `sheet_tasks`' claim that they land in the `param_fingerprint` — "a re-ingest that
+#     raises the ceiling is a different request from the one that failed on it" — describes
+#     a fingerprint a request can now actually move;
+#   * `EXPLAIN` reaches them, where before it stopped at the sheet list;
+#   * `max_rows` goes through `ingest_options._positive_int`, which rejects `bool` —
+#     `int(True)` is 1, and one record node for a whole sheet was a live outcome the moment
+#     the knob became reachable.
+#
+# What did NOT change is where the enqueue happens. 6.4: the settling walk travels upward
+# only, so a freshly created child is unreachable from below and its work must be enqueued
+# where it is created. `run_structure_sheets` still does that, per sheet; what it no longer
+# holds is the list of what to enqueue.
 
 #: Why the sheet node carries no ``rung`` for what is below it. 8.7 gives the sheet block a
 #: ``rung`` that depends on the shape — ``inferred`` for every one except ``unstructured``,
@@ -157,7 +142,34 @@ NO_RUNG_REASON = (
 )
 
 
-@register_task_handler(TASK_STRUCTURE_SHEETS)
+def _sheet_ceiling(evidence: dict, params: dict) -> tuple[int, int]:
+    """One node per sheet the workbook names. Exact in both directions.
+
+    ``sheet_count`` is what probe read out of ``xl/workbook.xml``, and the handler raises
+    when openpyxl disagrees with it — so this bound is not an estimate that a run might
+    exceed, it is a number the run asserts against.
+    """
+    count = int(evidence["matched.patterns.sheet_count"])
+    return (count, count)
+
+
+# The sheet's own name, which is the one natural key in the appliance today: the workbook
+# names it, a re-ingest of an edited workbook names it the same, and it survives a sheet
+# being moved. 9.2's strongest form, and the only atom that gets it for free.
+@register_task_handler(
+    TASK_STRUCTURE_SHEETS,
+    consumes=(f"{EV_MATCHED}@self", f"{EV_BLOB}@self"),
+    produces=(f"{EV_STRUCTURE}@self", f"{EV_SHEET}@children"),
+    write_mode=WRITE_CHILDREN,
+    cost_class=COST_CPU,
+    fanout=Fanout(
+        bound=_sheet_ceiling,
+        reads=("matched.patterns.sheet_count",),
+        basis="one node per sheet",
+        counts=USETYPE_SHEET,
+    ),
+    child_key=ChildKey(KEY_NATURAL, path="sheet.name"),
+)
 def run_structure_sheets(session: Session, task: TaskQueue) -> TaskOutcome:
     """Write one node per sheet the workbook names, under the file node.
 
@@ -166,8 +178,9 @@ def run_structure_sheets(session: Session, task: TaskQueue) -> TaskOutcome:
     a derived state rather than a constant: ``settled`` must not claim a subtree is
     finished while its profile is still embedding, and equally a node with nothing queued
     beneath it and left in flight would park the whole workbook forever with no task able
-    to release it. ``_split_by_handler`` decides which case this is, from what is
-    registered — so the day ``extract:sheet`` gains a handler, nothing here changes.
+    to release it. :attr:`~jmfts_core.ingest_tasks.Frontier.in_flight` decides which case
+    this is, from what the rows for this scope came out as — so the day a per-sheet row
+    gains or loses a handler, nothing here changes.
 
     **An empty sheet list raises.** ``has_sheets`` is what schedules this task, probe read
     it from the same ``xl/workbook.xml`` this reader does, and the two disagreeing means
@@ -190,7 +203,7 @@ def run_structure_sheets(session: Session, task: TaskQueue) -> TaskOutcome:
         )
 
     sheets = read_sheets(data)
-    probed = ((doc.structured_content or {}).get("matched") or {}).get("patterns") or {}
+    probed = evidence_value(session, doc.id, "matched.patterns") or {}
     if not sheets:
         raise ValueError(
             f"{TASK_STRUCTURE_SHEETS} is scoped to document {doc.id}, whose workbook names "
@@ -201,13 +214,15 @@ def run_structure_sheets(session: Session, task: TaskQueue) -> TaskOutcome:
 
     repo = DocumentRepository(session)
     tasks = TaskQueueRepository(session)
-    # 8.2's two tasks are scoped to a SHEET, which is a node this loop is about to create —
-    # so they cannot be rows of Part 4's table, which is evaluated once per uploaded file
-    # from probe's patterns, for the same reason `embed` is not a row. What 8.2's "depends
-    # on the declared rung" means in this codebase's terms is that the node the task is
-    # scoped to does not exist until that rung created it, which is the relationship
-    # `EMBED_CHUNK_SPEC` already has with the chunker.
-    runnable, deferred_tasks = _split_by_handler(SHEET_TASK_SPECS)
+    # 8.2's two tasks are scoped to a SHEET, which is a node this loop is about to create.
+    # That is what 8.2's "depends on the declared rung" means in this codebase's terms —
+    # the node the task is scoped to does not exist until this rung creates it — and since
+    # Phase 3 it is written down as the rows' scope rather than as a tuple here.
+    #
+    # Planned ONCE for the whole workbook and enqueued per sheet: the rows are decided by
+    # `(format, patterns, options)`, and every sheet of one workbook shares all three. A
+    # forty-sheet workbook is one evaluation and forty enqueues.
+    frontier = plan_frontier(session, doc, produced_by=TASK_STRUCTURE_SHEETS, usetype=USETYPE_SHEET)
     child_ids: list[int] = []
     for sheet in sheets:
         node = repo.create(
@@ -219,7 +234,10 @@ def run_structure_sheets(session: Session, task: TaskQueue) -> TaskOutcome:
             content=None,
             parent_id=doc.id,
             usetype=USETYPE_SHEET,
-            structured_content={
+            # 4.2's stamp, and it is what makes "the children `structure:sheets` produced"
+            # answerable — which is the scope both of 8.2's tasks are declared at.
+            produced_by=TASK_STRUCTURE_SHEETS,
+            evidence={
                 "structure": {
                     "primary_rung": RUNG_DECLARED,
                     "source": SOURCE_WORKBOOK_SHEETS,
@@ -234,20 +252,22 @@ def run_structure_sheets(session: Session, task: TaskQueue) -> TaskOutcome:
             },
             auto_embed=False,
             sequential=True,
-            settled=SETTLED_IN_FLIGHT if runnable else SETTLED_SETTLED,
+            settled=SETTLED_IN_FLIGHT if frontier.in_flight else SETTLED_SETTLED,
         )
-        if runnable:
-            enqueue_batch(tasks, node.id, runnable)
+        if frontier.in_flight:
+            enqueue_frontier(tasks, node, frontier)
         child_ids.append(node.id)
 
-    structured = dict(doc.structured_content or {})
-    structured["structure"] = {
-        "primary_rung": RUNG_DECLARED,
-        "source": SOURCE_WORKBOOK_SHEETS,
-        "node_count": len(child_ids),
-        "max_depth": 1,
-    }
-    doc.structured_content = structured
+    EvidenceRepository(session).write(
+        doc.id,
+        "structure",
+        {
+            "primary_rung": RUNG_DECLARED,
+            "source": SOURCE_WORKBOOK_SHEETS,
+            "node_count": len(child_ids),
+            "max_depth": 1,
+        },
+    )
     session.flush()
 
     detail = {
@@ -261,10 +281,14 @@ def run_structure_sheets(session: Session, task: TaskQueue) -> TaskOutcome:
         "hidden_sheets": sum(1 for sheet in sheets if sheet.state != "visible"),
         # Per sheet, not in total — the numbers below are what one sheet node got, and a
         # reader multiplying by `sheets` gets the workbook's fan-out.
-        "queued_per_sheet": [spec.task_type for spec in runnable],
+        "queued_per_sheet": [spec.task_type for spec in frontier.specs],
         # 3.4: a rung that ran and stopped where the spec says to stop must not look like
         # one that never ran.
-        "deferred": deferred_tasks,
+        "deferred": frontier.deferred,
+        # And a row whose CONDITION was false is a third thing again. It could not be
+        # reported here before Phase 3, because the sheet tier was a literal tuple with no
+        # condition to report; it is a row now, and a row that did not fire has a reason.
+        "not_applicable": frontier.not_applicable,
     }
 
     return TaskOutcome(
@@ -280,7 +304,7 @@ def run_structure_sheets(session: Session, task: TaskQueue) -> TaskOutcome:
 
 
 def _scoped_sheet(session: Session, task: TaskQueue, *, task_type: str, purpose: str) -> tuple:
-    """``(node, structured_content, sheet_block, sheet_name)`` for a per-sheet task.
+    """``(node, sheet_block, sheet_name)`` for a per-sheet task.
 
     Both of 8.2's per-sheet tasks are scoped to a sheet node and both need the same four
     things to be true before they can do anything. Shared rather than written twice because
@@ -302,8 +326,7 @@ def _scoped_sheet(session: Session, task: TaskQueue, *, task_type: str, purpose:
             f"{node.usetype!r} and not {USETYPE_SHEET!r}; this task {purpose} "
             "and has no meaning anywhere else in the tree"
         )
-    structured = dict(node.structured_content or {})
-    sheet = dict(structured.get("sheet") or {})
+    sheet = dict(EvidenceRepository(session).read(node.id, "sheet") or {})
     name = sheet.get("name")
     if not name:
         raise ValueError(
@@ -311,7 +334,7 @@ def _scoped_sheet(session: Session, task: TaskQueue, *, task_type: str, purpose:
             f"{TASK_STRUCTURE_SHEETS} writes that name and it is the only thing that says "
             "WHICH sheet of the workbook this node is"
         )
-    return node, structured, sheet, name
+    return node, sheet, name
 
 
 def _sheet_blob(session: Session, node: Document, *, task_type: str, name: str) -> bytes:
@@ -340,7 +363,23 @@ def _sheet_blob(session: Session, node: Document, *, task_type: str, name: str) 
 # ---------------------------------------------------------------------------
 
 
-@register_task_handler(TASK_PROFILE_SHEET)
+# `cpu`, and the docstring below argues it: the tokenizer loads no weights and touches no
+# GPU, so `rendered_tokens` costs a parse and not a forward pass. The profile node this
+# writes carries an `embed`, and THAT is the model-class work — it is its own atom, on its
+# own node, which is the whole reason `embed` was split out.
+#
+# `blob@ancestor` is the fourth locus, and this atom is one of the two that needed it. The
+# bytes are on the file node above; `SPRINT_JOBS.md` 2.2 offered three loci and all three
+# read downward or at the node itself.
+@register_task_handler(
+    TASK_PROFILE_SHEET,
+    consumes=(f"{EV_SHEET}@self", f"{EV_BLOB}@{LOCUS_ANCESTOR}"),
+    produces=(f"{EV_SHEET_MEASUREMENTS}@self", f"{EV_PROFILE}@children", f"{EV_TEXT}@children"),
+    write_mode=WRITE_CHILDREN,
+    cost_class=COST_CPU,
+    fanout=fixed(1, counts=USETYPE_SUMMARY),
+    child_key=ChildKey(KEY_NATURAL, path="profile.sheet_name"),
+)
 def run_profile_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
     """Measure one sheet, write the measurements, and write the profile node. 8.3 and 8.5.
 
@@ -363,14 +402,18 @@ def run_profile_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
     measurements go; the bytes belong to the file node above it. A sheet node with no
     parent is a tree that was rearranged underneath a queued task, and it raises.
     """
-    node, structured, sheet, name = _scoped_sheet(
+    node, sheet, name = _scoped_sheet(
         session, task, task_type=TASK_PROFILE_SHEET, purpose="measures one worksheet"
     )
     data = _sheet_blob(session, node, task_type=TASK_PROFILE_SHEET, name=name)
 
     settings = get_settings()
+    # `params[...]` and not `params.get(..., True)`, for the reason `run_extract_sheet`
+    # gives about its own two: the `sheet_profile` group is complete on every queue row
+    # `plan_frontier` writes, so a default here would be a second source of the value and
+    # which one ran would depend on what enqueued the task.
     params = task.params or {}
-    with_sketches = bool(params.get("sketch_columns", True))
+    with_sketches = bool(params["sketch_columns"])
     # The document window, because it is the model's own limit and therefore the largest
     # value 8.4's `small_table` test could ever be calibrated to. See `measure_sheet` for
     # why that makes it a derivation rather than a chosen size.
@@ -393,7 +436,7 @@ def run_profile_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
         ).token_count
 
     sheet.update(
-        sheet_structured_content(
+        sheet_evidence_block(
             measurement,
             rendered_tokens=rendered_tokens,
             token_window=settings.embedding_token_window,
@@ -405,24 +448,25 @@ def run_profile_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
 
     content, profile_record = build_profile_content(measurement, fits=service.fits_token_window)
     repo = DocumentRepository(session)
+    frontier = plan_frontier(session, node, produced_by=TASK_PROFILE_SHEET, usetype=USETYPE_SUMMARY)
     profile = repo.create(
         title=f"{name} — sheet profile",
         content=content,
         parent_id=node.id,
         usetype=USETYPE_SUMMARY,
-        structured_content={"profile": dict(profile_record, sheet_name=name)},
+        produced_by=TASK_PROFILE_SHEET,
+        evidence={"profile": dict(profile_record, sheet_name=name)},
         # The model does not run here. `embed` is its own task and this node is not
         # retrievable until it has run, which is what `in_flight` states — the same
         # contract every chunk has.
         auto_embed=False,
         sequential=True,
-        settled=SETTLED_IN_FLIGHT,
+        settled=SETTLED_IN_FLIGHT if frontier.in_flight else SETTLED_SETTLED,
     )
-    enqueue_batch(TaskQueueRepository(session), profile.id, (EMBED_CHUNK_SPEC,))
+    enqueue_frontier(TaskQueueRepository(session), profile, frontier)
 
     sheet["profile_node_id"] = profile.id
-    structured["sheet"] = sheet
-    node.structured_content = structured
+    EvidenceRepository(session).write(node.id, "sheet", sheet)
     session.flush()
 
     return TaskOutcome(
@@ -449,12 +493,12 @@ def run_profile_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
             },
             "profile": profile_record,
             "no_rung": NO_RUNG_REASON,
-            # COMPUTED, not stated. This read `DEFERRED_REASON[TASK_EXTRACT_SHEET]`
-            # unconditionally while that task had no handler, and would have gone on
-            # reporting it as deferred the day it got one. `_split_by_handler` is the one
-            # implementation of "what in this batch cannot run", and `structure:sheets`
-            # decides what to enqueue from the same call.
-            "deferred": _split_by_handler((EXTRACT_SHEET_SPEC,))[1],
+            # The PROFILE NODE's frontier, which is `embed`. It used to be
+            # `_split_by_handler((EXTRACT_SHEET_SPEC,))[1]` — this task reporting whether
+            # its SIBLING could run — because this module held the sheet batch and this was
+            # the only place left to say so. `structure:sheets` reports that now, from the
+            # frontier it planned, which is where the decision is actually taken.
+            "deferred": frontier.deferred,
         },
         produced={"node_count": 1, "child_ids": [profile.id]},
     )
@@ -465,7 +509,43 @@ def run_profile_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
 # ---------------------------------------------------------------------------
 
 
-@register_task_handler(TASK_EXTRACT_SHEET)
+def _row_ceiling(evidence: dict, params: dict) -> tuple[int, int]:
+    """One node per data row, up to the ceiling that FAILS the task. 8.4 and 6.6.
+
+    ``max_rows`` is not a truncation and the low bound says so: a sheet with more rows than
+    the ceiling writes nothing at all, because it raises. So the interval is ``(0, rows)``
+    for a sheet inside the ceiling and ``(0, 0)`` for one past it, and there is no value of
+    ``rows`` for which this atom writes a partial sheet.
+    """
+    rows = int(evidence["sheet.measurements.rows"])
+    if rows > int(params["max_rows"]):
+        return (0, 0)
+    # The header row becomes no node of its own: it names the keys the records carry.
+    return (0, max(rows - 1, 0))
+
+
+# `sheet.measurements@self` is the derived edge, and it is the one this atom's docstring
+# argues for in prose: the header verdict and the column labels come from `profile:sheet`
+# rather than being measured a second time. The `extract:sheet` ROW says the same thing by
+# hand, in its `after`, which is what Part 2.3 claims is redundant.
+@register_task_handler(
+    TASK_EXTRACT_SHEET,
+    consumes=(
+        f"{EV_SHEET}@self",
+        f"{EV_SHEET_MEASUREMENTS}@self",
+        f"{EV_BLOB}@{LOCUS_ANCESTOR}",
+    ),
+    produces=(f"{EV_SHEET_SHAPE}@self", f"{EV_TEXT}@children", f"{EV_RECORD}@children"),
+    write_mode=WRITE_CHILDREN,
+    cost_class=COST_CPU,
+    fanout=Fanout(
+        bound=_row_ceiling,
+        reads=("sheet.measurements.rows",),
+        basis="one node per data row",
+        counts=USETYPE_RECORD,
+    ),
+    child_key=ChildKey(KEY_POSITION),
+)
 def run_extract_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
     """One node per row, holding the row as typed JSON. 8.4's ``records`` shape.
 
@@ -487,7 +567,7 @@ def run_extract_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
     (``KNOWN-DEFECTS.md`` D1). The count is in the attempt detail so an operator sees the
     condition here rather than as N failing tasks with no common cause.
     """
-    node, structured, sheet, name = _scoped_sheet(
+    node, sheet, name = _scoped_sheet(
         session, task, task_type=TASK_EXTRACT_SHEET, purpose="materialises one worksheet's cells"
     )
     measurements = sheet.get("measurements")
@@ -499,9 +579,16 @@ def run_extract_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
             "ordered after it for that reason"
         )
 
+    # `params[...]` and not `params.get(..., DEFAULT)`. The `sheet_records` group is
+    # complete for every format (`ingest_options._check_option_tables` holds that at
+    # import), so a queue row planned by `plan_frontier` always carries both values —
+    # validated, and with `_positive_int` having already refused the `bool` that `int(True)`
+    # would have turned into one record node for a whole sheet. A default here would be a
+    # second source of the number, and the one that ran would depend on which path enqueued
+    # the task.
     params = task.params or {}
-    max_rows = int(params.get("max_rows", DEFAULT_MAX_ROW_NODES))
-    with_notes = bool(params.get("with_cell_notes", True))
+    max_rows = int(params["max_rows"])
+    with_notes = bool(params["with_cell_notes"])
     # Preserved, not rebuilt: `profile:sheet` put 8.4's branch INPUTS here and they are what
     # a calibration sweep replays against. This task adds a verdict; it does not get to
     # forget the evidence.
@@ -513,8 +600,7 @@ def run_extract_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
         )
         sheet["shape"] = None
         sheet["shape_decision"] = decision
-        structured["sheet"] = sheet
-        node.structured_content = structured
+        EvidenceRepository(session).write(node.id, "sheet", sheet)
         session.flush()
         return TaskOutcome(
             # 8.7 makes the rung a function of the shape and no shape was chosen.
@@ -530,6 +616,7 @@ def run_extract_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
     repo = DocumentRepository(session)
     tasks = TaskQueueRepository(session)
     service = get_embedding_service()
+    frontier = plan_frontier(session, node, produced_by=TASK_EXTRACT_SHEET, usetype=USETYPE_RECORD)
     child_ids: list[int] = []
     over_window = 0
     with_formula = 0
@@ -547,7 +634,8 @@ def run_extract_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
             content=record.content,
             parent_id=node.id,
             usetype=USETYPE_RECORD,
-            structured_content={
+            produced_by=TASK_EXTRACT_SHEET,
+            evidence={
                 "record": record.record,
                 "row_index": record.row_index,
                 "sheet_name": name,
@@ -559,9 +647,9 @@ def run_extract_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
             # retrievable until it has run, which is what `in_flight` states.
             auto_embed=False,
             sequential=True,
-            settled=SETTLED_IN_FLIGHT,
+            settled=SETTLED_IN_FLIGHT if frontier.in_flight else SETTLED_SETTLED,
         )
-        enqueue_batch(tasks, child.id, (EMBED_CHUNK_SPEC,))
+        enqueue_frontier(tasks, child, frontier)
         child_ids.append(child.id)
 
     decision.update(
@@ -580,8 +668,7 @@ def run_extract_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
     sheet["rung"] = RUNG_INFERRED
     sheet["shape_decision"] = decision
     sheet["record_count"] = len(child_ids)
-    structured["sheet"] = sheet
-    node.structured_content = structured
+    EvidenceRepository(session).write(node.id, "sheet", sheet)
     session.flush()
 
     return TaskOutcome(

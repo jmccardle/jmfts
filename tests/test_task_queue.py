@@ -390,7 +390,7 @@ class TestRetry:
 
 
 class TestAttemptRecords:
-    def test_completion_writes_the_attempt_onto_the_node(self, repos):
+    def test_completion_writes_the_attempt_onto_the_node(self, repos, evidence):
         docs, tasks = repos
         node = _node(docs)
         task = tasks.enqueue("structure:declared", node.id, "children", params={"min": 200})
@@ -410,13 +410,13 @@ class TestAttemptRecords:
         assert record.param_fingerprint == task.param_fingerprint
         assert record.started_at is not None and record.finished_at is not None
 
-        stored = docs.get(node.id).structured_content["attempts"]
+        stored = evidence(docs.get(node.id))["attempts"]
         assert len(stored) == 1
         assert stored[0]["task"] == "structure:declared"
         assert stored[0]["status"] == "completed"
         assert stored[0]["rung"] == "declared"
 
-    def test_failure_writes_the_attempt_with_its_classification(self, repos):
+    def test_failure_writes_the_attempt_with_its_classification(self, repos, evidence):
         docs, tasks = repos
         node = _node(docs)
         task = tasks.enqueue("probe", node.id, "self")
@@ -426,11 +426,11 @@ class TestAttemptRecords:
 
         assert record.status == "failed"
         assert record.error_type == "permanent"
-        stored = docs.get(node.id).structured_content["attempts"]
+        stored = evidence(docs.get(node.id))["attempts"]
         assert stored[-1]["error"] == "corrupt"
         assert stored[-1]["error_type"] == "permanent"
 
-    def test_the_attempt_counter_is_per_node_and_task(self, repos, db_session):
+    def test_the_attempt_counter_is_per_node_and_task(self, repos, db_session, evidence):
         """A re-run under spec 6.1 is a NEW queue row whose retry_count restarts at zero
         while the node's history does not, so the counter comes from the log."""
         docs, tasks = repos
@@ -439,7 +439,7 @@ class TestAttemptRecords:
             task = tasks.enqueue("probe", node.id, "self")
             tasks.complete(_claim_and_run(tasks, task), detail={})
 
-        stored = docs.get(node.id).structured_content["attempts"]
+        stored = evidence(docs.get(node.id))["attempts"]
         assert [entry["attempt"] for entry in stored] == [1, 2]
 
     def test_a_skipped_completion_still_needs_a_reason(self, repos):
@@ -928,7 +928,7 @@ class TestBatchedStatus:
         assert tasks.outstanding_batches() == []
         assert all(tasks.get(t.id).status == TASK_COMPLETED for t in held)
 
-    def test_completing_from_batched_needs_no_reclaim(self, repos):
+    def test_completing_from_batched_needs_no_reclaim(self, repos, evidence):
         """`complete` requires only that the task was once started, which the claim did.
         A batched task never went back to `pending`, so there is nothing to re-claim and no
         second attempt record."""
@@ -940,7 +940,7 @@ class TestBatchedStatus:
         tasks.complete(held[0], detail={"batch_id": "batch_abc123"})
         docs.session.flush()
 
-        entries = docs.get(node_id).structured_content["attempts"]
+        entries = evidence(docs.get(node_id))["attempts"]
         assert [e["status"] for e in entries] == ["completed"]
         assert tasks.structuring_complete(node_id) is True
 

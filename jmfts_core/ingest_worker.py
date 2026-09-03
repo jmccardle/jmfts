@@ -166,15 +166,22 @@ class IngestWorker:
     # One task
     # =========================================================================
 
-    def run_once(self) -> bool:
+    def run_once(self, *, root_document_id: Optional[int] = None) -> bool:
         """Claim one task, run it, record the outcome, settle from it.
 
         Returns True if a task was claimed (whatever happened to it), False if the queue
         had nothing claimable — which is the loop's signal to wait before asking again.
+
+        ``root_document_id`` narrows the claim to one document's tree; see
+        :meth:`~jmfts_core.repositories.task_queue.TaskQueueRepository.claim_next`. False
+        then means "nothing claimable UNDER THAT ROOT", which is weaker than "nothing
+        left" — :meth:`drain_document` is the loop that knows the difference.
         """
         with self.session_factory() as session:
             task = TaskQueueRepository(session).claim_next(
-                self.worker_id, service_badges=self.service_badges
+                self.worker_id,
+                service_badges=self.service_badges,
+                root_document_id=root_document_id,
             )
             if task is None:
                 return False
@@ -379,6 +386,73 @@ class IngestWorker:
             "raise max_tasks, or a handler is enqueueing work in a cycle"
         )
 
+    def drain_document(
+        self,
+        root_id: int,
+        *,
+        timeout_seconds: float,
+        max_tasks: int = 1000,
+        poll_seconds: float = 0.05,
+    ) -> int:
+        """Run ONE document's tasks until its tree owes no more work. ``SPRINT_JOBS.md`` S3.
+
+        What ``POST /ingest`` uses to keep its synchronous wire while the work moves onto
+        the queue (15.2 decision 1). It is not a second execution path: the tasks, the
+        handlers, the attempt log and the settling walk are the ones the background worker
+        runs. What differs is only which rows are eligible and who is waiting.
+
+        **It ends on "this root has no unfinished task", not on "I could not claim one",**
+        and that distinction is the whole reason this is not three lines. The background
+        worker is claiming from the same queue; ``FOR UPDATE SKIP LOCKED`` makes that safe
+        and also makes an empty claim ambiguous. Reading it as completion would return a
+        half-built tree from every request that raced the worker — a document with some of
+        its chunks, reported as finished. So an empty claim asks
+        :meth:`~jmfts_core.repositories.task_queue.TaskQueueRepository.unfinished_task_count_under`
+        and waits while the answer is positive.
+
+        ``timeout_seconds`` HAS NO DEFAULT. Somebody is holding a request open for the
+        duration, and how long that may be is a property of the caller rather than of the
+        queue. Exceeding it raises: the work is still queued and the background worker will
+        finish it, but this call cannot say the tree is complete and will not imply it.
+
+        Waiting is not always a race with another worker. A task that failed TRANSIENTLY is
+        counted as unfinished and is unclaimable until its ``retry_after`` passes, so a
+        backoff longer than ``timeout_seconds`` reaches the timeout, which is the honest
+        answer for a request that cannot wait that long.
+        """
+        ran = 0
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            if ran >= max_tasks:
+                raise RuntimeError(
+                    f"drain_document ran its bound of {max_tasks} tasks on document "
+                    f"{root_id} without its tree going quiet; raise max_tasks, or a "
+                    "handler is enqueueing work in a cycle"
+                )
+            if self.run_once(root_document_id=root_id):
+                ran += 1
+                continue
+
+            with self.session_factory() as session:
+                outstanding = TaskQueueRepository(session).unfinished_task_count_under(root_id)
+            if outstanding == 0:
+                return ran
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"document {root_id} still has {outstanding} unfinished task(s) after "
+                    f"{timeout_seconds:g}s; the work is queued and the background worker "
+                    "will finish it, but this call cannot report the tree as complete"
+                )
+            # `_stop`, not `sleep`: a worker being shut down under a request in flight
+            # should not hold the process open for the rest of the timeout.
+            if self._stop.wait(min(poll_seconds, remaining)):
+                raise RuntimeError(
+                    f"worker {self.worker_id} was stopped while draining document "
+                    f"{root_id}; {outstanding} task(s) are still unfinished"
+                )
+
     # =========================================================================
     # The thread
     # =========================================================================
@@ -468,6 +542,32 @@ class IngestWorker:
                 # worker that cannot be interrupted makes `stop()` take a poll interval.
                 self._stop.wait(self.poll_seconds)
         logger.info("ingest worker %s stopped", self.worker_id)
+
+
+@contextmanager
+def borrowed_session(session: Session) -> Iterator[Session]:
+    """Hand the worker a session it does not own, with ``get_session``'s semantics.
+
+    :class:`IngestWorker` opens one session context per phase and relies on the exit to
+    commit or roll back. That is right for a background worker, which owns its connection.
+    An INLINE drain does not: ``POST /ingest`` is already inside a request that holds a
+    session, and opening a second connection per request would double the pool's load and
+    put the drain in a transaction that cannot see the file node the request just wrote.
+
+    So the worker is handed the caller's session with the same contract and no ownership —
+    each phase still commits at its boundary, and closing is the caller's business.
+
+    ``SPRINT_JOBS.md`` 15.4 S5. ``tests/conftest.py`` imports this rather than keeping its
+    own copy: the test suite's synchronous drain and the appliance's inline drain must
+    agree about transaction boundaries, or the suite is asserting a shape production does
+    not have.
+    """
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
 
 
 def build_worker_from_settings() -> IngestWorker:

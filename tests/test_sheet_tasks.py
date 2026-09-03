@@ -125,8 +125,10 @@ def _children(session, node_id: int) -> list[Document]:
     )
 
 
-def _attempt(node: Document, task: str) -> dict:
-    return next(e for e in node.structured_content["attempts"] if e["task"] == task)
+def _attempt(session, node: Document, task: str) -> dict:
+    """One entry from the node's durable attempt log, which is an evidence row since 2b."""
+    log = DocumentRepository(session).attempt_log(node)
+    return next(e for e in log if e["task"] == task)
 
 
 class _ScopedTask:
@@ -271,12 +273,14 @@ class TestStructureSheets:
         for child in _children(db_session, node.id):
             assert child.content is None
 
-    def test_a_sheet_node_carries_its_name_index_and_state(self, db_session, workbook_bytes):
+    def test_a_sheet_node_carries_its_name_index_and_state(
+        self, db_session, evidence, workbook_bytes
+    ):
         """The three facts THIS rung writes. `profile:sheet` adds its measurements to the
         same block (8.3 stores them under `sheet.measurements`), so the assertion is on
         these three keys rather than on the whole block."""
         node = _ingest(db_session, workbook_bytes)
-        sheets = [child.structured_content["sheet"] for child in _children(db_session, node.id)]
+        sheets = [evidence(child)["sheet"] for child in _children(db_session, node.id)]
         declared = [{key: block[key] for key in ("index", "name", "state")} for block in sheets]
 
         assert declared == [
@@ -286,21 +290,21 @@ class TestStructureSheets:
             {"index": 3, "name": "Notes", "state": "visible"},
         ]
 
-    def test_a_sheet_node_carries_the_declared_rung(self, db_session, workbook_bytes):
+    def test_a_sheet_node_carries_the_declared_rung(self, db_session, evidence, workbook_bytes):
         """The task name diverges from 8.2; the RUNG does not. A reader asking whether the
         declared rung ran for this workbook gets its answer from the node."""
         node = _ingest(db_session, workbook_bytes)
-        structure = _children(db_session, node.id)[0].structured_content["structure"]
+        structure = evidence(_children(db_session, node.id)[0])["structure"]
 
         assert structure == {
             "primary_rung": RUNG_DECLARED,
             "source": SOURCE_WORKBOOK_SHEETS,
         }
 
-    def test_the_file_node_records_what_the_rung_built(self, db_session, workbook_bytes):
+    def test_the_file_node_records_what_the_rung_built(self, db_session, evidence, workbook_bytes):
         node = _ingest(db_session, workbook_bytes)
 
-        assert node.structured_content["structure"] == {
+        assert evidence(node)["structure"] == {
             "primary_rung": RUNG_DECLARED,
             "source": SOURCE_WORKBOOK_SHEETS,
             "node_count": 4,
@@ -326,7 +330,7 @@ class TestStructureSheets:
         library and openpyxl resolved each one to a part; two numbers that should agree and
         do not are what says the workbook holds something other than worksheets."""
         node = _ingest(db_session, workbook_bytes)
-        detail = _attempt(node, TASK_STRUCTURE_SHEETS)["detail"]
+        detail = _attempt(db_session, node, TASK_STRUCTURE_SHEETS)["detail"]
 
         assert detail["sheets"] == 4
         assert detail["sheets_probed"] == 4
@@ -343,7 +347,7 @@ class TestStructureSheets:
         thresholds, so it no longer waits on the calibration corpus. The order matters and
         is asserted: it reads the header labels off what `profile:sheet` stored."""
         node = _ingest(db_session, workbook_bytes)
-        detail = _attempt(node, TASK_STRUCTURE_SHEETS)["detail"]
+        detail = _attempt(db_session, node, TASK_STRUCTURE_SHEETS)["detail"]
 
         assert detail["queued_per_sheet"] == ["profile:sheet", "extract:sheet"]
         assert detail["deferred"] == {}

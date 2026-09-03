@@ -1,7 +1,7 @@
 """``citation`` — the page and the rectangle a chunk came from. ``OFFICE_SPEC.md`` Part 5.
 
 An **anchor** is a stable address of a region of the source document, recorded on the node
-that region produced. It lives at ``structured_content['anchor']``, and for a PDF it is::
+that region produced. It is the ``source_anchor`` evidence row, and for a PDF it is::
 
     {"kind": "pdf", "page": 3, "bbox": [72.0, 118.4, 540.0, 262.9]}
 
@@ -49,12 +49,21 @@ from typing import Optional, Sequence
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from jmfts_core.atoms import (
+    COST_CPU,
+    EV_BLOB,
+    EV_EXTRACTION,
+    EV_SOURCE_ANCHOR,
+    EV_SOURCE_SPAN,
+    EV_TEXT,
+)
 from jmfts_core.ingest_tasks import TASK_CITATION, TaskOutcome, register_task_handler
-from jmfts_core.models.document import Document
-from jmfts_core.models.task_queue import TaskQueue
+from jmfts_core.models.document import Document, USETYPE_CHUNK
+from jmfts_core.models.task_queue import WRITE_SUBTREE, TaskQueue
 from jmfts_core.pdf_extraction import pdf_to_markdown
 from jmfts_core.repositories.blob import BlobRepository
-from jmfts_core.structure_tasks import EXTRACTION_PDF_TEXT_LAYER, USETYPE_CHUNK
+from jmfts_core.repositories.evidence import EvidenceRepository
+from jmfts_core.structure_tasks import EXTRACTION_PDF_TEXT_LAYER
 
 #: ``anchor.kind`` for a rectangle on a PDF page. An open string for the same reason
 #: ``usetype`` is (spec Part 9) — ``ooxml`` and ``cells`` are the other two Part 5 names,
@@ -65,8 +74,13 @@ ANCHOR_KIND_PDF = "pdf"
 #: TWO KEYS, NEVER ONE WITH A NULL: "this passage is at page 3, rectangle R" and "this
 #: passage could not be placed, because X" are different facts, and a consumer that has to
 #: tell them apart by testing for null gets no X to report.
-ANCHOR_KEY = "anchor"
-ANCHOR_UNRESOLVED_KEY = "anchor_unresolved"
+#: The registry names, not the column keys these were before Phase 2b. `anchor` became
+#: `source_anchor` and `anchor_unresolved` became `source_anchor.unresolved` on the way out
+#: of `structured_content` — 2.5's finding 5, evidence is named by what it asserts. The dot
+#: in the second is part of a name and not a path into the first: they are two rows, which
+#: is `SPRINT_JOBS.md` 3.2's "two keys, never one with a null".
+ANCHOR_NAME = "source_anchor"
+ANCHOR_UNRESOLVED_NAME = "source_anchor.unresolved"
 
 #: The chunk was written before ``source_span`` existed, or its offset into the extracted
 #: markdown could not be verified (see ``_TreeWriter._verified_span``). Either way there is
@@ -151,7 +165,32 @@ def anchor_for_span(
     return anchor, None
 
 
-@register_task_handler(TASK_CITATION)
+# THIS IS THE ROW THE PHASE 1 AUDIT WAS WATCHING. `SPRINT_JOBS.md` 14.1 predicted it and
+# `tests/test_atom_declarations.py` records the result: `source_span@subtree` is consumed,
+# the two structure rungs produce it at `@subtree`, and 2.2 says a `@subtree` consumption
+# is enforced by the settling walk rather than by a within-node edge. So the declarations
+# derive NO edge here, while `TASK_CITATION`'s row states `after_any` by hand — the one
+# place in the table where the derivation and the hand-written field disagree.
+#
+# The disagreement is the finding, not a defect: under the walk this atom stops being a
+# probe-time batch member and becomes a rule that fires when the file node is evaluated.
+# Phase 3 makes that change; nothing here does it yet.
+#
+# No fan-out and no child key. This writes anchors ONTO chunks that already exist and
+# creates nothing, which is also why `ADVISORY_TASK_TYPES` can hold it: a chunk with no
+# anchor is still a chunk.
+@register_task_handler(
+    TASK_CITATION,
+    consumes=(
+        f"{EV_EXTRACTION}@self",
+        f"{EV_TEXT}@self",
+        f"{EV_BLOB}@self",
+        f"{EV_SOURCE_SPAN}@subtree",
+    ),
+    produces=(f"{EV_SOURCE_ANCHOR}@subtree",),
+    write_mode=WRITE_SUBTREE,
+    cost_class=COST_CPU,
+)
 def run_citation(session: Session, task: TaskQueue) -> TaskOutcome:
     """Put a page and a rectangle on every chunk under this file node.
 
@@ -169,7 +208,7 @@ def run_citation(session: Session, task: TaskQueue) -> TaskOutcome:
             f"citation is scoped to document {task.scope_document_id}, which does not exist"
         )
 
-    extraction = (doc.structured_content or {}).get("extraction") or {}
+    extraction = EvidenceRepository(session).read(doc.id, "extraction") or {}
     source = extraction.get("source")
     if source != EXTRACTION_PDF_TEXT_LAYER:
         raise ValueError(
@@ -215,32 +254,36 @@ def run_citation(session: Session, task: TaskQueue) -> TaskOutcome:
     unresolved: dict[str, int] = {}
     pages: set[int] = set()
 
+    evidence = EvidenceRepository(session)
     for chunk in chunks:
-        structured = dict(chunk.structured_content or {})
-        # Both keys are cleared first so that a RE-RUN cannot leave last run's answer
+        # Both rows are deleted first so that a RE-RUN cannot leave last run's answer
         # standing beside this run's. Spec 6.1 makes re-running a first-class operation,
-        # and a chunk holding an `anchor` from a superseded extraction next to an
-        # `anchor_unresolved` from this one is a node that says two things.
-        structured.pop(ANCHOR_KEY, None)
-        structured.pop(ANCHOR_UNRESOLVED_KEY, None)
+        # and a chunk holding a `source_anchor` from a superseded extraction next to a
+        # `source_anchor.unresolved` from this one is a node that says two things.
+        # DELETE, not a null: 3.2 makes those different facts, and "this run has not
+        # decided yet" is neither of them.
+        evidence.delete(chunk.id, ANCHOR_NAME)
+        evidence.delete(chunk.id, ANCHOR_UNRESOLVED_NAME)
 
-        span = structured.get("source_span")
+        span = evidence.read(chunk.id, "source_span")
         if isinstance(span, list) and len(span) == 2:
             anchor, code = anchor_for_span(blocks, starts, span[0], span[1])
         else:
             anchor, code = None, UNRESOLVED_NO_SPAN
 
         if anchor is not None:
-            structured[ANCHOR_KEY] = anchor
+            evidence.write(chunk.id, ANCHOR_NAME, anchor)
             anchored += 1
             pages.add(anchor["page"])
             if "continues" in anchor:
                 continued += 1
         else:
-            structured[ANCHOR_UNRESOLVED_KEY] = {"code": code, "reason": UNRESOLVED_REASON[code]}
+            evidence.write(
+                chunk.id,
+                ANCHOR_UNRESOLVED_NAME,
+                {"code": code, "reason": UNRESOLVED_REASON[code]},
+            )
             unresolved[code] = unresolved.get(code, 0) + 1
-
-        chunk.structured_content = structured
 
     session.flush()
 

@@ -26,13 +26,50 @@ SETTLED_SETTLED = "settled"
 SETTLED_FAILED = "failed"
 SETTLED_STATES: tuple[str, ...] = (SETTLED_IN_FLIGHT, SETTLED_SETTLED, SETTLED_FAILED)
 
-#: The `file` usetype (INGEST_SPEC.md Part 9). Usetype stays an OPEN string — there is no
-#: enum, no CHECK constraint and no validation list to extend; this constant exists so the
-#: several places that mean "the uploaded-file node" spell it the same way, not to close
-#: the set. An application built on JMFTS defines its own usetypes freely. It lives on the
-#: model rather than in the ingest service because the settling walk, which is below the
-#: service layer, has to recognise a file node too.
+#: The usetypes the ingest pipeline itself writes (INGEST_SPEC.md Part 9). Usetype stays an
+#: OPEN string — there is no enum, no CHECK constraint and no validation list to extend;
+#: these constants exist so the several places that mean the same node spell it the same
+#: way, not to close the set. An application built on JMFTS defines its own usetypes freely.
+#:
+#: THEY LIVE ON THE MODEL, and each one is here for the reason `USETYPE_FILE` was here
+#: alone: something BELOW the handler that writes the node has to recognise it. The settling
+#: walk is below the service layer and needs `file`. Part 4's rule table
+#: (:data:`~jmfts_core.ingest_tasks.TASK_ROWS`) is below every handler module and, since a
+#: rule's scope names the KIND of child it applies to (`SPRINT_JOBS.md` 4.1), needs the
+#: other six. Defining them in the handler modules and importing them into the table would
+#: close an import cycle: every one of those modules imports the table's own module.
+#:
+#: ONE OF THEM WAS ALREADY WRITTEN TWICE — `sheet_tasks` and `services/document_service`
+#: each declared `USETYPE_SHEET = "sheet"`, which is precisely the copy-drift Part 14
+#: forbids. Consolidating them is what removes the second spelling rather than adding a
+#: seventh.
 USETYPE_FILE = "file"
+
+#: A titled region a structure rung found: a chapter, a heading's span. Holds no text of
+#: its own — its chunks do — and gets `effective_content` from the rollup.
+USETYPE_SECTION = "section"
+
+#: A leaf carrying prose: a piece of a region, or one turn of a transcript. The node the
+#: token/maxsim path exists for.
+USETYPE_CHUNK = "chunk"
+
+#: A container PELT created over a span of siblings. Not a `section`: a section is a span
+#: the DOCUMENT named, and this is a span this appliance found.
+USETYPE_SEGMENT = "segment"
+
+#: One worksheet of a workbook (8.1). The whole of a workbook's declared rung.
+USETYPE_SHEET = "sheet"
+
+#: A measured summary node — today, the profile `profile:sheet` writes under a sheet (8.5).
+#: The same string the RAPTOR summaries use, and deliberately: a profile is a summary of the
+#: node above it, it is retrieved the same way, and a reader filtering `usetype='summary'`
+#: wants both.
+USETYPE_SUMMARY = "summary"
+
+#: One row of a worksheet, as typed JSON (8.4's `records` shape). `record` and not `row`:
+#: what the node holds is one instance of whatever the sheet is a table of, and its row
+#: NUMBER is a fact about where it was found.
+USETYPE_RECORD = "record"
 
 
 class Document(Base):
@@ -58,6 +95,24 @@ class Document(Base):
 
     # Classification
     usetype: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+    # WHICH RULE PRODUCED THIS NODE. NULL means asserted — a person, an importer, or an
+    # upload created it, not a rule. Anything else names the rule, which today is the task
+    # type of the atom that wrote the node ('structure:declared', 'extract:sheet', ...).
+    #
+    # SPRINT_JOBS.md 4.2: a multiplicity gives a number and a scope needs an IDENTITY. A
+    # rule scoped to "the children another rule produced" is only answerable if each child
+    # records what made it — a node with children from `chunk` and children from `partition`
+    # cannot be told apart any other way, and the manually rearranged tree is exactly the
+    # case that misattributes without it. `usetype` does not answer it: that says what a
+    # node IS, not what made it, and one structure rung writes both `section` and `chunk`.
+    #
+    # The symmetry with `Triple.derived_by` is deliberate and so is the NULL convention:
+    # a derived thing names the rule that produced it, and "asserted only" is
+    # `WHERE produced_by IS NULL`. 9.4 is the other half — a person who edits a produced
+    # node clears the stamp, so a later re-run creates a sibling rather than silently
+    # overwriting the edit. See migration 016.
+    produced_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
     # Explicit sibling ordering (CR-1). Sparse: NULL for unordered subtrees.
     # Ordering contract: position ASC NULLS LAST, created_at ASC, id ASC.
@@ -162,6 +217,7 @@ class Document(Base):
             "path": self.path,
             "depth": self.depth,
             "usetype": self.usetype,
+            "produced_by": self.produced_by,
             "position": self.position,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,

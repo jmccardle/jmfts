@@ -9,9 +9,11 @@ Documents form a tree (`parent_id` + a materialized `path`), carry typed
 cross-references to each other, and can hold temporal subject-predicate-object
 triples with supersession instead of deletion. Five retrieval methods sit on
 top: `vector`, `bm25`, `fulltext`, `maxsim`, and `hybrid` (a weighted/RRF
-combination), plus an `auto` router. Ingestion pipelines (`markdown`,
-`conversation`, `raw`, `transcript`, `wiki:url`, `wiki:arxiv`, `wiki:pdf`) are
-idempotent on `(content_hash, parent_id)`.
+combination), plus an `auto` router. Ingestion has seven entry points — the
+`usetype` a request names: `markdown`, `conversation`, `raw`, `transcript`,
+`wiki:url`, `wiki:arxiv`, `wiki:pdf` — and is idempotent on
+`(content_hash, parent_id)`. An entry point selects defaults, not a sequence of
+stages: which tasks run is decided from what probing the bytes measured.
 
 Uploaded files are identified by their bytes, not their extension, and each
 format is read into markdown before anything indexes it. Today that is `.pdf`,
@@ -225,11 +227,11 @@ The design documents this code was written against — most importantly the
 ingest specification that a hundred source comments cite by section number —
 are not in this release. They are being refined for publication separately.
 The whole working record is held back, not a chosen few files, so a comment
-naming any of INGEST_SPEC.md, OFFICE_SPEC.md, SPRINT_0_3_0.md, CORPUS.md,
-RELEASING.md, KNOWN-DEFECTS.md, ROADMAP.md, AGENTIC_KNOWLEDGEBASE.md,
-RERANKER_CRITIQUE.md, API_UNIFICATION_CONTRACT_NOTES.md or
-research/INTERMEDIATE_FORMATS.md points at a document that will land later.
-The code stands on its own in the meantime.
+naming any of INGEST_SPEC.md, SPRINT_JOBS.md, OFFICE_SPEC.md, SPRINT_0_3_0.md,
+CORPUS.md, RELEASING.md, KNOWN-DEFECTS.md, ROADMAP.md,
+AGENTIC_KNOWLEDGEBASE.md, RERANKER_CRITIQUE.md,
+API_UNIFICATION_CONTRACT_NOTES.md or research/INTERMEDIATE_FORMATS.md points at
+a document that will land later. The code stands on its own in the meantime.
 
 Those names are deliberately not written as links. There is nothing in this
 tree for them to point at, and marking them up as paths would promise

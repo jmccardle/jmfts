@@ -147,10 +147,10 @@ def ingest_mode(data: bytes, *, filename: str, limit) -> dict:
     from jmfts_core.database import get_session
     from jmfts_core.ingest_worker import IngestWorker
     from jmfts_core.models.document import Document
+    from jmfts_core.repositories.evidence import EvidenceRepository
     from jmfts_core.services.ingest_service import IngestService
     from jmfts_core.settling import NO_ROLLUP
-    from jmfts_core.sheet_records import USETYPE_RECORD
-    from jmfts_core.sheet_tasks import USETYPE_SHEET
+    from jmfts_core.models.document import USETYPE_RECORD, USETYPE_SHEET
 
     settings = get_settings()
     # Said out loud before anything is written. This mode writes to whatever JMFTS_DB_*
@@ -189,9 +189,12 @@ def ingest_mode(data: bytes, *, filename: str, limit) -> dict:
             .all()
         )
 
+        # Evidence is rows since `SPRINT_JOBS.md` Phase 2b, so one read per node here
+        # rather than an attribute access. `read_many` is one query for the whole set.
+        found = EvidenceRepository(session).read_many([s.id for s in sheets])
         output = []
         for sheet in sheets:
-            block = sheet.structured_content.get("sheet") or {}
+            block = found.get(sheet.id, {}).get("sheet") or {}
             records = (
                 session.execute(
                     select(Document)
@@ -211,16 +214,15 @@ def ingest_mode(data: bytes, *, filename: str, limit) -> dict:
                     "records": [
                         {
                             "node_id": node.id,
-                            "row_index": node.structured_content["row_index"],
-                            "record": node.structured_content["record"],
+                            "row_index": row["row_index"],
+                            "record": row["record"],
                             "content": node.content,
-                            **(
-                                {"cells": node.structured_content["cells"]}
-                                if "cells" in node.structured_content
-                                else {}
-                            ),
+                            **({"cells": row["cells"]} if "cells" in row else {}),
                         }
-                        for node in records[:limit]
+                        for node, row in (
+                            (node, EvidenceRepository(session).read_all(node.id))
+                            for node in records[:limit]
+                        )
                     ],
                 }
             )

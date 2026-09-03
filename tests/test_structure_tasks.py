@@ -125,8 +125,10 @@ def _titles(nodes) -> list[str]:
     return [n.title for n in nodes]
 
 
-def _attempt(node: Document, task: str) -> dict:
-    return next(e for e in node.structured_content["attempts"] if e["task"] == task)
+def _attempt(session, node: Document, task: str) -> dict:
+    """One entry from the node's durable attempt log, which is an evidence row since 2b."""
+    log = DocumentRepository(session).attempt_log(node)
+    return next(e for e in log if e["task"] == task)
 
 
 # ---------------------------------------------------------------------------
@@ -141,11 +143,13 @@ class TestExtractText:
         assert "Late interaction scores each query token" in node.content
         assert "Recall improved by nine points" in node.content
 
-    def test_it_records_the_indexes_a_later_task_cannot_recompute(self, db_session, outlined_pdf):
+    def test_it_records_the_indexes_a_later_task_cannot_recompute(
+        self, db_session, evidence, outlined_pdf
+    ):
         """Page offsets and the outline. Without them `structure:declared` would have to
         re-parse the PDF to place a single section."""
         node = _ingest(db_session, outlined_pdf)
-        extraction = node.structured_content["extraction"]
+        extraction = evidence(node)["extraction"]
 
         assert extraction["page_count"] == 3
         assert len(extraction["page_offsets"]) == 3
@@ -156,10 +160,10 @@ class TestExtractText:
             "Results",
         ]
 
-    def test_it_reports_the_control_characters_it_removed(self, db_session, outlined_pdf):
+    def test_it_reports_the_control_characters_it_removed(self, db_session, evidence, outlined_pdf):
         node = _ingest(db_session, outlined_pdf)
 
-        assert node.structured_content["extraction"]["control_chars_removed"] == 0
+        assert evidence(node)["extraction"]["control_chars_removed"] == 0
 
     def test_a_format_with_no_extractor_fails_rather_than_producing_nothing(self, db_session):
         """A `.docx` today: probe named the format, and there is no text extractor for it.
@@ -180,7 +184,7 @@ class TestExtractText:
         # probe reports no patterns for a format it cannot look inside, so extract:text is
         # never eligible in the first place — the failure this test guards against cannot
         # arise through the front door, and the record says why.
-        probe_detail = _attempt(node, "probe")["detail"]
+        probe_detail = _attempt(db_session, node, "probe")["detail"]
         assert TASK_EXTRACT_TEXT in probe_detail["not_applicable"]
 
 
@@ -254,20 +258,22 @@ class TestDeclaredRungBuildsTheTree:
 
 
 class TestDeclaredRungRecordsWhatItCovered:
-    def test_the_structure_block_names_the_rung_and_its_source(self, db_session, outlined_pdf):
+    def test_the_structure_block_names_the_rung_and_its_source(
+        self, db_session, evidence, outlined_pdf
+    ):
         node = _ingest(db_session, outlined_pdf)
-        structure = node.structured_content["structure"]
+        structure = evidence(node)["structure"]
 
         assert structure["primary_rung"] == RUNG_DECLARED
         assert structure["source"] == "pdf_outline"
         assert structure["max_depth"] == 3  # section -> subsection -> chunk
 
-    def test_untitled_text_is_a_gap_and_lowers_coverage(self, db_session, outlined_pdf):
+    def test_untitled_text_is_a_gap_and_lowers_coverage(self, db_session, evidence, outlined_pdf):
         """Spec 3.3: coverage is the fraction of the text assigned to a section. The
         abstract is assigned to nothing, so it is the gap, and it is a number rather than
         an absence."""
         node = _ingest(db_session, outlined_pdf)
-        structure = node.structured_content["structure"]
+        structure = evidence(node)["structure"]
 
         assert structure["gap_regions"] == 1
         assert 0.0 < structure["coverage"] < 1.0
@@ -276,7 +282,7 @@ class TestDeclaredRungRecordsWhatItCovered:
         """ "the gap is 13%" and "the gap is 13% and no rung below is implemented" are
         different facts, and only the second one is actionable."""
         node = _ingest(db_session, outlined_pdf)
-        detail = _attempt(node, TASK_STRUCTURE_DECLARED)["detail"]
+        detail = _attempt(db_session, node, TASK_STRUCTURE_DECLARED)["detail"]
 
         assert "structure:semantic" in detail["deferred"]
         assert "not implemented" in detail["deferred"]["structure:semantic"]
@@ -287,7 +293,7 @@ class TestDeclaredRungRecordsWhatItCovered:
         """6.1 diffs on `(task, param_fingerprint)`, so the parameters that decided the
         leaves have to be on the record that the diff reads."""
         node = _ingest(db_session, outlined_pdf)
-        attempt = _attempt(node, TASK_STRUCTURE_DECLARED)
+        attempt = _attempt(db_session, node, TASK_STRUCTURE_DECLARED)
 
         assert attempt["rung"] == RUNG_DECLARED
         assert attempt["detail"]["params"]["chunk_strategy"] == "sentence_packed"
@@ -298,7 +304,7 @@ class TestDeclaredRungRecordsWhatItCovered:
         """6.2 supersedes an attempt by deleting what it produced, with their subtrees.
         Direct children are therefore enough, and the count covers the whole subtree."""
         node = _ingest(db_session, outlined_pdf)
-        produced = _attempt(node, TASK_STRUCTURE_DECLARED)["produced"]
+        produced = _attempt(db_session, node, TASK_STRUCTURE_DECLARED)["produced"]
         direct = [c.id for c in _children(db_session, node.id)]
 
         assert sorted(produced["child_ids"]) == sorted(direct)
@@ -321,7 +327,7 @@ class TestDeclaredRungRecordsWhatItCovered:
         doc.set_toc([[1, "Introduction", 1], [1, "Conclusion", 1]])
 
         node = _ingest(db_session, doc.tobytes(), "half.pdf")
-        detail = _attempt(node, TASK_STRUCTURE_DECLARED)["detail"]
+        detail = _attempt(db_session, node, TASK_STRUCTURE_DECLARED)["detail"]
 
         assert detail["unplaced_titles"] == ["Conclusion"]
         assert detail["outline_entries"] == 2
@@ -333,11 +339,13 @@ class TestDeclaredRungRecordsWhatItCovered:
 
 
 class TestInferredRungRunsWhenNothingIsDeclared:
-    def test_a_pdf_with_no_outline_gets_the_inferred_rung(self, db_session, unoutlined_pdf):
+    def test_a_pdf_with_no_outline_gets_the_inferred_rung(
+        self, db_session, evidence, unoutlined_pdf
+    ):
         node = _ingest(db_session, unoutlined_pdf, "unoutlined.pdf")
 
-        assert node.structured_content["structure"]["primary_rung"] == RUNG_INFERRED
-        assert _attempt(node, TASK_STRUCTURE_INFERRED)["rung"] == RUNG_INFERRED
+        assert evidence(node)["structure"]["primary_rung"] == RUNG_INFERRED
+        assert _attempt(db_session, node, TASK_STRUCTURE_INFERRED)["rung"] == RUNG_INFERRED
 
     def test_it_builds_from_the_font_size_headings(self, db_session, unoutlined_pdf):
         """The same document, structured from what extraction inferred instead of from
@@ -351,22 +359,26 @@ class TestInferredRungRunsWhenNothingIsDeclared:
             [c for c in _children(db_session, roots[0].id) if c.usetype == USETYPE_SECTION]
         ) == ["Introduction", "Results"]
 
-    def test_every_heading_claims_its_text_so_there_is_no_gap(self, db_session, unoutlined_pdf):
+    def test_every_heading_claims_its_text_so_there_is_no_gap(
+        self, db_session, evidence, unoutlined_pdf
+    ):
         node = _ingest(db_session, unoutlined_pdf, "unoutlined.pdf")
-        structure = node.structured_content["structure"]
+        structure = evidence(node)["structure"]
 
         assert structure["gap_regions"] == 0
         assert structure["coverage"] == 1.0
 
     def test_the_declared_rung_is_recorded_as_not_applicable(self, db_session, unoutlined_pdf):
         node = _ingest(db_session, unoutlined_pdf, "unoutlined.pdf")
-        not_applicable = _attempt(node, "probe")["detail"]["not_applicable"]
+        not_applicable = _attempt(db_session, node, "probe")["detail"]["not_applicable"]
 
         assert "has_outline" in not_applicable[TASK_STRUCTURE_DECLARED]
 
 
 class TestADocumentWithNoStructureAtAll:
-    def test_its_chunks_hang_off_the_file_node_and_the_gap_is_the_whole_document(self, db_session):
+    def test_its_chunks_hang_off_the_file_node_and_the_gap_is_the_whole_document(
+        self, db_session, evidence
+    ):
         """One font size, no outline. There is no boundary to find and the rung says so
         rather than inventing one."""
         import pymupdf
@@ -386,6 +398,6 @@ class TestADocumentWithNoStructureAtAll:
         children = _children(db_session, node.id)
 
         assert children and all(c.usetype == USETYPE_CHUNK for c in children)
-        assert node.structured_content["structure"]["coverage"] == 0.0
-        assert node.structured_content["structure"]["gap_regions"] == 1
+        assert evidence(node)["structure"]["coverage"] == 0.0
+        assert evidence(node)["structure"]["gap_regions"] == 1
         assert node.settled == SETTLED_SETTLED

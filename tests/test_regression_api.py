@@ -484,10 +484,14 @@ class TestPredicatesListEndpoint:
 
 @requires_db
 class TestPipelineRunEndpoint:
-    """POST /ingest triggers correct pipeline stages."""
+    """``POST /ingest`` over HTTP. ``SPRINT_JOBS.md`` 15.4 S5.
+
+    The three usetypes here run on the ingest queue now, so the assertions moved from
+    path A's stage list (``parse``, ``chunk``, ``bm25_index``) to the tasks that really
+    ran. The wire itself did not move: same request, same response model, same fields.
+    """
 
     def test_pipeline_run_raw(self, client_with_db, db_session):
-        """POST /ingest with usetype=raw runs parse + chunk + bm25_index stages."""
         resp = client_with_db.post(
             "/ingest",
             json={
@@ -498,10 +502,6 @@ class TestPipelineRunEndpoint:
                 ),
                 "usetype": "raw",
                 "title": "Pipeline Run Test",
-                "pipeline_config": {
-                    "summarize": False,
-                    "extract_facts": False,
-                },
             },
         )
 
@@ -510,28 +510,18 @@ class TestPipelineRunEndpoint:
         assert data["source_document_id"] >= 1
         assert data["usetype"] == "raw"
         assert data["title"] == "Pipeline Run Test"
-        assert data["segment_count"] >= 1
+        assert data["message_count"] >= 1
 
-        # Check stages
         stage_names = [s["stage"] for s in data["stages"]]
-        assert "parse" in stage_names
-        assert "chunk" in stage_names
-        assert "bm25_index" in stage_names
-
-        # Parse and chunk should be completed
+        assert stage_names[0] == "probe"
+        assert "extract:text" in stage_names
+        assert "structure:inferred" in stage_names, stage_names
+        assert "embed" in stage_names, stage_names
         for s in data["stages"]:
-            if s["stage"] in ("parse", "chunk"):
-                assert (
-                    s["status"] == "completed"
-                ), f"Stage {s['stage']} should be completed, got {s['status']}"
-
-        # BM25 index stage should have run
-        bm25_stage = [s for s in data["stages"] if s["stage"] == "bm25_index"][0]
-        assert bm25_stage["status"] == "completed"
-        assert bm25_stage["detail"]["documents_indexed"] >= 1
+            assert s["status"] in ("completed", "skipped"), s
 
     def test_pipeline_run_markdown(self, client_with_db, db_session):
-        """POST /ingest with usetype=markdown processes headings correctly."""
+        """Headings still decide the tree — measured by probe now, not claimed by name."""
         resp = client_with_db.post(
             "/ingest",
             json={
@@ -545,25 +535,30 @@ class TestPipelineRunEndpoint:
                 ),
                 "usetype": "markdown",
                 "title": "ML Basics",
-                "pipeline_config": {
-                    "summarize": False,
-                    "extract_facts": False,
-                },
             },
         )
 
         assert resp.status_code == 200
         data = resp.json()
         assert data["usetype"] == "markdown"
-        assert data["segment_count"] >= 3  # 3 sections
+        stage_names = [s["stage"] for s in data["stages"]]
+        assert "structure:declared" in stage_names, stage_names
+        assert "structure:inferred" not in stage_names, stage_names
+        # Three declared headings become three sections, and the chunks sit under them —
+        # so the tree is deeper than the two levels a flat chunking would give.
+        assert data["tree_depth"] >= 3
 
-        # Parse stage should report sections
-        parse_stage = [s for s in data["stages"] if s["stage"] == "parse"][0]
-        assert parse_stage["detail"]["sections"] == 3
-        assert parse_stage["detail"]["had_headings"] is True
+    def test_pipeline_run_joins_no_bm25_index_by_default(self, client_with_db, db_session):
+        """WAS `test_pipeline_run_creates_searchable_content`, and the behaviour it
+        asserted is the one INGEST_SPEC.md 11.5 removes.
 
-    def test_pipeline_run_creates_searchable_content(self, client_with_db, db_session):
-        """After pipeline run, the ingested content is searchable via BM25."""
+        Path A indexed every ingest into `default` unconditionally, so the content was
+        immediately findable by BM25. The queue's `index:bm25` task joins only indexes
+        whose registered root is the document or one of its ancestors, and a document
+        posted with no parent has neither. It is findable by vector search and not by BM25
+        until an operator indexes something above it — 1.3's stated default, arrived at
+        rather than worked around.
+        """
         unique_term = "zygomorphicFlowerSymmetry"
         resp = client_with_db.post(
             "/ingest",
@@ -575,22 +570,15 @@ class TestPipelineRunEndpoint:
                 ),
                 "usetype": "raw",
                 "title": "Searchable Pipeline Test",
-                "pipeline_config": {
-                    "summarize": False,
-                    "extract_facts": False,
-                },
             },
         )
         assert resp.status_code == 200
+        index_stage = [s for s in resp.json()["stages"] if s["stage"] == "index:bm25"]
+        assert [s["status"] for s in index_stage] == ["skipped"]
 
-        # Now search for the unique term via BM25 endpoint
         search_resp = client_with_db.post(
             "/search/bm25",
             json={"query": unique_term.lower(), "limit": 10},
         )
-
         assert search_resp.status_code == 200
-        search_data = search_resp.json()
-        assert (
-            search_data["total"] >= 1
-        ), "Ingested content should be immediately searchable via BM25"
+        assert search_resp.json()["total"] == 0

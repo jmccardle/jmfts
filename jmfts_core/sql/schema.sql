@@ -16,6 +16,10 @@ CREATE TABLE documents (
     -- Content
     title TEXT,
     content TEXT,
+    -- CALLER-OWNED, wholly. The ingest pipeline used to own twenty-three keys in here;
+    -- migration 015 moved them to `document_evidence` and nothing writes them back. What
+    -- is left is what a caller PUT here — `importance`, which hybrid search reads, and
+    -- whatever else a `PATCH /documents/{id}` set. See SPRINT_JOBS.md 13.3.
     structured_content JSONB DEFAULT '{}'::jsonb,
 
     -- Matryoshka embedding (768-dim for modernbert-embed-base)
@@ -26,6 +30,15 @@ CREATE TABLE documents (
 
     -- Document classification
     usetype VARCHAR(100),
+
+    -- WHICH RULE PRODUCED THIS NODE. NULL means asserted — a person, an importer, or an
+    -- upload created it, not a rule. Anything else names the rule, which today is the task
+    -- type of the atom that wrote the node ('structure:declared', 'extract:sheet', ...).
+    -- SPRINT_JOBS.md 4.2: a rule scoped to "the children another rule produced" needs an
+    -- identity, not a count, and `usetype` cannot serve — that says what a node IS, and one
+    -- structure rung writes both `section` and `chunk`. Mirrors `triples.derived_by`,
+    -- NULL convention included. See migration 016.
+    produced_by VARCHAR(100),
 
     -- Explicit sibling ordering (CR-1). Sparse/nullable: only set for ordered
     -- subtrees (sections, conversation branches). Ordering contract is
@@ -130,6 +143,56 @@ CREATE TABLE document_blobs (
     content_hash VARCHAR(64) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- ============================================================================
+-- EVIDENCE — one row per (document, evidence name). SPRINT_JOBS.md Part 3
+-- ============================================================================
+-- Everything the ingest pipeline learns about a node. This used to be twenty-three keys in
+-- `documents.structured_content`; migration 015 moved them here, and nothing merges them
+-- back — a client wanting them asks `GET /documents/{id}/evidence`. The column survives
+-- carrying exactly what a CALLER put there, which is why `structured_content['importance']`
+-- is still read by hybrid search: it is caller-owned and is not evidence.
+--
+-- The two reasons are correctness, not speed (13.1, and `scripts/evidence_bench.py`):
+--   1. A write to the column was a read-modify-write, so two handlers writing two different
+--      names to one node lost one of the writes silently. A PK of (document_id, name) is
+--      what removes that.
+--   2. 3.2 needs three states — never attempted, written (value may be null), failed — and
+--      a column has room for two. Staling a JSONB block means DELETING it, which destroys
+--      the distinction. `state` is a column here because it cannot be a key there.
+--
+-- `jmfts_core.evidence.REGISTRY` is the vocabulary of `name`: what each one asserts, its
+-- type, and which leaves inside it something schedules on. A name that is not in it is a
+-- typo, and `EvidenceRepository` refuses to write one.
+CREATE TABLE document_evidence (
+    document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    -- The registry name, not the column key it used to live under. `anchor` became
+    -- `source_anchor` and `anchor_unresolved` became `source_anchor.unresolved` — 2.5's
+    -- finding 5: evidence is named by what it asserts, not by where it is stored.
+    name TEXT NOT NULL,
+    -- NULLABLE, and the null is a result. 3.2: an atom writes every name it produces on
+    -- success, null included. A NULL value is "asked and got nothing"; no row is
+    -- "never attempted".
+    value JSONB,
+    -- 3.3: the child ids read, the source evidence read, and the parameters used. Written
+    -- by Phase 3; NULL until then.
+    fingerprint TEXT,
+    -- 3.2's third state. Phase 6's rebinding writes 'stale'; 3.2's retry policy writes
+    -- 'failed'. TEXT + CHECK, not an ENUM, for the reason documents.settled is.
+    state TEXT NOT NULL DEFAULT 'written'
+        CONSTRAINT ck_document_evidence_state
+        CHECK (state IN ('written', 'stale', 'failed')),
+    PRIMARY KEY (document_id, name)
+);
+
+-- Part 4.4's guard reads one name across the corpus: 10x the JSONB path at 100,000 nodes,
+-- and the gap grows with the corpus.
+CREATE INDEX idx_document_evidence_name ON document_evidence (name);
+-- What idx_documents_structured gave the column: a guard that predicates on the value.
+CREATE INDEX idx_document_evidence_value ON document_evidence USING GIN (value);
+-- Part 9's frontier as a query. The read the column could not express at all.
+CREATE INDEX idx_document_evidence_stale ON document_evidence (name, document_id)
+    WHERE state = 'stale';
 
 -- ============================================================================
 -- TASK QUEUE — the ingest scheduler's rows (INGEST_SPEC.md Part 5)
@@ -390,6 +453,14 @@ CREATE INDEX idx_documents_parent_position
 -- and would silently turn every one into a sequential scan. See migration 008.
 CREATE INDEX idx_documents_path ON documents USING GIN (path);
 CREATE INDEX idx_documents_usetype ON documents(usetype);
+-- SPRINT_JOBS.md 4.3: a frontier scope resolves by (parent_id, produced_by), so the walk at
+-- a node recomputes only the subplan rooted at the vertex whose scope resolves to it rather
+-- than the whole plan — without which the walk is O(n^2) in tree size. `parent_id` leads
+-- because that is the equality every such lookup carries. NOT partial on
+-- `produced_by IS NOT NULL`, unlike ix_triples_derived_by: the derived nodes are the
+-- MAJORITY of an ingested tree, so the exclusion would buy nothing and would stop the index
+-- answering "which children here did a person assert" (9.4). See migration 016.
+CREATE INDEX idx_documents_produced_by ON documents(parent_id, produced_by);
 
 -- Full-text search (GIN) — PARTIAL: only settled rows are retrievable, so only
 -- settled rows are indexed. fulltext_search carries the matching predicate.
@@ -397,7 +468,8 @@ CREATE INDEX idx_documents_content_fts ON documents
     USING GIN (to_tsvector('english', COALESCE(title, '') || ' ' || COALESCE(content, '')))
     WHERE settled = 'settled';
 
--- Structured content queries
+-- Caller metadata queries. Evidence is NOT in here any more (migration 015); the index
+-- that answers a guard is idx_document_evidence_name.
 CREATE INDEX idx_documents_structured ON documents USING GIN (structured_content);
 
 -- Vector search (HNSW) - cosine similarity — PARTIAL: a chunk that is written,

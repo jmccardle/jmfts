@@ -32,7 +32,7 @@ reader can tell the two apart without inferring it from the text.
 **Nothing here writes ``content``.** A structural node's prose lives in its leaves. Putting
 it on the container as well would enter the same text into the full-text and vector indexes
 twice and answer one query with both. The summary lives in
-``structured_content['effective_content']``, which the full-text index does not read, and
+the ``effective_content`` evidence row, which the full-text index does not read, and
 the node gets a document vector and no token embeddings — MaxSim over text that is not this
 node's own content would be the same double-count by another route.
 """
@@ -47,6 +47,18 @@ import numpy as np
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from jmfts_core.atoms import (
+    COST_CPU,
+    COST_LLM,
+    COST_MODEL,
+    EV_EFFECTIVE_CONTENT,
+    EV_EMBEDDING,
+    EV_STRUCTURE,
+    EV_TEXT,
+    KEY_POSITION,
+    ChildKey,
+    Fanout,
+)
 from jmfts_core.config import Settings, get_settings
 from jmfts_client.contracts.attempt import param_fingerprint
 from jmfts_core.embedder import get_embedder
@@ -61,9 +73,15 @@ from jmfts_core.ingest_tasks import (
     register_task_handler,
 )
 from jmfts_core.llm_client import complete_sync
-from jmfts_core.models.document import SETTLED_IN_FLIGHT, Document
+from jmfts_core.models.document import SETTLED_IN_FLIGHT, USETYPE_SEGMENT, Document
 from jmfts_core.models.task_queue import WRITE_SELF, WRITE_SUBTREE, TaskQueue
+from jmfts_core.evidence import ABSENT
 from jmfts_core.repositories.document import DocumentRepository
+from jmfts_core.repositories.evidence import (
+    EvidenceRepository,
+    evidence_of,
+    evidence_value,
+)
 from jmfts_core.repositories.task_queue import TaskQueueRepository
 from jmfts_core.segmentation import Segment, enforce_segment_bounds, pelt_segment
 from jmfts_core.settling import TaskSpec, enqueue_batch
@@ -78,10 +96,9 @@ RUNG_SEMANTIC = "semantic"
 #: from, and only the second one tells a person why a tree came out the shape it did.
 SOURCE_PELT = "pelt_changepoints"
 
-#: The usetype of a node PELT created. Not ``section`` — a section is a span the DOCUMENT
-#: named, and this is a span this appliance found. An open string like every usetype
-#: (spec Part 9).
-USETYPE_SEGMENT = "segment"
+# The usetype of a node PELT created is `USETYPE_SEGMENT`, and it is DEFINED on the model
+# with every other ingest usetype — Part 4's rule table names node kinds and cannot import
+# this module. See `jmfts_core.models.document`.
 
 #: How ``effective_content`` was produced. ``concatenated`` is the preferred outcome and
 #: the one that involves no interpretation at all.
@@ -221,20 +238,20 @@ def rollup_options(session: Session, node: Document) -> dict:
     that deviates applies to its rollup as well as to its structuring.
     """
     owner = _options_owner(session, node)
-    stored = ((owner.structured_content or {}) if owner is not None else {}).get(OPTIONS_KEY)
-    fmt = (
-        ((owner.structured_content or {}) if owner is not None else {}).get("matched") or {}
-    ).get("format", "")
+    owned = evidence_of(session, owner.id) if owner is not None else {}
+    stored = owned.get(OPTIONS_KEY)
+    fmt = (owned.get("matched") or {}).get("format", "")
     return resolve_options(fmt, stored)["rollup"]
 
 
 def _options_owner(session: Session, node: Document) -> Optional[Document]:
     """``node`` itself if it records options, else the nearest ancestor that does."""
-    if (node.structured_content or {}).get(OPTIONS_KEY) is not None:
+    evidence = EvidenceRepository(session)
+    if evidence.read(node.id, OPTIONS_KEY) is not ABSENT:
         return node
     for ancestor_id in reversed(node.path or []):
         ancestor = session.get(Document, ancestor_id)
-        if ancestor is not None and (ancestor.structured_content or {}).get(OPTIONS_KEY):
+        if ancestor is not None and evidence.read(ancestor.id, OPTIONS_KEY):
             return ancestor
     return None
 
@@ -257,7 +274,43 @@ class _NotSegmented:
     detail: dict
 
 
-@register_task_handler(TASK_STRUCTURE_SEMANTIC)
+def _segment_ceiling(evidence: dict, params: dict) -> tuple[int, int]:
+    """How many containers one PELT pass may create. ``SPRINT_JOBS.md`` 2.4 and 7.1.
+
+    THE CEILING IS LOOSE AND 7.1 SAYS SO. ``min_segment`` bounds how few children a segment
+    may hold, so ``⌊N / min_segment⌋`` is the most segments PELT can return — but a segment
+    of one child becomes no container (11.4 rule 2), and a run that finds one segment
+    covering everything creates nothing at all. The floor is therefore zero and the ceiling
+    is reached only by a document that changes subject every ``min_segment`` children.
+
+    That looseness is why 7.1 puts the budget rather than the bound in charge: this
+    interval is context for a person reading ``EXPLAIN``, not a number to schedule against.
+    """
+    minimum = int(params["min_segment"])
+    children = int(evidence["child_count"])
+    return (0, children // minimum if minimum else children)
+
+
+# `subtree`, because reparenting moves nodes that have children of their own — see
+# `_write_segments`. Position is the child key: a segment container has no title, no
+# content and no natural key, and its identity is entirely which span of siblings it holds.
+#
+# `cpu`. PELT runs over vectors this atom READS; the containers it creates carry their own
+# `summarize`, and that is where the model and the LLM enter.
+@register_task_handler(
+    TASK_STRUCTURE_SEMANTIC,
+    consumes=(f"{EV_EMBEDDING}@children", f"{EV_TEXT}@children"),
+    produces=(f"{EV_STRUCTURE}@children",),
+    write_mode=WRITE_SUBTREE,
+    cost_class=COST_CPU,
+    fanout=Fanout(
+        bound=_segment_ceiling,
+        reads=("child_count",),
+        basis="⌊children / min_segment⌋ containers",
+        counts=USETYPE_SEGMENT,
+    ),
+    child_key=ChildKey(KEY_POSITION),
+)
 def run_structure_semantic(session: Session, task: TaskQueue) -> TaskOutcome:
     """Segment this node's children at PELT's changepoints and reparent them.
 
@@ -399,7 +452,13 @@ def _write_segments(
             content=None,
             parent_id=doc.id,
             usetype=USETYPE_SEGMENT,
-            structured_content={
+            # 4.2's stamp. No rule is scoped to a segment's children today — a container's
+            # first task comes from the rollup planner, which asks the tree rather than the
+            # table — so nothing reads this yet. It is written anyway, because a node with
+            # no stamp means ASSERTED, and claiming a PELT container was written by a person
+            # would be a false statement about provenance rather than a missing one.
+            produced_by=TASK_STRUCTURE_SEMANTIC,
+            evidence={
                 "structure": {
                     "primary_rung": RUNG_SEMANTIC,
                     "source": SOURCE_PELT,
@@ -489,7 +548,21 @@ def _reorder(session: Session, node_ids: Sequence[int]) -> None:
 # ---------------------------------------------------------------------------
 
 
-@register_task_handler(TASK_SUMMARIZE)
+# 2.2's worked example, declared. `effective_content@children` is NOT consumed here — this
+# reads the children's `text`, which for a container child is the summary that its own
+# `summarize` embedded. Producing `effective_content@self` while consuming `text@children`
+# is what gives the rollup no self-edge at all, and it is why the acyclicity check needs no
+# exception for the one shape every rollup in the appliance has.
+#
+# `model`, not `cpu`: `store_effective_content` embeds the concatenation. The tokenizer
+# calls above it are the cheap half and they are not what the class has to be sized for.
+@register_task_handler(
+    TASK_SUMMARIZE,
+    consumes=(f"{EV_TEXT}@children",),
+    produces=(f"{EV_EFFECTIVE_CONTENT}@self", f"{EV_EMBEDDING}@self"),
+    write_mode=WRITE_SELF,
+    cost_class=COST_MODEL,
+)
 def run_summarize(session: Session, task: TaskQueue) -> TaskOutcome:
     """Give this node a text embedding derived from its children. 11.4's ``effective_content``.
 
@@ -572,7 +645,22 @@ def run_summarize(session: Session, task: TaskQueue) -> TaskOutcome:
     )
 
 
-@register_task_handler(TASK_SUMMARIZE_LLM)
+# The SAME declaration as `summarize` except the cost class, and 11.1 is what that means:
+# the handoff is not a dependency and needs no edge. Two atoms produce
+# `effective_content@self` on one node, exactly as two structure rungs produce the chunks
+# `citation` reads — a fact about the produces map, which 2.3 says `after_any` was only
+# ever spelling out by hand.
+#
+# `llm`, and the class is the most expensive thing the atom does: this calls the endpoint
+# AND embeds what came back. Sizing it as `model` would put an LLM call in the embedding
+# pool's budget, which is the split `TASK_SUMMARIZE_LLM` exists to prevent.
+@register_task_handler(
+    TASK_SUMMARIZE_LLM,
+    consumes=(f"{EV_TEXT}@children",),
+    produces=(f"{EV_EFFECTIVE_CONTENT}@self", f"{EV_EMBEDDING}@self"),
+    write_mode=WRITE_SELF,
+    cost_class=COST_LLM,
+)
 def run_summarize_llm(session: Session, task: TaskQueue) -> TaskOutcome:
     """Summarize this node's children with an LLM, then embed the summary.
 
@@ -672,7 +760,7 @@ def effective_text(session: Session, node_id: int, *, own_content: bool = True) 
         return ""
     if own_content and node.content:
         return node.content
-    summary = ((node.structured_content or {}).get("effective_content") or {}).get("text")
+    summary = (evidence_value(session, node_id, "effective_content") or {}).get("text")
     if summary:
         return summary
     parts = [effective_text(session, child) for child in child_ids(session, node_id)]
@@ -702,9 +790,9 @@ def store_effective_content(
     under a node whose ``content`` it is not, which is the same double-count that keeps
     ``content`` off a container in the first place.
 
-    ``text`` is stored only for a summary. It lives in ``structured_content``, which the
-    full-text index does not read (``to_tsvector(title || content)``), so a summary cannot
-    skew the BM25 statistics of the corpus it summarizes.
+    ``text`` is stored only for a summary. It lives in the ``effective_content`` evidence
+    row, which the full-text index does not read (``to_tsvector(title || content)``), so a
+    summary cannot skew the BM25 statistics of the corpus it summarizes.
     """
     # `get_embedder`, like the other ingest write: a worker pointed at a runner summarizes
     # locally and embeds the summary remotely. The `check_fit` calls above stay on the
@@ -712,12 +800,10 @@ def store_effective_content(
     embedder = get_embedder()
     doc.embed = embedder.embed_text(embed_text, prefix=EMBED_PREFIX).tolist()
 
-    structured = dict(doc.structured_content or {})
     record = {"method": method, "source_children": children, **detail}
     if text is not None:
         record["text"] = text
-    structured["effective_content"] = record
-    doc.structured_content = structured
+    EvidenceRepository(session).write(doc.id, "effective_content", record)
     session.flush()
 
     return TaskOutcome(detail={"method": method, "source_children": children, **detail})

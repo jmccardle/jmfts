@@ -199,9 +199,27 @@ class TaskQueueRepository:
     # =========================================================================
 
     def claim_next(
-        self, worker_id: str, *, service_badges: Optional[Sequence[str]] = None
+        self,
+        worker_id: str,
+        *,
+        service_badges: Optional[Sequence[str]] = None,
+        root_document_id: Optional[int] = None,
     ) -> Optional[TaskQueue]:
         """Atomically take the highest-priority claimable task, or return None.
+
+        ``root_document_id`` narrows the search to one document's own tree — that node and
+        everything whose ``path`` contains it. ``SPRINT_JOBS.md`` 15.4 S3 added it for
+        ``POST /ingest``, which drains the queue INSIDE the caller's request and must not
+        spend that request running some other document's work. It is ``None`` for the
+        background worker, whose whole job is to take whatever is next.
+
+        **A scoped claim returning None does not mean the root is finished.** The
+        background worker may hold the row this call skipped — ``FOR UPDATE SKIP LOCKED``
+        makes the two safe to run at once, which is the point, and the cost is that "I
+        could not claim anything" and "there is nothing left" stop being the same fact.
+        :meth:`unfinished_task_count_under` is the second question, and
+        :meth:`~jmfts_core.ingest_worker.IngestWorker.drain_document` asks it rather than
+        reading an empty claim as completion.
 
         ``service_badges`` is a LIST, not one badge, because a pool's capability and the
         routing decision are different things. A host running a local LLM on a GPU can
@@ -281,6 +299,13 @@ class TaskQueueRepository:
                   AND (:service_badges IS NULL
                        OR t.service_badge IS NULL
                        OR t.service_badge = ANY(CAST(:service_badges AS text[])))
+                  -- One document's own tree, when a caller asked for that. Matched by
+                  -- `path` containment, the same region `unfinished_task_count_under`
+                  -- counts and the same one the `subtree` write mode reserves, so a
+                  -- scoped drain and the check that ends it describe one set of rows.
+                  AND (CAST(:root_document_id AS integer) IS NULL
+                       OR ds.id = CAST(:root_document_id AS integer)
+                       OR ds.path @> jsonb_build_array(CAST(:root_document_id AS integer)))
                   -- Dependency gate. Counting completed rows rather than testing for a
                   -- non-completed one means a dependency whose row has VANISHED (its
                   -- document was deleted, cascading) blocks instead of silently
@@ -325,7 +350,12 @@ class TaskQueueRepository:
         # worker that can claim nothing.
         badges = list(service_badges) if service_badges else None
         row = self.session.execute(
-            sql, {"worker_id": worker_id, "service_badges": badges}
+            sql,
+            {
+                "worker_id": worker_id,
+                "service_badges": badges,
+                "root_document_id": root_document_id,
+            },
         ).fetchone()
         if row is None:
             return None
@@ -787,7 +817,7 @@ class TaskQueueRepository:
         # counting it would number the first outcome of an attempt as its second.
         prior = [
             entry
-            for entry in (doc.structured_content or {}).get("attempts", [])
+            for entry in DocumentRepository(self.session).attempt_log(doc)
             if isinstance(entry, dict)
             and entry.get("task") == task.task_type
             and not (
@@ -888,7 +918,7 @@ class TaskQueueRepository:
         if doc is None:
             return set()
         pairs: set[tuple[str, str]] = set()
-        for entry in (doc.structured_content or {}).get("attempts", []):
+        for entry in DocumentRepository(self.session).attempt_log(doc):
             if not isinstance(entry, dict):
                 continue
             task = entry.get("task")

@@ -23,13 +23,18 @@ from sqlalchemy import select
 
 from jmfts_client.contracts.upload import UploadedFile
 from jmfts_core.ingest_options import (
+    FACTS_PARAMS,
     ROLLUP_PARAMS,
     INGEST_PROFILES,
+    INGEST_USETYPES,
     OPTION_CHECKS,
     STRUCTURE_CHUNK_PARAMS,
     TASK_PARAM_DEFAULTS,
+    Usetype,
     _check_option_tables,
+    _check_usetype_table,
     resolve_options,
+    resolve_usetype_options,
 )
 from jmfts_core.ingest_tasks import (
     OPTIONS_KEY,
@@ -40,7 +45,7 @@ from jmfts_core.ingest_tasks import (
 from jmfts_core.models.document import Document
 from jmfts_core.repositories.document import DocumentRepository
 from jmfts_core.services.ingest_service import IngestService
-from jmfts_core.structure_tasks import USETYPE_CHUNK
+from jmfts_core.models.document import USETYPE_CHUNK
 from tests.conftest import drain_ingest_queue
 
 # ---------------------------------------------------------------------------
@@ -50,10 +55,15 @@ from tests.conftest import drain_ingest_queue
 
 class TestResolveOptions:
     def test_no_overrides_is_the_task_defaults(self):
+        """Compared against `TASK_PARAM_DEFAULTS` and not a list of groups written here.
+        Three of the six groups arrived with Phase 3 — a hand-written list would have read
+        the new ones as a wrong answer rather than as new options."""
         assert resolve_options("pdf") == {
-            "structure": dict(STRUCTURE_CHUNK_PARAMS),
-            "rollup": dict(ROLLUP_PARAMS),
+            group: dict(params) for group, params in TASK_PARAM_DEFAULTS.items()
         }
+        assert resolve_options("pdf")["structure"] == dict(STRUCTURE_CHUNK_PARAMS)
+        assert resolve_options("pdf")["rollup"] == dict(ROLLUP_PARAMS)
+        assert resolve_options("pdf")["facts"] == dict(FACTS_PARAMS)
 
     def test_an_override_replaces_one_key_and_leaves_the_group_complete(self):
         """A group is merged, not substituted: the two options nobody mentioned keep the
@@ -89,8 +99,7 @@ class TestResolveOptions:
         the next thing to land."""
         assert INGEST_PROFILES == {}
         assert resolve_options("docx") == {
-            "structure": dict(STRUCTURE_CHUNK_PARAMS),
-            "rollup": dict(ROLLUP_PARAMS),
+            group: dict(params) for group, params in TASK_PARAM_DEFAULTS.items()
         }
         assert resolve_options("wat") == resolve_options("pdf")
 
@@ -251,6 +260,79 @@ class TestTheTablesAgree:
         _check_option_tables()
 
 
+class TestTheUsetypeTable:
+    """``SPRINT_JOBS.md`` 15.4 S1. The seven entry points, as data — and the ONE table.
+
+    Two named them while the migration ran: this one and ``jmfts_core/pipeline.py``'s
+    ``PipelineDefinition`` registry, held in step by an import-time check. S9 deleted the
+    second, so there is nothing left to drift against and the check went with it.
+    """
+
+    def test_the_seven_entry_points(self):
+        assert sorted(INGEST_USETYPES) == [
+            "conversation",
+            "markdown",
+            "raw",
+            "transcript",
+            "wiki:arxiv",
+            "wiki:pdf",
+            "wiki:url",
+        ]
+
+    def test_a_usetype_overriding_an_undeclared_option_raises(self, monkeypatch):
+        monkeypatch.setitem(
+            INGEST_USETYPES,
+            "raw",
+            Usetype(name="raw", description="x", source="content", options={"structure": {"n": 1}}),
+        )
+        with pytest.raises(ValueError, match="unknown option structure.n"):
+            _check_usetype_table()
+
+    def test_a_usetype_declaring_an_unknown_source_raises(self, monkeypatch):
+        monkeypatch.setitem(
+            INGEST_USETYPES, "raw", Usetype(name="raw", description="x", source="carrier pigeon")
+        )
+        with pytest.raises(ValueError, match="declares source 'carrier pigeon'"):
+            _check_usetype_table()
+
+    def test_a_usetype_registered_under_the_wrong_key_raises(self, monkeypatch):
+        """The key is what a caller sends; a mismatch would make one of the two a lie."""
+        monkeypatch.setitem(
+            INGEST_USETYPES, "raw", Usetype(name="uncooked", description="x", source="content")
+        )
+        with pytest.raises(ValueError, match="calls itself 'uncooked'"):
+            _check_usetype_table()
+
+    def test_the_shipped_usetypes_pass(self):
+        _check_usetype_table()
+
+    def test_the_usetype_layer_sits_under_the_caller(self):
+        """A request that names both wins. ``raw`` asks for ``sentence``; the caller does
+        not have to accept it."""
+        resolved = resolve_usetype_options(
+            "raw", "", {"structure": {"chunk_strategy": "paragraph"}}
+        )
+        assert resolved["structure"]["chunk_strategy"] == "paragraph"
+        # And the options the usetype set that the caller did not name still apply.
+        assert resolved["structure"]["max_tokens"] == 200
+
+    def test_the_usetype_layer_sits_over_the_task_defaults(self):
+        assert resolve_usetype_options("raw", "")["structure"] == {
+            "chunk_strategy": "sentence",
+            "max_tokens": 200,
+            "min_chunk_length": 20,
+        }
+
+    def test_a_usetype_that_overrides_nothing_gets_the_task_defaults(self):
+        """``conversation`` states no chunking, so it must resolve to the MEASURED numbers
+        rather than to path A's, which is the difference an empty ``options`` dict makes."""
+        assert resolve_usetype_options("conversation", "")["structure"] == STRUCTURE_CHUNK_PARAMS
+
+    def test_an_unknown_usetype_raises(self):
+        with pytest.raises(ValueError, match="unknown ingest usetype 'frobnicate'"):
+            resolve_usetype_options("frobnicate", "")
+
+
 # ---------------------------------------------------------------------------
 # Through the queue
 # ---------------------------------------------------------------------------
@@ -331,28 +413,33 @@ def _chunk_count(session, node_id: int) -> int:
 
 
 class TestOptionsSurviveTheUpload:
-    def test_the_resolved_options_are_written_onto_the_node(self, db_session, prose_pdf):
+    def test_the_resolved_options_are_written_onto_the_node(self, db_session, evidence, prose_pdf):
         """Resolved, not the overrides: the node answers "what was this ingested with?"
         without anyone having to know which profile was in effect at the time."""
         response = _upload(db_session, prose_pdf, options={"structure": {"max_tokens": 30}})
 
         node = DocumentRepository(db_session).get(response.document_id)
-        assert node.structured_content[OPTIONS_KEY] == {
-            "structure": {
-                "chunk_strategy": "sentence_packed",
-                "max_tokens": 30,
-                "min_chunk_length": 20,
-            },
-            "rollup": dict(ROLLUP_PARAMS),
+        stored = evidence(node)[OPTIONS_KEY]
+        assert stored == resolve_options("pdf", {"structure": {"max_tokens": 30}})
+        assert stored["structure"] == {
+            "chunk_strategy": "sentence_packed",
+            "max_tokens": 30,
+            "min_chunk_length": 20,
         }
+        # Every group, including the three that only a node BELOW this one will read. The
+        # node is where the fan-out planner comes back for them (`plan_frontier` reads the
+        # nearest ancestor with a `matched` block), so a sheet's `max_rows` has to be frozen
+        # here at upload time, not resolved afresh when the sheet node is written.
+        assert set(stored) == set(TASK_PARAM_DEFAULTS)
 
-    def test_an_upload_with_no_options_records_the_resolved_defaults(self, db_session, prose_pdf):
+    def test_an_upload_with_no_options_records_the_resolved_defaults(
+        self, db_session, evidence, prose_pdf
+    ):
         response = _upload(db_session, prose_pdf)
 
         node = DocumentRepository(db_session).get(response.document_id)
-        assert node.structured_content[OPTIONS_KEY] == {
-            "structure": dict(STRUCTURE_CHUNK_PARAMS),
-            "rollup": dict(ROLLUP_PARAMS),
+        assert evidence(node)[OPTIONS_KEY] == {
+            group: dict(params) for group, params in TASK_PARAM_DEFAULTS.items()
         }
 
     def test_a_bad_option_is_rejected_before_anything_is_created(self, db_session, prose_pdf):
@@ -366,15 +453,25 @@ class TestOptionsSurviveTheUpload:
 
         assert db_session.execute(select(Document.id)).scalars().all() == before
 
-    def test_the_options_block_is_not_caller_writable(self, db_session, prose_pdf):
-        """`INGEST_OWNED_KEYS`. `probe` reads this block minutes after the request that
-        set it returned, so a metadata PATCH between the two would rewrite what the run
-        does with nothing in the log saying where the numbers came from."""
+    def test_the_options_block_is_not_caller_writable(self, db_session, evidence, prose_pdf):
+        """`probe` reads these options minutes after the request that set them returned, so
+        a metadata PATCH between the two would rewrite what the run does with nothing in the
+        log saying where the numbers came from.
+
+        A REFUSAL UNTIL PHASE 2b AND A SEPARATION AFTER IT. While options were a key in
+        `structured_content` the only way to protect them was for `update` to refuse a
+        caller that named the key. They are an evidence row now (13.3), so a caller writing
+        `{"options": ...}` writes their own column key: it is accepted, it is theirs, and it
+        reaches nothing the run reads.
+        """
         response = _upload(db_session, prose_pdf)
         repo = DocumentRepository(db_session)
+        before = evidence(response.document_id)[OPTIONS_KEY]
 
-        with pytest.raises(ValueError, match="options"):
-            repo.update(response.document_id, structured_content={"options": {"structure": {}}})
+        repo.update(response.document_id, structured_content={"options": {"structure": {}}})
+        db_session.flush()
+
+        assert evidence(response.document_id)[OPTIONS_KEY] == before
 
 
 class TestOptionsReachTheChunker:
@@ -419,7 +516,7 @@ class TestOptionsReachTheChunker:
         assert again.document_id == first.document_id
         assert again.was_existing is True
 
-    def test_the_attempt_log_records_the_parameters_that_ran(self, db_session, prose_pdf):
+    def test_the_attempt_log_records_the_parameters_that_ran(self, db_session, evidence, prose_pdf):
         """3.4. The plan and the run have to agree, and the log is where a later reader
         checks that they did."""
         response = _upload(db_session, prose_pdf, options={"structure": {"max_tokens": 30}})
@@ -428,7 +525,7 @@ class TestOptionsReachTheChunker:
         node = DocumentRepository(db_session).get(response.document_id)
         attempt = next(
             entry
-            for entry in node.structured_content["attempts"]
+            for entry in evidence(node)["attempts"]
             if entry["task"] == TASK_STRUCTURE_INFERRED
         )
         assert attempt["params"]["max_tokens"] == 30
@@ -444,7 +541,7 @@ class TestTheHttpSurface:
     """
 
     def test_a_json_form_field_is_parsed_into_the_options(
-        self, client_with_db, db_session, prose_pdf
+        self, client_with_db, db_session, evidence, prose_pdf
     ):
         response = client_with_db.post(
             "/ingest/file",
@@ -454,7 +551,7 @@ class TestTheHttpSurface:
 
         assert response.status_code == 201, response.text
         node = DocumentRepository(db_session).get(response.json()["document_id"])
-        assert node.structured_content[OPTIONS_KEY]["structure"]["max_tokens"] == 30
+        assert evidence(node)[OPTIONS_KEY]["structure"]["max_tokens"] == 30
 
     def test_an_upload_with_no_options_field_is_still_accepted(self, client_with_db, prose_pdf):
         """The field is optional on a multipart request, not merely nullable in the schema."""

@@ -21,14 +21,25 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
+from jmfts_core.atoms import COST_MODEL, EV_EMBEDDING, EV_TEXT
 from jmfts_core.embedder import get_embedder
 from jmfts_core.ingest_tasks import TASK_EMBED, TaskOutcome, register_task_handler
 from jmfts_core.models.document import Document
-from jmfts_core.models.task_queue import TaskQueue
+from jmfts_core.models.task_queue import WRITE_SELF, TaskQueue
 from jmfts_core.repositories.document import DocumentRepository
 
 
-@register_task_handler(TASK_EMBED)
+# The whole declaration is four facts wide, which is what the module docstring means by
+# twelve lines of the most expensive work there is. `text@self` is consumed and no atom
+# produces `text@self` — every producer of a chunk's text writes it at `@children` or
+# `@subtree`, from the node above — so this derives no within-node edge and has none today.
+@register_task_handler(
+    TASK_EMBED,
+    consumes=(f"{EV_TEXT}@self",),
+    produces=(f"{EV_EMBEDDING}@self",),
+    write_mode=WRITE_SELF,
+    cost_class=COST_MODEL,
+)
 def run_embed(session: Session, task: TaskQueue) -> TaskOutcome:
     """Write this node's document vector, and its token vectors when asked for them.
 

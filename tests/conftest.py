@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-from contextlib import contextmanager
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -263,22 +262,16 @@ def db_session():
 # Draining the ingest queue, synchronously, in the caller's transaction
 # ---------------------------------------------------------------------------
 
+from jmfts_core.ingest_worker import borrowed_session  # noqa: E402
 
-@contextmanager
-def _borrowed_session(session):
-    """Hand the worker a session it does not own, with ``get_session``'s semantics.
-
-    ``IngestWorker`` opens one context per phase and relies on the exit to commit. Under
-    the savepoint-bound ``db_session`` that commit is a SAVEPOINT release and the rollback
-    a rollback *to* that savepoint, so the worker's phases behave like real transactions
-    while still being contained by the fixture's outer rollback.
-    """
-    try:
-        yield session
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
+#: The appliance's own inline-drain helper, not a copy of it (``SPRINT_JOBS.md`` 15.4 S5).
+#: ``IngestWorker`` opens one context per phase and relies on the exit to commit. Under the
+#: savepoint-bound ``db_session`` that commit is a SAVEPOINT release and the rollback a
+#: rollback *to* that savepoint, so the worker's phases behave like real transactions while
+#: still being contained by the fixture's outer rollback. Importing it rather than
+#: re-writing it is what keeps the suite asserting the transaction boundaries production
+#: actually has.
+_borrowed_session = borrowed_session
 
 
 def drain_ingest_queue(session, *, planner=None, worker_id="test-ingest-worker", max_tasks=100):
@@ -316,3 +309,33 @@ def drain_queue(db_session):
         return drain_ingest_queue(db_session, **kwargs)
 
     return _drain
+
+
+# ---------------------------------------------------------------------------
+# Reading evidence — SPRINT_JOBS.md Phase 2b
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def evidence(db_session):
+    """``evidence(node)`` — every evidence row on one node, as ``{name: value}``.
+
+    Before Phase 2b a test read the pipeline's output straight off
+    ``node.structured_content``. Evidence is rows now (``SPRINT_JOBS.md`` 13.3) and the
+    column holds only what a caller put there, so this is the substitution: one call, one
+    query, a plain dict that reads exactly the way the column did.
+
+    A refreshed read every time. A handler writes through ``EvidenceRepository``, which
+    issues SQL rather than touching the ORM object, so a test that drained the queue after
+    calling this needs to call it again — the same discipline a test already has for a node
+    the worker changed.
+
+    Takes a ``Document`` or an id. Names, not column keys: ``anchor`` is ``source_anchor``
+    and ``anchor_unresolved`` is ``source_anchor.unresolved``.
+    """
+    from jmfts_core.repositories.evidence import EvidenceRepository
+
+    def _read(node) -> dict:
+        return EvidenceRepository(db_session).read_all(getattr(node, "id", node))
+
+    return _read

@@ -290,7 +290,7 @@ class TestIngestingThroughARunner:
         from jmfts_core.repositories.document import DocumentRepository
         from jmfts_core.rollup_tasks import IngestRollupPlanner
         from jmfts_core.services.ingest_service import IngestService
-        from jmfts_core.structure_tasks import USETYPE_CHUNK
+        from jmfts_core.models.document import USETYPE_CHUNK
         from tests.conftest import drain_ingest_queue
 
         monkeypatch.setattr(get_settings(), "runner_url", "http://testserver")
@@ -335,7 +335,8 @@ class TestIngestingThroughARunner:
             assert _stored_width(rows[0].embed_256) == 256
 
         # And the attempt log says where they came from, per node.
-        attempt = next(e for e in chunks[0].structured_content["attempts"] if e["task"] == "embed")
+        log = DocumentRepository(db_session).attempt_log(chunks[0])
+        attempt = next(e for e in log if e["task"] == "embed")
         assert attempt["detail"]["device"] == "remote:http://testserver"
 
 

@@ -10,10 +10,6 @@ Tier 1: Unit tests with mocked DB session.
 import asyncio
 from unittest.mock import MagicMock, AsyncMock, patch
 
-from jmfts_core.conversation_ingest import (
-    ParsedMessage,
-    ingest_conversation,
-)
 from jmfts_core.fact_extraction import extract_facts_from_document
 
 
@@ -166,129 +162,24 @@ class TestDuplicateTripleHandling:
 
 
 class TestMissingParentHandling:
-    """Verify that a missing parent_id degrades gracefully to root-level
-    document creation instead of raising ValueError."""
+    """A parent_id that does not resolve. ``SPRINT_JOBS.md`` 15.4 S7 changed the answer.
 
-    def test_conversation_ingest_missing_parent_creates_root(self):
-        """ingest_conversation with nonexistent parent_id creates the
-        conversation as a root document instead of raising ValueError."""
-        messages = [
-            ParsedMessage(role="user", content="Hello there", turn_index=0),
-            ParsedMessage(role="assistant", content="Hi!", turn_index=1),
-        ]
+    Three tests were here and all three asserted a GRACEFUL DEGRADE: ``ingest_conversation``
+    and ``execute_pipeline`` both logged a warning, set ``parent_id = None``, and built the
+    tree at the root — recording the requested parent in ``original_parent_id`` so the
+    intent was at least written down somewhere.
 
-        mock_root = MagicMock()
-        mock_root.id = 500
-        mock_child_1 = MagicMock()
-        mock_child_1.id = 501
-        mock_child_2 = MagicMock()
-        mock_child_2.id = 502
+    **The queue refuses instead**, and that is the correction rather than a regression. A
+    caller who names a parent is saying where the document belongs; producing an orphan and
+    returning 200 tells them nothing, and the ``original_parent_id`` key was only ever read
+    by the test that asserted it. ``POST /conversations/ingest`` and ``POST /ingest`` now
+    both raise ``LookupError`` — a 404 naming the document — before anything is written.
 
-        mock_repo = MagicMock()
-        # get(parent_id=999) returns None — parent doesn't exist
-        mock_repo.get.return_value = None
-        mock_repo.create.side_effect = [mock_root, mock_child_1, mock_child_2]
-
-        session = MagicMock()
-
-        with patch(
-            "jmfts_core.conversation_ingest.DocumentRepository",
-            return_value=mock_repo,
-        ):
-            result = _run(
-                ingest_conversation(
-                    session=session,
-                    messages=messages,
-                    parent_id=999,
-                    summarize=False,
-                    extract_triples=False,
-                )
-            )
-
-        assert result.source_document_id == 500
-        # Root document should be created with parent_id=None (not 999)
-        root_call = mock_repo.create.call_args_list[0]
-        assert root_call.kwargs.get("parent_id") is None
-        # The original parent_id should be recorded in structured_content
-        sc = root_call.kwargs.get("structured_content", {})
-        assert sc.get("original_parent_id") == 999
-
-    def test_conversation_ingest_valid_parent_preserved(self):
-        """When parent_id exists, it is passed through to repo.create."""
-        messages = [
-            ParsedMessage(role="user", content="Hello", turn_index=0),
-        ]
-
-        mock_parent = MagicMock()
-        mock_parent.id = 100
-        mock_parent.path = [50]
-
-        mock_root = MagicMock()
-        mock_root.id = 200
-        mock_child = MagicMock()
-        mock_child.id = 201
-
-        mock_repo = MagicMock()
-        mock_repo.get.return_value = mock_parent
-        mock_repo.create.side_effect = [mock_root, mock_child]
-
-        session = MagicMock()
-
-        with patch(
-            "jmfts_core.conversation_ingest.DocumentRepository",
-            return_value=mock_repo,
-        ):
-            _run(
-                ingest_conversation(
-                    session=session,
-                    messages=messages,
-                    parent_id=100,
-                    summarize=False,
-                    extract_triples=False,
-                )
-            )
-
-        root_call = mock_repo.create.call_args_list[0]
-        assert root_call.kwargs.get("parent_id") == 100
-
-    def test_pipeline_validates_parent_id(self):
-        """execute_pipeline sets parent_id=None when parent doesn't exist."""
-        from jmfts_core.pipeline import execute_pipeline
-
-        mock_repo = MagicMock()
-        mock_repo.get.return_value = None  # parent doesn't exist
-
-        session = MagicMock()
-
-        with (
-            patch(
-                "jmfts_core.pipeline.DocumentRepository",
-                return_value=mock_repo,
-            ),
-            patch(
-                "jmfts_core.pipeline._execute_conversation",
-                new_callable=AsyncMock,
-            ) as mock_exec,
-        ):
-            mock_result = MagicMock()
-            mock_result.source_document_id = 1
-            mock_result.stages = []
-            mock_exec.return_value = mock_result
-
-            with patch("jmfts_core.pipeline._index_subtree_bm25") as mock_bm25:
-                mock_bm25.return_value = MagicMock()
-                _run(
-                    execute_pipeline(
-                        session=session,
-                        content='{"prompt": "hi", "response": "hello"}',
-                        usetype="conversation",
-                        parent_id=999,
-                    )
-                )
-
-            # parent_id should have been set to None before delegation
-            call_kwargs = mock_exec.call_args
-            assert call_kwargs.kwargs.get("parent_id") is None
+    Asserted where each route lives:
+    ``tests/test_conversation_ingest.py::TestTheRefusals::test_an_unknown_parent_is_a_lookup_error``
+    and
+    ``tests/test_ingest_queued_usetypes.py::TestTheTwoVocabulariesDoNotCross::test_an_unknown_parent_is_still_a_lookup_error``.
+    """
 
 
 # ============================================================================

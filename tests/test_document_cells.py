@@ -60,19 +60,20 @@ from jmfts_core.office.cells import (  # noqa: E402
     used_range,
 )
 from jmfts_core.repositories.document import DocumentRepository  # noqa: E402
+from jmfts_core.repositories.evidence import EvidenceRepository  # noqa: E402
 from jmfts_core.rest.main import app  # noqa: E402
 from jmfts_core.services.document_service import (  # noqa: E402
-    ANCHOR_KEY,
+    ANCHOR_NAME,
     ANCHOR_KIND_CELLS,
     CELLS_REF_ANCHOR,
     CELLS_REF_REQUEST,
     CELLS_REF_USED_RANGE,
-    USETYPE_SHEET,
     DocumentService,
     NotASheetNode,
     SheetSourceUnavailable,
     _cells_bounds,
 )
+from jmfts_core.models.document import USETYPE_SHEET  # noqa: E402
 from jmfts_core.services.ingest_service import IngestService  # noqa: E402
 from tests.conftest import drain_ingest_queue  # noqa: E402
 
@@ -149,10 +150,11 @@ def _children(session, node_id: int, usetype: str) -> list:
 
 
 def _sheet_node(session, file_node: Document, name: str) -> Document:
+    repo = EvidenceRepository(session)
     return next(
         node
         for node in _children(session, file_node.id, USETYPE_SHEET)
-        if node.structured_content["sheet"]["name"] == name
+        if (repo.read(node.id, "sheet") or {}).get("name") == name
     )
 
 
@@ -450,9 +452,9 @@ class TestCellsBounds:
         assert (bounds.ref, source) == ("B2:C3", CELLS_REF_REQUEST)
 
     def test_the_nodes_own_anchor_is_next(self):
-        structured = {ANCHOR_KEY: {"kind": ANCHOR_KIND_CELLS, "sheet": "Deals", "ref": "B4:H120"}}
+        found = {ANCHOR_NAME: {"kind": ANCHOR_KIND_CELLS, "sheet": "Deals", "ref": "B4:H120"}}
 
-        bounds, source = _cells_bounds(7, structured, _sheet_block(), None)
+        bounds, source = _cells_bounds(7, found, _sheet_block(), None)
 
         assert (bounds.ref, source) == ("B4:H120", CELLS_REF_ANCHOR)
 
@@ -464,22 +466,22 @@ class TestCellsBounds:
     def test_an_anchor_of_another_kind_is_an_error_and_not_an_ignored_anchor(self):
         """Something wrote an address for a region that is not a region of cells. Serving a
         different rectangle instead would hide it."""
-        structured = {ANCHOR_KEY: {"kind": "pdf", "page": 3, "bbox": [1, 2, 3, 4]}}
+        found = {ANCHOR_NAME: {"kind": "pdf", "page": 3, "bbox": [1, 2, 3, 4]}}
 
         with pytest.raises(SheetSourceUnavailable, match="kind 'pdf'"):
-            _cells_bounds(7, structured, _sheet_block(), None)
+            _cells_bounds(7, found, _sheet_block(), None)
 
     def test_an_anchor_naming_another_sheet_is_an_error(self):
-        structured = {ANCHOR_KEY: {"kind": ANCHOR_KIND_CELLS, "sheet": "Lookup", "ref": "A1:B2"}}
+        found = {ANCHOR_NAME: {"kind": ANCHOR_KIND_CELLS, "sheet": "Lookup", "ref": "A1:B2"}}
 
         with pytest.raises(SheetSourceUnavailable, match="addresses sheet 'Lookup'"):
-            _cells_bounds(7, structured, _sheet_block(name="Deals"), None)
+            _cells_bounds(7, found, _sheet_block(name="Deals"), None)
 
     def test_an_anchor_with_no_ref_is_an_error(self):
-        structured = {ANCHOR_KEY: {"kind": ANCHOR_KIND_CELLS, "sheet": "Deals"}}
+        found = {ANCHOR_NAME: {"kind": ANCHOR_KIND_CELLS, "sheet": "Deals"}}
 
         with pytest.raises(SheetSourceUnavailable, match="with no"):
-            _cells_bounds(7, structured, _sheet_block(), None)
+            _cells_bounds(7, found, _sheet_block(), None)
 
     def test_an_unmeasured_sheet_has_no_default_and_says_which_task_is_missing(self):
         with pytest.raises(SheetSourceUnavailable, match="profile:sheet"):
@@ -491,7 +493,7 @@ class TestCellsBounds:
 
     def test_an_anchor_that_is_not_an_object_is_an_error(self):
         with pytest.raises(SheetSourceUnavailable, match="not an object"):
-            _cells_bounds(7, {ANCHOR_KEY: "B4:H120"}, _sheet_block(), None)
+            _cells_bounds(7, {ANCHOR_NAME: "B4:H120"}, _sheet_block(), None)
 
     def test_a_caller_named_ref_is_still_parsed(self):
         with pytest.raises(BadCellRef):
@@ -499,23 +501,26 @@ class TestCellsBounds:
 
 
 class TestConstantsAgreeWithTheirWriters:
-    """The two strings this service spells rather than imports.
+    """The string this service spells rather than imports.
 
-    Importing them would pull in ``jmfts_core.ingest_tasks``, whose module scope REGISTERS
-    every task handler as a side effect, and a read verb on the query path must not change
-    what the worker dispatches merely by being imported. This is the guard that import
-    would have been.
+    Importing it would pull in ``jmfts_core.citation_tasks``, and through it
+    ``jmfts_core.ingest_tasks``, whose module scope REGISTERS every task handler as a side
+    effect — a read verb on the query path must not change what the worker dispatches
+    merely by being imported. This is the guard that import would have been.
+
+    THERE WERE TWO OF THESE. ``USETYPE_SHEET`` was the other, and it is gone: the ingest
+    usetypes moved to ``jmfts_core.models.document`` in ``SPRINT_JOBS.md`` Phase 3 — Part
+    4's rule table names node kinds and cannot import the handler modules — and this
+    service already imports the model, which registers nothing. So the reasoning above was
+    right about ``sheet_tasks`` and was never a reason to keep a second spelling of the
+    string. The import is the guard now, and the test that stood in for it is deleted
+    rather than left asserting that a name equals itself.
     """
 
-    def test_the_sheet_usetype_is_the_one_structure_sheets_writes(self):
-        from jmfts_core.sheet_tasks import USETYPE_SHEET as WRITTEN
+    def test_the_anchor_name_is_the_one_citation_writes(self):
+        from jmfts_core.citation_tasks import ANCHOR_NAME as WRITTEN
 
-        assert USETYPE_SHEET == WRITTEN
-
-    def test_the_anchor_key_is_the_one_citation_writes(self):
-        from jmfts_core.citation_tasks import ANCHOR_KEY as WRITTEN
-
-        assert ANCHOR_KEY == WRITTEN
+        assert ANCHOR_NAME == WRITTEN
 
 
 # ---------------------------------------------------------------------------
@@ -593,13 +598,11 @@ class TestCellsVerb:
         so that the branch the spec's default names is covered the day one exists."""
         file_node = _ingest(db_session, workbook_bytes)
         sheet = _sheet_node(db_session, file_node, "Deals")
-        structured = dict(sheet.structured_content)
-        structured[ANCHOR_KEY] = {
-            "kind": ANCHOR_KIND_CELLS,
-            "sheet": "Deals",
-            "ref": "A2:C3",
-        }
-        sheet.structured_content = structured
+        EvidenceRepository(db_session).write(
+            sheet.id,
+            ANCHOR_NAME,
+            {"kind": ANCHOR_KIND_CELLS, "sheet": "Deals", "ref": "A2:C3"},
+        )
         db_session.flush()
 
         response = DocumentService(db_session).get_document_cells(sheet.id)

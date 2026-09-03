@@ -113,7 +113,10 @@ def _make_endpoint(spec: ExposeSpec) -> Callable:
         default=Depends(get_db),
         annotation=Session,
     )
-    error_map = spec.errors
+    # `effective_errors`, not `errors`: the optional-stack pair is mapped for every
+    # operation rather than repeated in every spec that can reach a model or a reader.
+    # `registry.DEFAULT_ERRORS` is the reasoning; `SPRINT_0_3_0.md` 13.10 is the defect.
+    error_map = spec.effective_errors
     service_cls = spec.service_cls
     func = spec.func
 

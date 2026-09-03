@@ -538,11 +538,13 @@ class TestAFileNodeRecordsThatItYieldedNothing:
         db_session.flush()
         return docs, node
 
-    def test_an_empty_file_node_settles_and_says_it_yielded_nothing(self, db_session, factory):
+    def test_an_empty_file_node_settles_and_says_it_yielded_nothing(
+        self, db_session, evidence, factory
+    ):
         docs, node = self._file_node(
             db_session,
             content=None,
-            structured_content={"matched": {"patterns": {"has_text_layer": False}}},
+            evidence={"matched": {"patterns": {"has_text_layer": False}}},
         )
 
         steps = settle_walk(node.id, NO_ROLLUP, session_factory=factory)
@@ -550,28 +552,28 @@ class TestAFileNodeRecordsThatItYieldedNothing:
         assert steps[0].settled is True
         refreshed = docs.get(node.id)
         assert refreshed.settled == SETTLED_SETTLED
-        assert refreshed.structured_content["yield"]["documents"] == 0
+        assert evidence(refreshed)["yield"]["documents"] == 0
         # The probe's own patterns are carried forward as the evidence for why, rather
         # than a restated guess.
-        assert refreshed.structured_content["yield"]["matched"] == {"has_text_layer": False}
+        assert evidence(refreshed)["yield"]["matched"] == {"has_text_layer": False}
 
-    def test_a_file_node_with_content_records_nothing(self, db_session, factory):
+    def test_a_file_node_with_content_records_nothing(self, db_session, evidence, factory):
         docs, node = self._file_node(db_session, content="the extracted text of the paper")
 
         settle_walk(node.id, NO_ROLLUP, session_factory=factory)
 
-        assert "yield" not in (docs.get(node.id).structured_content or {})
+        assert "yield" not in evidence(docs.get(node.id))
 
-    def test_a_file_node_with_children_records_nothing(self, db_session, factory):
+    def test_a_file_node_with_children_records_nothing(self, db_session, evidence, factory):
         docs, node = self._file_node(db_session, content=None)
         docs.create(title="chunk", content="body", parent_id=node.id, auto_embed=False)
         db_session.flush()
 
         settle_walk(node.id, NO_ROLLUP, session_factory=factory)
 
-        assert "yield" not in (docs.get(node.id).structured_content or {})
+        assert "yield" not in evidence(docs.get(node.id))
 
-    def test_an_empty_structural_node_records_nothing(self, db_session, factory):
+    def test_an_empty_structural_node_records_nothing(self, db_session, evidence, factory):
         """Scoped to `file`, whose whole purpose is to hold what came out of a byte
         stream. A structural node legitimately holds only children."""
         docs = DocumentRepository(db_session)
@@ -587,4 +589,4 @@ class TestAFileNodeRecordsThatItYieldedNothing:
         settle_walk(node.id, NO_ROLLUP, session_factory=factory)
 
         assert docs.get(node.id).settled == SETTLED_SETTLED
-        assert "yield" not in (docs.get(node.id).structured_content or {})
+        assert "yield" not in evidence(docs.get(node.id))

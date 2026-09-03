@@ -62,7 +62,16 @@ class JmftsUnprocessable(JmftsResponseError):
 
 
 class JmftsServerError(JmftsResponseError):
-    """5xx — the server failed. Not a client mistake; safe to report upward as-is."""
+    """5xx — the server failed. Not a client mistake; safe to report upward as-is.
+
+    **501 is the exception to "the server failed", and it can arrive from any
+    operation.** A JMFTS install may be built without the model stack or without the
+    office readers — both are supported deployments, not broken ones — and an operation
+    that needs one it does not have answers 501 with a message naming the missing extra.
+    That is stable: the same call will answer 501 again, so retrying is wasted and the
+    fix is on the server. No per-verb docstring mentions it, because it is true of every
+    verb rather than of any one of them.
+    """
 
 
 #: Status → exception. Anything unlisted becomes :class:`JmftsResponseError` itself,

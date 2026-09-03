@@ -32,6 +32,37 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from jmfts_core.embedding import ModelStackNotInstalled
+from jmfts_core.office import OfficeStackNotInstalled
+
+#: What every operation owes a caller when an optional stack is absent.
+#: ``SPRINT_0_3_0.md`` 13.10, items 1 and 2.
+#:
+#: **501 and not 503.** This install cannot embed text, or cannot open a workbook, and it
+#: will not be able to after a retry. 503 says "try later" and that is false here. An
+#: install without the ``embed`` extra is a SUPPORTED deployment — it is what a
+#: storage-side worker with ``JMFTS_RUNNER_URL`` is — so the honest answer is "this server
+#: does not do that", and both exception messages already name the two ways out.
+#:
+#: **A default rather than a per-``@expose`` entry**, because the alternative is repeating
+#: this pair in every spec that can reach a model or a reader, and there is no way to
+#: derive that set: it is a call graph, not a list the code already knows. A hand-written
+#: list of "operations that embed" would be the drift the one-definition rule exists to
+#: prevent, and it would be wrong the first time a service grows a call.
+#:
+#: Before this existed, ``GET /documents/{id}/cells`` answered 501 naming the missing
+#: extra and ``POST /search/*`` answered a bare 500 — the same fact about the deployment,
+#: reported two ways, and the 500 told a caller to retry or page somebody.
+#:
+#: A spec's own ``errors`` wins over this; see :attr:`ExposeSpec.effective_errors`.
+#: What the API owes a caller BEYOND the status — whether a search that cannot embed
+#: should refuse or run BM25 and say it narrowed — is 13.10 item 3, and it is a product
+#: decision this does not take.
+DEFAULT_ERRORS: dict[type, int] = {
+    ModelStackNotInstalled: 501,
+    OfficeStackNotInstalled: 501,
+}
+
 
 @dataclass
 class ExposeSpec:
@@ -52,6 +83,23 @@ class ExposeSpec:
         """Stable operation id: ``ServiceClass.method``."""
         cls = self.service_cls.__name__ if self.service_cls else "?"
         return f"{cls}.{self.func.__name__}"
+
+    @property
+    def effective_errors(self) -> dict[type, int]:
+        """:data:`DEFAULT_ERRORS`, with this spec's own mapping on top.
+
+        The adapter maps against this; ``scripts/generate_client.py`` documents
+        :attr:`errors`. That split is deliberate. The default is true of every operation
+        and therefore says nothing about any one of them, so rendering it into a hundred
+        generated docstrings would put "Raises on 501" on ``GET /health``. It belongs in
+        the client's error vocabulary, and ``jmfts_client.errors.JmftsServerError`` is
+        where it is written.
+
+        Declaring one of the two explicitly still works and still wins — the status is
+        the spec's. Nothing in the tree does; the case that used to,
+        ``get_document_cells``, now points here instead.
+        """
+        return {**DEFAULT_ERRORS, **self.errors}
 
 
 # The global operation registry. Ordered; deduped by (method, path).

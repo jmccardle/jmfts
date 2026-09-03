@@ -18,12 +18,20 @@ import pytest
 from sqlalchemy import select
 
 from jmfts_client.contracts.upload import UploadedFile
-from jmfts_core.ingest_tasks import TASK_EMBED, TASK_SUMMARIZE
+from jmfts_core.ingest_options import resolve_options
+from jmfts_core.ingest_tasks import (
+    TASK_EMBED,
+    TASK_ROWS,
+    TASK_STRUCTURE_DECLARED,
+    TASK_SUMMARIZE,
+)
 from jmfts_core.ingest_worker import IngestWorker
 from jmfts_core.models.document import (
     Document,
     SETTLED_IN_FLIGHT,
     SETTLED_SETTLED,
+    USETYPE_RECORD,
+    USETYPE_SUMMARY,
 )
 from jmfts_core.models.task_queue import TASK_PENDING, WRITE_SELF, TaskQueue
 from jmfts_core.models.token_embedding import TokenEmbedding
@@ -31,7 +39,7 @@ from jmfts_core.repositories.document import DocumentRepository
 from jmfts_core.rollup_tasks import IngestRollupPlanner
 from jmfts_core.services.ingest_service import IngestService
 from jmfts_core.settling import settle_node
-from jmfts_core.structure_tasks import EMBED_CHUNK_SPEC, USETYPE_CHUNK, USETYPE_SECTION
+from jmfts_core.models.document import USETYPE_CHUNK, USETYPE_SECTION
 from tests.conftest import _borrowed_session, drain_ingest_queue
 
 MARKDOWN = b"""# Retrieval
@@ -269,7 +277,7 @@ class TestPendingEmbedBlocksTheWalk:
             )
             assert stored, f"chunk {chunk.id} has a document vector and no token vectors"
 
-    def test_a_section_now_gets_summarized(self, db_session):
+    def test_a_section_now_gets_summarized(self, db_session, evidence):
         """A consequence of the chunks becoming in-flight, and a gap closed rather than a
         side effect tolerated.
 
@@ -284,7 +292,7 @@ class TestPendingEmbedBlocksTheWalk:
         sections = _nodes(db_session, node, USETYPE_SECTION)
         assert sections, "the markdown fixture declared no sections"
         for section in sections:
-            effective = (section.structured_content or {}).get("effective_content")
+            effective = evidence(section).get("effective_content")
             assert effective, f"section {section.id} was never rolled up"
             assert section.embed is not None
 
@@ -295,12 +303,28 @@ class TestPendingEmbedBlocksTheWalk:
 
 
 class TestTheEmbedHandler:
-    def test_the_spec_the_rung_uses_asks_for_token_vectors(self):
+    def test_the_row_the_rung_uses_asks_for_token_vectors(self):
         """A chunk is exactly the node the token/maxsim path exists for: a leaf, its text
-        is its own, and the chunker bounded it to the token window."""
-        assert EMBED_CHUNK_SPEC.task_type == TASK_EMBED
-        assert EMBED_CHUNK_SPEC.write_mode == WRITE_SELF
-        assert EMBED_CHUNK_SPEC.params == {"with_tokens": True}
+        is its own, and the chunker bounded it to the token window.
+
+        It was `EMBED_CHUNK_SPEC`, a literal spec in `structure_tasks`, until
+        `SPRINT_JOBS.md` Phase 3 made `embed` a row scoped to the leaves of five rules. The
+        claim is unchanged; where it is written down is not."""
+        row = next(r for r in TASK_ROWS if r.task == TASK_EMBED)
+        assert row.write_mode == WRITE_SELF
+        assert row.params_key == "embed"
+        assert resolve_options("pdf")["embed"] == {"with_tokens": True}
+
+    def test_the_embed_row_reaches_every_leaf_kind_and_no_container(self):
+        """The scope's second half is what keeps `embed` off a `section`: a container holds
+        no text of its own, gets `effective_content` from the rollup, and `run_embed`
+        refuses empty content — which is right of the handler and would be wrong of the
+        schedule."""
+        scope = next(r for r in TASK_ROWS if r.task == TASK_EMBED).scope
+        assert scope.usetypes == (USETYPE_CHUNK, USETYPE_RECORD, USETYPE_SUMMARY)
+        assert USETYPE_SECTION not in scope.usetypes
+        assert scope.matches(TASK_STRUCTURE_DECLARED, USETYPE_CHUNK)
+        assert not scope.matches(TASK_STRUCTURE_DECLARED, USETYPE_SECTION)
 
     def test_a_node_with_no_content_raises_rather_than_completing(self, db_session):
         """Not a skip. The task was enqueued for text, and a node that has none is a chunk
@@ -320,14 +344,14 @@ class TestTheEmbedHandler:
         with pytest.raises(ValueError, match="no content"):
             run_embed(db_session, task)
 
-    def test_the_detail_records_what_produced_the_vectors(self, db_session):
+    def test_the_detail_records_what_produced_the_vectors(self, db_session, evidence):
         """``model`` and ``device`` in the attempt log are how a corpus embedded across a
         mixed fleet stays auditable — a remote embedder reports ``remote:<url>`` here."""
         node = _upload(db_session)
         drain_ingest_queue(db_session, max_tasks=200)
 
         chunk = _nodes(db_session, node, USETYPE_CHUNK)[0]
-        attempt = next(e for e in chunk.structured_content["attempts"] if e["task"] == TASK_EMBED)
+        attempt = next(e for e in evidence(chunk)["attempts"] if e["task"] == TASK_EMBED)
         assert attempt["status"] == "completed"
         assert attempt["detail"]["model"]
         assert attempt["detail"]["dims"] > 0

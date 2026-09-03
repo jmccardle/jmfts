@@ -47,7 +47,6 @@ from jmfts_client.contracts import (  # noqa: F401
     PathResponse,
     PathStep,
     PipelineInfo,
-    PipelineStageInfo,
     PortfolioRaptorRequest,
     PredicateCreate,
     PredicateResponse,
@@ -270,7 +269,7 @@ class HealthResponse(BaseModel):
 # ============================================================================
 
 
-# IngestRequest, IngestStageResult, IngestResponse, PipelineStageInfo, PipelineInfo are
+# IngestRequest, IngestStageResult, IngestResponse, PipelineInfo are
 # defined in jmfts_client.contracts.ingest and re-exported above.
 # IngestStageOverride used to sit here. Per-stage overrides on the queue are the
 # `options` group resolver (jmfts_core/ingest_options.py), not this model, and nothing

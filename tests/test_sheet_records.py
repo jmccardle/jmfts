@@ -39,7 +39,8 @@ import openpyxl  # noqa: E402
 import jmfts_core.ingest_tasks  # noqa: E402,F401  (import order; see the module cycle)
 from jmfts_client.contracts.upload import UploadedFile  # noqa: E402
 from jmfts_core.ingest_tasks import TASK_EXTRACT_SHEET  # noqa: E402
-from jmfts_core.models.document import Document  # noqa: E402
+from jmfts_core.ingest_options import resolve_options  # noqa: E402
+from jmfts_core.models.document import Document, USETYPE_RECORD  # noqa: E402
 from jmfts_core.office.cells import (  # noqa: E402
     ROWS_READ_MAX,
     TooManyRows,
@@ -48,15 +49,16 @@ from jmfts_core.office.cells import (  # noqa: E402
 )
 from jmfts_core.office.sheets import measure_sheet  # noqa: E402
 from jmfts_core.repositories.document import DocumentRepository  # noqa: E402
+from jmfts_core.repositories.evidence import EvidenceRepository  # noqa: E402
 from jmfts_core.services.ingest_service import IngestService  # noqa: E402
 from jmfts_core.sheet_records import (  # noqa: E402
     SHAPE_RECORDS,
-    USETYPE_RECORD,
     HeaderDoesNotCoverTheRow,
     build_records,
     header_labels,
 )
-from jmfts_core.sheet_tasks import USETYPE_SHEET, run_extract_sheet  # noqa: E402
+from jmfts_core.models.document import USETYPE_SHEET  # noqa: E402
+from jmfts_core.sheet_tasks import run_extract_sheet  # noqa: E402
 from jmfts_core.structure_tasks import RUNG_INFERRED  # noqa: E402
 from tests.conftest import drain_ingest_queue  # noqa: E402
 
@@ -133,19 +135,27 @@ def _children(session, node_id: int, usetype: str) -> list:
 
 
 def _sheet_node(session, file_node: Document, name: str) -> Document:
+    repo = EvidenceRepository(session)
     return next(
         node
         for node in _children(session, file_node.id, USETYPE_SHEET)
-        if node.structured_content["sheet"]["name"] == name
+        if (repo.read(node.id, "sheet") or {}).get("name") == name
     )
 
 
 class _ScopedTask:
-    """The two fields a per-sheet handler reads off its queue row."""
+    """The two fields a per-sheet handler reads off its queue row.
+
+    ``params`` is the RESOLVED ``sheet_records`` group with the test's overrides on top,
+    not a bare dict. Since ``SPRINT_JOBS.md`` Phase 3 the group is complete on every queue
+    row `plan_frontier` writes, and ``run_extract_sheet`` reads ``params["max_rows"]``
+    rather than falling back to a default of its own — so a stand-in row carrying one key
+    would exercise a shape the queue never produces.
+    """
 
     def __init__(self, document_id: int, params: dict | None = None):
         self.scope_document_id = document_id
-        self.params = params or {}
+        self.params = {**resolve_options("xlsx")["sheet_records"], **(params or {})}
 
 
 # ---------------------------------------------------------------------------
@@ -343,16 +353,17 @@ class TestBuildRecords:
 
 
 class TestExtractSheetTask:
-    def test_upload_produces_one_record_node_per_row(self, db_session, workbook_bytes):
+    def test_upload_produces_one_record_node_per_row(self, db_session, evidence, workbook_bytes):
         """The whole claim, from bytes to nodes: upload, drain, and the rows are there."""
         file_node = _ingest(db_session, workbook_bytes)
         sheet = _sheet_node(db_session, file_node, "Deals")
         records = _children(db_session, sheet.id, USETYPE_RECORD)
 
-        assert [node.structured_content["row_index"] for node in records] == [2, 3, 5]
-        assert records[0].structured_content["record"]["Value"] == 128000
-        assert records[0].structured_content["record"]["Won"] is True
-        assert records[0].structured_content["sheet_name"] == "Deals"
+        assert [evidence(node)["row_index"] for node in records] == [2, 3, 5]
+        first = evidence(records[0])
+        assert first["record"]["Value"] == 128000
+        assert first["record"]["Won"] is True
+        assert first["sheet_name"] == "Deals"
 
     def test_a_record_node_keeps_the_worksheet_row_number_in_its_title(
         self, db_session, workbook_bytes
@@ -366,12 +377,14 @@ class TestExtractSheetTask:
             "Deals row 5",
         ]
 
-    def test_the_sheet_node_records_the_shape_and_its_rung(self, db_session, workbook_bytes):
+    def test_the_sheet_node_records_the_shape_and_its_rung(
+        self, db_session, evidence, workbook_bytes
+    ):
         """8.7: `rung` is `inferred` for every shape except `unstructured`. The sheet node
         itself was produced at the declared rung; the shape below it was not."""
         file_node = _ingest(db_session, workbook_bytes)
         node = _sheet_node(db_session, file_node, "Deals")
-        block = node.structured_content["sheet"]
+        block = evidence(node)["sheet"]
 
         assert block["shape"] == SHAPE_RECORDS
         assert block["rung"] == RUNG_INFERRED
@@ -380,13 +393,15 @@ class TestExtractSheetTask:
         # boundary to be close to.
         assert block["shape_margin"] is None
 
-    def test_the_shape_verdict_does_not_erase_the_branch_inputs(self, db_session, workbook_bytes):
+    def test_the_shape_verdict_does_not_erase_the_branch_inputs(
+        self, db_session, evidence, workbook_bytes
+    ):
         """6.2: the measured values a shape decision consumes are what a calibration sweep
         replays against, and this task adds a verdict rather than forgetting the
         evidence."""
         file_node = _ingest(db_session, workbook_bytes)
         node = _sheet_node(db_session, file_node, "Deals")
-        decision = node.structured_content["sheet"]["shape_decision"]
+        decision = evidence(node)["sheet"]["shape_decision"]
 
         assert decision["decided"] is True
         assert decision["basis"] == "header_row"
@@ -395,7 +410,7 @@ class TestExtractSheetTask:
         assert "fill_ratio" in decision["inputs"]
 
     def test_a_sheet_with_no_header_row_gets_no_records_and_says_why(
-        self, db_session, workbook_bytes
+        self, db_session, evidence, workbook_bytes
     ):
         """Not a failure. A sheet with no header row has no keys, and the shapes 8.4 gives
         it read thresholds 8.8 leaves unset."""
@@ -403,24 +418,20 @@ class TestExtractSheetTask:
         node = _sheet_node(db_session, file_node, "Notes")
 
         assert _children(db_session, node.id, USETYPE_RECORD) == []
-        assert node.structured_content["sheet"]["shape"] is None
+        assert evidence(node)["sheet"]["shape"] is None
         attempt = next(
-            entry
-            for entry in node.structured_content["attempts"]
-            if entry["task"] == TASK_EXTRACT_SHEET
+            entry for entry in evidence(node)["attempts"] if entry["task"] == TASK_EXTRACT_SHEET
         )
         assert attempt["rung"] is None
         assert "header_row" in attempt["detail"]["no_records"]
 
     def test_the_attempt_counts_what_the_standard_library_pass_found(
-        self, db_session, workbook_bytes
+        self, db_session, evidence, workbook_bytes
     ):
         file_node = _ingest(db_session, workbook_bytes)
         node = _sheet_node(db_session, file_node, "Deals")
         detail = next(
-            entry
-            for entry in node.structured_content["attempts"]
-            if entry["task"] == TASK_EXTRACT_SHEET
+            entry for entry in evidence(node)["attempts"] if entry["task"] == TASK_EXTRACT_SHEET
         )["detail"]
 
         assert detail["cell_notes_read"] is True
@@ -441,14 +452,16 @@ class TestExtractSheetTask:
         with pytest.raises(ValueError, match="materialises one worksheet's cells"):
             run_extract_sheet(db_session, _ScopedTask(file_node.id))
 
-    def test_it_refuses_a_sheet_the_profile_has_not_measured(self, db_session, workbook_bytes):
+    def test_it_refuses_a_sheet_the_profile_has_not_measured(
+        self, db_session, evidence, workbook_bytes
+    ):
         """It reads the header verdict and the column names off the profile rather than
         deriving them a second time, and is ordered after it for that reason."""
         file_node = _ingest(db_session, workbook_bytes)
         node = _sheet_node(db_session, file_node, "Deals")
-        block = dict(node.structured_content["sheet"])
+        block = dict(evidence(node)["sheet"])
         block.pop("measurements")
-        node.structured_content = {**node.structured_content, "sheet": block}
+        EvidenceRepository(db_session).write(node.id, "sheet", block)
         db_session.flush()
 
         with pytest.raises(ValueError, match="sheet.measurements"):

@@ -26,6 +26,7 @@ from jmfts_client.contracts.document import (
     ChunkRequest,
     ChunkResponse,
     DocumentCellsResponse,
+    DocumentEvidenceResponse,
     DocumentCreate,
     DocumentResponse,
     DocumentTokensResponse,
@@ -72,7 +73,6 @@ from jmfts_client.contracts.ingest import (
     IngestResponse,
     IngestStageResult,
     PipelineInfo,
-    PipelineStageInfo,
 )
 from jmfts_client.contracts.graph import (
     CentralityResponse,
@@ -217,7 +217,6 @@ __all__ = [
     "IngestResponse",
     "IngestStageResult",
     "PipelineInfo",
-    "PipelineStageInfo",
     "DocumentResponse",
     "CellNoteResponse",
     "CellRowResponse",
@@ -225,6 +224,7 @@ __all__ = [
     "ChunkRequest",
     "ChunkResponse",
     "DocumentCellsResponse",
+    "DocumentEvidenceResponse",
     "DocumentCreate",
     "DocumentTokensResponse",
     "DocumentUpdate",

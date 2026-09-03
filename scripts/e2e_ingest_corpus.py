@@ -499,8 +499,9 @@ def phase_report(args: argparse.Namespace) -> str:
     skipped = q(
         f"""
         SELECT a->>'task' AS task, a->'detail'->>'reason' AS reason, COUNT(*) AS n
-        FROM documents d, LATERAL jsonb_array_elements(
-            COALESCE(d.structured_content->'attempts', '[]'::jsonb)) a
+        FROM documents d
+        JOIN document_evidence ev ON ev.document_id = d.id AND ev.name = 'attempts',
+        LATERAL jsonb_array_elements(COALESCE(ev.value, '[]'::jsonb)) a
         WHERE {scope} AND a->>'status' = 'skipped'
         GROUP BY 1, 2 ORDER BY n DESC LIMIT 30
     """,
@@ -561,10 +562,12 @@ def phase_report(args: argparse.Namespace) -> str:
             q(
                 f"""
         SELECT d.usetype,
-               d.structured_content->'effective_content'->>'method' AS method,
+               ev.value->>'method' AS method,
                COUNT(*) AS n
         FROM documents d
-        WHERE {scope} AND d.structured_content ? 'effective_content'
+        JOIN document_evidence ev
+          ON ev.document_id = d.id AND ev.name = 'effective_content'
+        WHERE {scope}
         GROUP BY 1, 2 ORDER BY n DESC
     """,
                 params,

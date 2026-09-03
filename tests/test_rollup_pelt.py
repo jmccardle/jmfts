@@ -31,6 +31,7 @@ from jmfts_core.ingest_tasks import (
 from jmfts_core.models.document import SETTLED_IN_FLIGHT, SETTLED_SETTLED, Document
 from jmfts_core.models.task_queue import TaskQueue
 from jmfts_core.repositories.document import DocumentRepository
+from jmfts_core.repositories.evidence import EvidenceRepository
 from jmfts_core.rollup_tasks import (
     METHOD_CONCATENATED,
     METHOD_LLM_SUMMARY,
@@ -178,7 +179,7 @@ class TestThePlanner:
         ancestor that does — not the profile defaults as they stand today.
         """
         parent = _tree(db_session, [0, 1, 2])
-        parent.structured_content = {"options": {"rollup": {"max_children": 2}}}
+        EvidenceRepository(db_session).write(parent.id, "options", {"rollup": {"max_children": 2}})
         db_session.flush()
 
         specs = IngestRollupPlanner()(db_session, parent)
@@ -189,13 +190,11 @@ def _record_attempt(session, node: Document, task: str, params: dict) -> None:
     """Append the attempt a completed task would have left, so the diff can see it."""
     from jmfts_client.contracts.attempt import param_fingerprint
 
-    structured = dict(node.structured_content or {})
-    attempts = list(structured.get("attempts", []))
-    attempts.append(
-        {"task": task, "status": "completed", "param_fingerprint": param_fingerprint(params)}
+    EvidenceRepository(session).append(
+        node.id,
+        "attempts",
+        [{"task": task, "status": "completed", "param_fingerprint": param_fingerprint(params)}],
     )
-    structured["attempts"] = attempts
-    node.structured_content = structured
     session.flush()
 
 
@@ -217,7 +216,7 @@ class TestSegmentation:
         assert all(c.usetype == USETYPE_SEGMENT for c in containers)
         assert [len(child_ids(db_session, c.id)) for c in containers] == [3, 3]
 
-    def test_the_containers_carry_the_rung_and_no_title(self, db_session):
+    def test_the_containers_carry_the_rung_and_no_title(self, db_session, evidence):
         """The document does not name this span, so nothing here names it either."""
         parent = _tree(db_session, [0, 0, 0, 1, 1, 1])
         run_structure_semantic(db_session, _Task(parent.id, SEGMENT_PARAMS))
@@ -225,8 +224,8 @@ class TestSegmentation:
         container = _children(db_session, parent.id)[0]
         assert container.title is None
         assert container.content is None
-        assert container.structured_content["structure"]["primary_rung"] == RUNG_SEMANTIC
-        assert container.structured_content["structure"]["source"] == SOURCE_PELT
+        assert evidence(container)["structure"]["primary_rung"] == RUNG_SEMANTIC
+        assert evidence(container)["structure"]["source"] == SOURCE_PELT
 
     def test_document_order_survives_the_move(self, db_session):
         parent = _tree(db_session, [0, 0, 0, 1, 1, 1])
@@ -327,13 +326,13 @@ class TestSegmentation:
 
 
 class TestEffectiveContent:
-    def test_a_short_node_is_concatenated_not_summarized(self, db_session):
+    def test_a_short_node_is_concatenated_not_summarized(self, db_session, evidence):
         """The represent-before-interpret rule, at the point it applies."""
         parent = _tree(db_session, [0, 1], text="a short passage about retrieval")
         outcome = run_summarize(db_session, _Task(parent.id, {}, TASK_SUMMARIZE))
 
         assert outcome.detail["method"] == METHOD_CONCATENATED
-        record = db_session.get(Document, parent.id).structured_content["effective_content"]
+        record = evidence(db_session.get(Document, parent.id))["effective_content"]
         assert record["method"] == METHOD_CONCATENATED
         assert record["source_children"] == 2
         # A concatenation is derivable from the subtree, so it is not written down.
@@ -406,9 +405,11 @@ class TestEffectiveContent:
         repo.create(
             title="leaf", content="the long original", parent_id=middle.id, auto_embed=False
         )
-        middle.structured_content = {
-            "effective_content": {"method": METHOD_LLM_SUMMARY, "text": "the short summary"}
-        }
+        EvidenceRepository(db_session).write(
+            middle.id,
+            "effective_content",
+            {"method": METHOD_LLM_SUMMARY, "text": "the short summary"},
+        )
         db_session.flush()
 
         assert effective_text(db_session, parent.id, own_content=False) == "the short summary"
@@ -427,13 +428,11 @@ class TestEffectiveContent:
         assert outcome.detail["deferred_to"] == TASK_SUMMARIZE_LLM
         assert outcome.detail["tokens"] > outcome.detail["window"]
         # The node has NOT been given effective_content yet — the deferral is the product.
-        assert "effective_content" not in (
-            db_session.get(Document, parent.id).structured_content or {}
-        )
+        assert "effective_content" not in EvidenceRepository(db_session).read_all(parent.id)
         queued = db_session.query(TaskQueue).filter_by(scope_document_id=parent.id).all()
         assert [t.task_type for t in queued] == [TASK_SUMMARIZE_LLM]
 
-    def test_the_llm_task_summarizes_and_embeds(self, db_session, monkeypatch):
+    def test_the_llm_task_summarizes_and_embeds(self, db_session, evidence, monkeypatch):
         """The path over the embedding window. The model is replaced, not called."""
         import jmfts_core.rollup_tasks as rollup
 
@@ -453,7 +452,7 @@ class TestEffectiveContent:
         assert len(calls) == 1
         assert outcome.detail["method"] == METHOD_LLM_SUMMARY
         assert outcome.detail["input_tokens"] > outcome.detail["window"]
-        record = db_session.get(Document, parent.id).structured_content["effective_content"]
+        record = evidence(db_session.get(Document, parent.id))["effective_content"]
         assert record["text"] == "A short summary of a long span about retrieval quality."
 
     def test_a_model_that_does_not_summarize_raises(self, db_session, monkeypatch):
@@ -548,13 +547,13 @@ class TestEndToEnd:
         assert rows
         assert all(row.settled == SETTLED_SETTLED for row in rows)
 
-    def test_the_segments_carry_effective_content(self, node, db_session):
+    def test_the_segments_carry_effective_content(self, node, db_session, evidence):
         segments = [c for c in _children(db_session, node.id) if c.usetype == USETYPE_SEGMENT]
         assert segments
         for segment in segments:
             assert segment.embed is not None
             assert segment.content is None
-            assert segment.structured_content["effective_content"]["method"] == METHOD_CONCATENATED
+            assert evidence(segment)["effective_content"]["method"] == METHOD_CONCATENATED
 
     def test_the_walk_stopped(self, node, db_session):
         """Termination, end to end: nothing is left pending anywhere under the file node."""

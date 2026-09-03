@@ -29,6 +29,7 @@ from jmfts_core.ingest_tasks import (
 from jmfts_core.models.document import SETTLED_SETTLED, Document
 from jmfts_core.probe import detect_format, probe_patterns
 from jmfts_core.repositories.document import DocumentRepository
+from jmfts_core.repositories.evidence import EvidenceRepository
 from jmfts_core.services.ingest_service import IngestService
 from jmfts_core.structural_splitting import find_headings, split_on_headings
 from jmfts_core.structure_tasks import (
@@ -121,8 +122,10 @@ def _children(session, node_id: int) -> list[Document]:
     )
 
 
-def _attempt(node: Document, task: str) -> dict:
-    return next(e for e in node.structured_content["attempts"] if e["task"] == task)
+def _attempt(session, node: Document, task: str) -> dict:
+    """One entry from the node's durable attempt log, which is an evidence row since 2b."""
+    log = DocumentRepository(session).attempt_log(node)
+    return next(e for e in log if e["task"] == task)
 
 
 # ---------------------------------------------------------------------------
@@ -227,8 +230,8 @@ class TestMarkdownEndToEnd:
     def test_the_file_node_holds_the_bytes_as_text(self, node):
         assert node.content == MARKDOWN
 
-    def test_the_extraction_record_names_the_decoder(self, node):
-        extraction = node.structured_content["extraction"]
+    def test_the_extraction_record_names_the_decoder(self, node, evidence):
+        extraction = evidence(node)["extraction"]
         assert extraction["source"] == EXTRACTION_UTF8_TEXT
         assert extraction["characters"] == len(MARKDOWN)
         # 11.3's table: no pages, and the headings stay in the text rather than being
@@ -236,11 +239,11 @@ class TestMarkdownEndToEnd:
         assert extraction["toc"] == []
         assert "page_offsets" not in extraction
 
-    def test_the_declared_rung_ran_over_the_author_s_own_headings(self, node):
-        structure = node.structured_content["structure"]
+    def test_the_declared_rung_ran_over_the_author_s_own_headings(self, db_session, node, evidence):
+        structure = evidence(node)["structure"]
         assert structure["primary_rung"] == RUNG_DECLARED
         assert structure["source"] == SOURCE_ATX_HEADINGS
-        assert _attempt(node, TASK_STRUCTURE_DECLARED)["rung"] == RUNG_DECLARED
+        assert _attempt(db_session, node, TASK_STRUCTURE_DECLARED)["rung"] == RUNG_DECLARED
 
     def test_the_tree_is_the_one_the_document_declares(self, db_session, node):
         children = _children(db_session, node.id)
@@ -262,16 +265,16 @@ class TestMarkdownEndToEnd:
     def test_the_node_settles(self, node):
         assert node.settled == SETTLED_SETTLED
 
-    def test_the_extraction_attempt_pairs_the_yield_with_the_probe(self, node):
+    def test_the_extraction_attempt_pairs_the_yield_with_the_probe(self, db_session, node):
         """11.3's hazard, answered with two numbers rather than a threshold."""
-        detail = _attempt(node, TASK_EXTRACT_TEXT)["detail"]
+        detail = _attempt(db_session, node, TASK_EXTRACT_TEXT)["detail"]
         assert detail["source"] == EXTRACTION_UTF8_TEXT
         assert detail["bytes_in"] == len(MARKDOWN.encode("utf-8"))
         assert detail["characters"] == len(MARKDOWN)
         assert detail["characters_probed"] == len(MARKDOWN)
 
-    def test_the_structure_attempt_pairs_its_sections_with_the_probe(self, node):
-        detail = _attempt(node, TASK_STRUCTURE_DECLARED)["detail"]
+    def test_the_structure_attempt_pairs_its_sections_with_the_probe(self, db_session, node):
+        detail = _attempt(db_session, node, TASK_STRUCTURE_DECLARED)["detail"]
         assert detail["headings_probed"] == 3
         assert detail["sections_titled"] == 3
 
@@ -286,14 +289,14 @@ class TestPlainTextEndToEnd:
         assert children
         assert all(c.usetype == USETYPE_CHUNK for c in children)
 
-    def test_the_gap_is_recorded_rather_than_papered_over(self, node):
+    def test_the_gap_is_recorded_rather_than_papered_over(self, node, evidence):
         """A `.txt` file has no structure, and that is a measurement, not a failure.
 
         `coverage: 0.0` with one gap region is the honest description of a document
         nothing could attribute to a section, and it is what the lower rungs — and 11.4's
         segmentation — exist to claim later.
         """
-        structure = node.structured_content["structure"]
+        structure = evidence(node)["structure"]
         assert structure["primary_rung"] == RUNG_INFERRED
         assert structure["coverage"] == 0.0
         assert structure["gap_regions"] == 1
@@ -325,21 +328,21 @@ class TestMarkupIsNotProse:
         extract = next(t for t in plan.tasks if t.task == TASK_EXTRACT_TEXT)
         assert extract.outcome == "enqueued"
 
-    def test_an_html_file_produces_prose_and_children(self, db_session):
+    def test_an_html_file_produces_prose_and_children(self, db_session, evidence):
         node = _ingest(db_session, HTML, "page.html")
         assert node.settled == SETTLED_SETTLED
         assert node.content, "an HTML file must now yield markdown, not nothing"
         assert "<" not in node.content, "tags must not survive into the stored prose"
         assert _children(db_session, node.id) != []
 
-        extraction = (node.structured_content or {})["extraction"]
+        extraction = evidence(node)["extraction"]
         assert extraction["source"] == EXTRACTION_HTML_MARKUP
 
         # Both sides of the conversion are recorded — in the ATTEMPT detail, which is where
         # `Extracted.detail` is merged, not in the extraction record. A collapse is then
         # visible as two numbers that disagree rather than inferred from a ratio nobody
         # stored. For HTML they are EXPECTED to differ: tags leave.
-        detail = _attempt(node, TASK_EXTRACT_TEXT)["detail"]
+        detail = _attempt(db_session, node, TASK_EXTRACT_TEXT)["detail"]
         assert detail["html_chars"] > detail["markdown_chars"] > 0
 
     def test_markdown_opening_with_a_comment_is_not_markup(self):
@@ -400,9 +403,10 @@ class TestTheRungDispatch:
         the rung knows how to read.
         """
         node = _ingest(db_session, MARKDOWN, "notes.md")
-        structured = dict(node.structured_content)
-        structured["extraction"] = {**structured["extraction"], "source": "epub_spine"}
-        node.structured_content = structured
+        repo = EvidenceRepository(db_session)
+        repo.write(
+            node.id, "extraction", {**repo.read(node.id, "extraction"), "source": "epub_spine"}
+        )
         db_session.flush()
 
         class _Task:
