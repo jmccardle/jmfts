@@ -307,6 +307,13 @@ register(
     doc="one spreadsheet row as typed values, on the record node `extract:sheet` writes.",
 )
 register(
+    "cell",
+    type=TYPE_DICT,
+    store=Store(STORE_EVIDENCE, row="cell"),
+    doc="one column of one row — its name and typed value — on a `cell` node under a "
+    "record too long to embed whole.",
+)
+register(
     "embedding",
     type=TYPE_LIST,
     store=Store(STORE_COLUMN, "embed"),

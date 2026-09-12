@@ -412,16 +412,30 @@ def _check_tree_integrity(repo, session, root_id):
 
 
 def _check_full_coverage(repo, root_id, original_child_ids):
-    """Every original chunk is in exactly one cluster (via re-parenting)."""
+    """Every original chunk is covered by at least one summary.
+
+    **Amended for `docs/SPRINT_0_5_0.md` Block C step 12.** This used to read the chunk's
+    ``parent_id`` and require that it was no longer the root — coverage measured by
+    re-parenting. Step 12 deleted the ``repo.reparent`` from `_summarize_cluster`, so a
+    chunk now KEEPS the parent it was ingested under and coverage is carried by the
+    ``summarizes`` link written on the same loop iteration. The old assertion is not
+    merely stale, it asserted the defect: one parent per member cannot represent a node
+    Leiden placed in two clusters, which is the many-to-many failure `SPRINT_0_3_0.md`
+    7.5 fixed for entities (`fact_extraction.py:35`-`:41`).
+
+    "Exactly one cluster" therefore relaxes to "at least one", deliberately: multiple
+    incoming ``summarizes`` links is the shape step 12 exists to permit, and Part 3.1's
+    leaf projection is total precisely because every chunk has one or more.
+    """
     issues = []
     for cid in original_child_ids:
         doc = repo.get(cid)
         if doc is None:
             issues.append(f"Chunk {cid} not found")
             continue
-        # After RAPTOR, chunks should be re-parented under a summary
-        if doc.parent_id == root_id:
-            issues.append(f"Chunk {cid} still directly under root (not re-parented)")
+        covering = repo.get_links(cid, direction="incoming", link_type="summarizes")
+        if not covering:
+            issues.append(f"Chunk {cid} is covered by no summary (no 'summarizes' link in)")
     return issues
 
 
@@ -437,12 +451,21 @@ def _check_link_consistency(repo, session):
 
 
 def _check_no_orphaned_summaries(repo, session):
-    """Every summary has at least one child document (re-parented chunks)."""
+    """Every summary reaches at least one member document that still exists.
+
+    **Amended for `docs/SPRINT_0_5_0.md` Block C step 12**, same reason as
+    `_check_full_coverage`: this asked ``get_children(s.id)`` and a summary has no
+    children any more. The question it was asking — does this summary actually cover
+    anything? — survives, resolved through the ``summarizes`` links instead. This is not
+    `_check_link_consistency` twice: that one asks whether a link EXISTS, this one
+    dereferences it, so a link pointing at a deleted or never-committed member is caught
+    here and not there.
+    """
     summaries = repo.find(usetype="summary", limit=1000)
     orphaned = []
     for s in summaries:
-        children = repo.get_children(s.id, depth=1, limit=1)
-        if not children:
+        links = repo.get_links(s.id, direction="outgoing", link_type="summarizes")
+        if not any(repo.get(link.target_id) is not None for link in links):
             orphaned.append(s.id)
     return orphaned
 
@@ -669,10 +692,15 @@ class TestRaptorIntegrationA6:
         _run(raptor_summarize(parent.id, db_session, max_depth=5, min_cluster_size=2))
         summaries_after_first = len(repo.find(usetype="summary", limit=1000))
 
-        # Second RAPTOR run on same document
-        # After first run, original chunks are re-parented under summaries.
-        # _get_embedded_child_ids looks for immediate children of root with embed.
-        # The immediate children are now the L0 summaries (which have embeddings).
+        # Second RAPTOR run on same document.
+        # _get_embedded_child_ids looks for immediate children of root with embed. Before
+        # `docs/SPRINT_0_5_0.md` Block C step 12 those were only the top layer's
+        # summaries, because each layer's reparent pulled the previous layer's summaries
+        # down underneath it. With the reparent gone the chunks stay put and every
+        # layer's summaries stay siblings, so the second run clusters the chunks AND all
+        # the summaries together. The assertion below is deliberately weak about which of
+        # those happens — this test documents second-run behaviour, it does not specify
+        # it — and step 12 does not change the one thing it does specify.
         _run(raptor_summarize(parent.id, db_session, max_depth=5, min_cluster_size=2))
         summaries_after_second = len(repo.find(usetype="summary", limit=1000))
 

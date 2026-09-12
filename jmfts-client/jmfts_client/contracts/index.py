@@ -16,7 +16,7 @@ coalescing in one place.
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class IndexCreate(BaseModel):
@@ -40,8 +40,7 @@ class IndexResponse(BaseModel):
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
     @classmethod
     def from_index(cls, index) -> "IndexResponse":

@@ -27,15 +27,23 @@ corpus.
 second derivation here could disagree with it, and then the profile and the records would
 describe different sheets.
 
+**A row too long to embed becomes a container over its columns**, and that is
+:func:`plan_record` rather than :func:`build_records` — the record is the same either way,
+and what changes is how many nodes carry it. The rule is the tree's own: a node whose text
+does not fit the token/maxsim window holds no ``content`` and gets children instead, and
+``summarize`` gives it a document vector over their concatenation. A ``section`` is that
+shape already. What makes a row worth splitting by COLUMN rather than by character is that
+the columns are named, so every piece can say which field it is part of.
+
 This module imports no reader, touches no database and runs no model. It is a pure function
 of what :mod:`jmfts_core.office.cells` read, which is what lets 8.4's wording be tested
-without a workbook.
+without a workbook — the fit test and the chunker arrive as callables for the same reason.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from jmfts_core.office.cells import RowCells, SheetRows
 
@@ -86,6 +94,16 @@ class HeaderDoesNotCoverTheRow(ValueError):
     """
 
 
+class CellDidNotSplit(ValueError):
+    """``chunk`` returned nothing, or a piece that still does not fit the window.
+
+    ``EmbeddingService.chunk_to_fit`` enforces the predicate on every piece it returns, so
+    reaching this means the chunker and the fit test disagree about the same text. Raising
+    here is the whole point of checking: the alternative is a leaf whose ``embed`` fails
+    permanently one rung later, which is the condition :func:`plan_record` exists to close.
+    """
+
+
 @dataclass(frozen=True)
 class Record:
     """One row, in the three forms 8.4 asks for."""
@@ -96,6 +114,38 @@ class Record:
     #: Absent keys are the normal case; see :class:`~jmfts_core.office.cells.CellNote`.
     cells: dict
     content: str
+
+
+@dataclass(frozen=True)
+class Cell:
+    """One column of one row, as the node it becomes.
+
+    ``content`` and ``pieces`` are exclusive and the pair is the rule: a cell whose
+    labelled text fits is a LEAF carrying that text, and one that does not is a CONTAINER
+    carrying none — its text is its pieces, and it gets a document vector over their
+    concatenation from ``summarize`` the same way a ``section`` does.
+    """
+
+    key: str
+    #: The typed value, kept beside the prose for the reason 8.4 keeps ``record``: a
+    #: retrieval hit on this node returns data rather than a string to parse back.
+    value: object
+    content: Optional[str]
+    pieces: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RecordPlan:
+    """What one row becomes: a leaf, or a container over its columns.
+
+    ``content`` is the row's labelled prose when the row fits, and ``None`` when it does
+    not — a container holds no text of its own, which is what keeps the same words out of
+    the full-text index twice and what stops the container BM25 pass double-counting its
+    own frontier.
+    """
+
+    content: Optional[str]
+    cells: tuple[Cell, ...]
 
 
 def build_records(rows: SheetRows, *, header: Sequence[Optional[str]]) -> tuple:
@@ -138,12 +188,83 @@ def _record(row: RowCells, header: Sequence[Optional[str]]) -> Optional[Record]:
         # no instance here, and a node saying so per row is 8.4's own argument against
         # emitting one per empty interior cell.
         return None
-    return Record(row_index=row.index, record=values, cells=cells, content=_content(values))
+    return Record(row_index=row.index, record=values, cells=cells, content=build_content(values))
 
 
-def _content(values: dict) -> str:
+def build_content(values: dict) -> str:
     """8.4's labelled prose. What gets embedded, so it is sentences and not JSON."""
-    return " ".join(f"{key}: {_rendered(value)}." for key, value in values.items())
+    return " ".join(cell_content(key, value) for key, value in values.items())
+
+
+def cell_content(key, value) -> str:
+    """One column's share of :func:`build_content`, verbatim.
+
+    The join is over exactly these, so a cell node's text is a substring of the row's and
+    the two renderings cannot come to disagree about how a value is spelled. That is the
+    property :func:`plan_record` needs: a split row holds the same terms as the row it
+    replaced, in the same words, which is what makes the container's BM25 sum over its
+    frontier equal to the postings the unsplit row would have had.
+    """
+    return f"{key}: {_rendered(value)}."
+
+
+def plan_record(record: Record, *, fits: Callable, chunk: Callable) -> RecordPlan:
+    """A row as one node, or as a container over its columns. 8.4 plus the window.
+
+    THE RULE IS THE TREE'S OWN, applied one level down. A ``section`` holds no text and its
+    chunks do, because a node too long to embed is a node whose text belongs to smaller
+    nodes; ``run_summarize`` then gives the container a document vector over their
+    concatenation and no token vectors (``rollup_tasks.store_effective_content``). A row of
+    a sheet whose columns hold paragraphs is that shape and was not treated as it: 8.4 wrote
+    the whole row into one node, and a node over the token/maxsim window gets no vector at
+    all, because ``embed`` refuses to embed a prefix and calls the refusal permanent.
+
+    Splitting by COLUMN and not by character is what the record already knows how to do.
+    The keys are measured — ``profile:sheet`` named every column — so each piece can carry
+    the label of the column it came from, which a blind chunk of the row's prose could not:
+    a chunk boundary inside ``Discussion:`` produces a node that says nothing about which
+    field it is a part of.
+
+    ``fits`` and ``chunk`` are the embedding service's, passed in rather than imported.
+    This module touches no database, runs no model and reads no settings, which is what
+    lets 8.4's wording be tested without a workbook — and a fit test is a property of a
+    tokenizer, not of a spreadsheet.
+
+    A cell whose own labelled text is over the window is the second application of the same
+    rule: it holds no content and gets pieces. That is not a rare corner — on the reference
+    corpus the 66 rows that do not fit became 344 cells, of which 20 do not fit either, in
+    20 different rows. A split that stopped at the column boundary would leave 20 of the 66
+    exactly where they started.
+    """
+    if fits(record.content):
+        return RecordPlan(content=record.content, cells=())
+    return RecordPlan(
+        content=None,
+        cells=tuple(
+            _cell(key, value, fits=fits, chunk=chunk) for key, value in record.record.items()
+        ),
+    )
+
+
+def _cell(key, value, *, fits: Callable, chunk: Callable) -> Cell:
+    content = cell_content(key, value)
+    if fits(content):
+        return Cell(key=key, value=value, content=content, pieces=())
+
+    pieces = tuple(chunk(content))
+    if not pieces:
+        raise CellDidNotSplit(
+            f"column {key!r} does not fit the embedding window and the chunker returned no "
+            "pieces for it; there is no node that could carry the value"
+        )
+    oversized = [index for index, piece in enumerate(pieces) if not fits(piece)]
+    if oversized:
+        raise CellDidNotSplit(
+            f"column {key!r} was split into {len(pieces)} piece(s) and {len(oversized)} of "
+            f"them still do not fit the embedding window (piece {oversized[0]}); the "
+            "chunker and the fit test disagree about the same text"
+        )
+    return Cell(key=key, value=value, content=None, pieces=pieces)
 
 
 def _rendered(value) -> str:
@@ -174,8 +295,14 @@ __all__ = [
     "NO_HEADER_REASON",
     "SHAPE_BASIS",
     "SHAPE_RECORDS",
+    "Cell",
+    "CellDidNotSplit",
     "HeaderDoesNotCoverTheRow",
     "Record",
+    "RecordPlan",
+    "build_content",
     "build_records",
+    "cell_content",
     "header_labels",
+    "plan_record",
 ]

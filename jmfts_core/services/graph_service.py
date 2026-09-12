@@ -19,8 +19,9 @@ none commits.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Annotated, Optional
 
+from pydantic import Field
 from sqlalchemy.orm import Session
 
 from jmfts_client.contracts.graph import (
@@ -49,10 +50,10 @@ from jmfts_core.graph_analysis import (
     compute_centrality,
     compute_communities,
     compute_diff,
-    compute_neighbors,
     compute_spines,
     compute_stats,
     compute_subtree_authority,
+    walk_neighbors,
 )
 from jmfts_core.access import can_read
 from jmfts_core.models.document import Document
@@ -64,6 +65,59 @@ def _parse_csv(value: Optional[str]) -> Optional[list[str]]:
     if not value:
         return None
     return [s.strip() for s in value.split(",") if s.strip()]
+
+
+# --- ceilings on the neighbour walk — SPRINT_0_5_0.md Block D finding 7 -------------
+#
+# The walk took both bounds from the wire with no upper limit, so a token holder could ask
+# for ten million nodes: MEASURED at 17.4–20.8 s of server time in one request, with the
+# whole 36,823-node graph materialised as `NeighborNode` objects (`MEASURE_TYPED_WALK.md`,
+# "Where the time actually goes").
+#
+# `limit` is the bound that matters, because it is the only one that bounds WORK.
+# `next_frontier` is built inside the loop that fills `reached`, so every frontier node is
+# also a reached node and the sum of all frontier sizes is at most `limit`; total edges
+# iterated is therefore at most `limit × degree` however deep the walk runs. That makes
+# `max_depth` nearly free while `limit` binds, and makes `limit` the whole ceiling.
+#
+# 1024 is 5× the only value anything in this tree passes (200, from both in-process
+# callers) and is a safety ceiling rather than a tuning knob. MEASURED 2026-09-10, uniform
+# fixture, 20,000 documents and 400,000 edges, `direction="both"`, best of three:
+#
+#     limit         depth 2     depth 6    nodes at depth 6
+#     10             37 ms       37 ms          10
+#     200            93 ms       93 ms         200
+#     1024          100 ms      100 ms        1024
+#     4096          104 ms      370 ms        4096
+#     10,000,000    107 ms     2626 ms      19,999  ← of 20,000: the whole graph
+#
+# Three things that sweep settles. **1024 costs 7% more than 200, not 5×** — `limit × degree`
+# is an upper bound that does not bind, because both caps fire inside the same hop whose
+# edges were fetched once. **Depth is free exactly while `limit` binds**: at 1024 it is
+# 100 ms whether the walk may run 2 hops or 6, and only at 4096 does depth start to cost.
+# And **the ceiling is doing real work** — removing it costs 26× here and reaches all but
+# one document, which is the same shape `MEASURE_TYPED_WALK.md` measured at 17.4–20.8 s on
+# a 3.68M-edge fixture reaching 36,822 of 36,823. 1024 sits at the knee, below where depth
+# starts to matter again.
+#
+# The SQL side agrees independently: a frontier capped at 1024 stays well inside the
+# planner's index/seq-scan crossover — in that sweep the smallest frontier already on a
+# sequential scan was 8,892 and the largest still index-served was 14,144 — so the walk
+# keeps `document_links_source_id_target_id_link_type_key`. That argument is sound but it
+# is not the binding one: 87–89% of a slow walk is the per-edge Python loop, not the
+# database.
+MAX_NEIGHBOR_LIMIT = 1024
+
+# `max_depth` costs round trips, not expansion — two statements per hop at
+# `direction="both"`, over a frontier `limit` already bounds, and the table above shows
+# depth 6 costing what depth 2 costs at every limit up to 1024. It needs a ceiling anyway,
+# because nothing else bounds how many statements one request may issue: the walk only
+# stops early when the frontier empties, so `max_depth=10_000_000` with `limit=1024` is
+# still up to ~2,050 round trips. 6 is past every named walk the appliance runs — the wire
+# default is 2, no in-tree caller of `/graph/neighbors` passes more, and the deepest walk
+# anywhere is the coreference cluster at `max_depth=5` (`graph_analysis.py`), which does
+# not come through this endpoint.
+MAX_NEIGHBOR_DEPTH = 6
 
 
 @register_service
@@ -242,24 +296,51 @@ class GraphService:
         self,
         *,
         root_id: int,
-        max_depth: int = 2,
+        max_depth: Annotated[int, Field(ge=1, le=MAX_NEIGHBOR_DEPTH)] = 2,
         direction: str = "both",
         link_types: Optional[str] = None,
-        limit: int = 200,
+        limit: Annotated[int, Field(ge=1, le=MAX_NEIGHBOR_LIMIT)] = 200,
     ) -> NeighborsResponse:
         """Link-graph neighbors of a root document (bounded BFS).
 
         The transitive counterpart to per-document ``get_links``: everything reachable
         from ``root_id`` within ``max_depth`` link hops, cycle-guarded and ``limit``-capped.
         ``link_types`` is an optional comma-separated allow-list of edge types.
+
+        **Both bounds have a ceiling and an over-large ask is refused, not clamped.**
+        ``MAX_NEIGHBOR_LIMIT`` / ``MAX_NEIGHBOR_DEPTH`` above carry the numbers and the
+        measurements behind them. Refusing is what keeps the ceiling readable: a clamped
+        walk answers a question the caller did not ask, and ``truncated`` cannot say so —
+        it reports a property of the GRAPH ("more lies behind this page"), so using it to
+        also report a property of the REQUEST ("your bound was overruled") would make one
+        bit mean two things. Refusing keeps the response about the graph.
+
+        The ``Field`` bounds are declared on the signature so ``wiring.py`` publishes them
+        in the OpenAPI document — a caller reads the ceiling without sending anything, the
+        way ``/capabilities`` answers — and FastAPI refuses out-of-range values with 422
+        before a session is touched. The explicit check below is not a duplicate of that:
+        ``LocalJmftsClient`` and every in-process caller reach this method with no wire
+        validation in front of them, and a bound only the HTTP transport enforces is not a
+        bound. Both read the same two constants, so they cannot disagree.
         """
+        if not 1 <= limit <= MAX_NEIGHBOR_LIMIT:
+            raise ValueError(f"limit must be between 1 and {MAX_NEIGHBOR_LIMIT}, got {limit}")
+        if not 1 <= max_depth <= MAX_NEIGHBOR_DEPTH:
+            raise ValueError(
+                f"max_depth must be between 1 and {MAX_NEIGHBOR_DEPTH}, got {max_depth}"
+            )
         # Subtree RBAC: an unreadable root is indistinguishable from missing (404);
-        # compute_neighbors additionally hides unreadable nodes reached during the walk.
+        # walk_neighbors additionally hides unreadable nodes reached during the walk.
         root = self.session.get(Document, root_id)
         if root is None or not can_read(self.session, root):
             raise LookupError(f"Document {root_id} not found")
         types = _parse_csv(link_types)
-        nodes = compute_neighbors(
+        # `truncated` comes from the walk, which overshoots the node cap by one and reads
+        # the answer back. It used to be inferred here as `len(nodes) >= limit`, which is
+        # wrong in both directions — see `NeighborWalk`. Depth is deliberately not part of
+        # it: a caller who asked for `max_depth` hops and got every node within `max_depth`
+        # hops was answered, not cut, so the walk is not asked to measure that here.
+        walk = walk_neighbors(
             self.session,
             root_id,
             max_depth=max_depth,
@@ -267,13 +348,14 @@ class GraphService:
             link_types=types,
             limit=limit,
         )
+        nodes = walk.nodes
         return NeighborsResponse(
             root_id=root_id,
             max_depth=max_depth,
             direction=direction,
             link_types=types,
             total=len(nodes),
-            truncated=len(nodes) >= limit,
+            truncated=walk.truncated,
             neighbors=[
                 NeighborItem(
                     document_id=n.document_id,

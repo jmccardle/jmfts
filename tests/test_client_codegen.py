@@ -202,16 +202,34 @@ def test_nothing_imports_the_contracts_package_at_its_old_name():
 
     A branch that was written before the move and merged after it is exactly how such an
     import arrives, and the merge itself will not conflict: nothing textually collides.
+
+    **The enumeration is the INDEX and the reading is the WORKING TREE, and the two disagree
+    in exactly one way that matters.** ``git ls-files`` lists a file the working tree no
+    longer has until the deletion is staged, so opening every path it names died with
+    ``FileNotFoundError`` mid-delete — a crash in place of a verdict, which reads as a broken
+    test to whoever meets it next rather than as "you have not staged that yet".
+    ``--deleted`` names precisely that set and it is subtracted up front, so a working-tree
+    deletion is a clean pass: a file that is not there imports nothing.
+
+    Subtracted rather than caught, because ``except FileNotFoundError: continue`` would
+    excuse any missing path for any reason. And the working tree is read rather than the
+    blobs (``git show :path``) deliberately: an import a developer has just written and not
+    yet staged is the case this test exists to catch, and the index does not have it.
     """
     root = Path(__file__).resolve().parents[1]
-    tracked = subprocess.run(
-        ["git", "ls-files", "-z", "*.py"],
-        cwd=root,
-        capture_output=True,
-        check=True,
-    ).stdout.decode()
+
+    def _ls_files(*flags: str) -> set[str]:
+        listed = subprocess.run(
+            ["git", "ls-files", "-z", *flags, "*.py"],
+            cwd=root,
+            capture_output=True,
+            check=True,
+        ).stdout.decode()
+        return set(filter(None, listed.split("\0")))
+
+    tracked = _ls_files() - _ls_files("--deleted")
     offenders = []
-    for relative in filter(None, tracked.split("\0")):
+    for relative in sorted(tracked):
         path = root / relative
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))

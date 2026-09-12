@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import secrets
 
-from sqlalchemy import select
+from sqlalchemy import Integer, false, func, not_, or_, select
 from sqlalchemy.orm import Session
 
-from jmfts_core.access import hash_token, require_owner
+from jmfts_core.access import acr_ids, hash_token, require_owner
 from jmfts_client.contracts.access import (
+    AccessAuditResponse,
     GrantCreate,
     GrantResponse,
     PrincipalCreate,
@@ -25,6 +26,7 @@ from jmfts_client.contracts.access import (
     TokenCreate,
     TokenMintResponse,
     TokenResponse,
+    UngovernedTree,
 )
 from jmfts_core.models.document import Document
 from jmfts_core.models.principal import AccessGrant, ApiToken, Principal
@@ -261,3 +263,105 @@ class AccessService:
             raise LookupError(f"No grant for principal {principal_id} on document {document_id}")
         self.session.delete(row)
         self.session.commit()
+
+    # -- Audit --------------------------------------------------------------------
+
+    @expose(
+        "GET",
+        "/access/audit",
+        response_model=AccessAuditResponse,
+        errors={ValueError: 400},
+        tags=["access"],
+        summary="What is NOT protected by any access-control root",
+    )
+    def audit(self, *, limit: int = 20) -> AccessAuditResponse:
+        """What is NOT protected by any access-control root.
+
+        ``jmfts_core/access.py`` states the rule this audits: "A document under NO ACR is
+        unprotected — readable and writable by anyone." That is the single-user default and
+        it is the right default — restriction is opt-in, and a knowledgebase nobody can
+        read is not a knowledgebase. What was missing is the ability to ASK. Every other
+        access operation reports what has been granted, so open-by-default and
+        open-by-accident produced identical answers, and a subtree that was meant to be
+        governed and never got its grant looked exactly like one that was meant to be open.
+
+        Owner-only, like every other verb here, and for a sharper reason: the answer names
+        documents the caller may not be able to read.
+
+        ``trees`` lists TOP-LEVEL documents with no grant of their own, worst first. It
+        stops at the roots because protection only propagates downward — if a node's parent
+        is governed, so is the node — so the maximal ungoverned regions are always whole
+        top-level trees. Within one, a descendant that carries its own grants is governed by
+        it, which is why ``documents`` and ``ungoverned`` are separate counts.
+        """
+        require_owner()
+        if limit < 1:
+            raise ValueError(f"limit must be at least 1, got {limit}")
+
+        session = self.session
+        acrs = acr_ids(session)
+        total = session.execute(select(func.count()).select_from(Document)).scalar_one()
+
+        # "Governed" is the same at-or-above containment `readable_filter` uses: the ACR is
+        # the document itself, or appears in its `path` array of strict ancestors. Built as
+        # an OR over the ACR ids rather than a join, because that is the form the
+        # `idx_documents_path` GIN index answers, and the ACR set is small by construction —
+        # it is the set of subtree roots somebody deliberately marked.
+        if acrs:
+            governed = or_(
+                Document.id.in_(acrs),
+                *[Document.path.op("@>")(func.jsonb_build_array(a)) for a in acrs],
+            )
+        else:
+            governed = false()
+
+        ungoverned_total = session.execute(
+            select(func.count()).select_from(Document).where(not_(governed))
+        ).scalar_one()
+
+        # The top-level ancestor of any node: the first entry of its root-first `path`, or
+        # the node itself when the path is empty (it IS a root).
+        top = func.coalesce(
+            func.cast(Document.path[0].astext, Integer),
+            Document.id,
+        ).label("top")
+        grouped = (
+            select(
+                top,
+                func.count().label("documents"),
+                func.count().filter(not_(governed)).label("ungoverned"),
+            )
+            .group_by(top)
+            .having(func.count().filter(not_(governed)) > 0)
+            .order_by(func.count().filter(not_(governed)).desc(), top)
+            # One more than asked for, so `truncated` is measured rather than guessed.
+            .limit(limit + 1)
+        )
+        rows = session.execute(grouped).all()
+        truncated = len(rows) > limit
+        rows = rows[:limit]
+
+        roots = {
+            d.id: d
+            for d in session.execute(
+                select(Document).where(Document.id.in_([r.top for r in rows]))
+            ).scalars()
+        }
+        trees = [
+            UngovernedTree(
+                id=r.top,
+                title=roots[r.top].title if r.top in roots else None,
+                usetype=roots[r.top].usetype if r.top in roots else None,
+                documents=r.documents,
+                ungoverned=r.ungoverned,
+            )
+            for r in rows
+        ]
+
+        return AccessAuditResponse(
+            total_documents=total,
+            ungoverned_documents=ungoverned_total,
+            access_control_roots=len(acrs),
+            trees=trees,
+            truncated=truncated,
+        )

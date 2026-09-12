@@ -178,6 +178,53 @@ def test_the_compression_ratio_is_extreme_and_the_file_is_small():
     assert len(data) < 8 * 1024
 
 
+def test_the_declared_extent_is_declared_and_the_rows_are_far_apart():
+    """Both halves of ``docs/SPRINT_0_4_0.md`` step 4's cost, in the bytes.
+
+    A wide ``<dimension>`` alone is cheap — openpyxl reads it and nothing iterates. The
+    cost is the gap between two ``<row r="...">`` indices, which ``_cells_by_row`` fills
+    with one ``max_column``-wide empty row per missing index. A fixture carrying only the
+    dimension would sit in the corpus proving the appliance survives a file that never
+    hurt it.
+    """
+    part = _part("declared-extent.xlsx", "xl/worksheets/sheet1.xml")
+    assert b'<dimension ref="A1:XFE16777217"/>' in part
+    root = xmlsafe.parse(part)
+    rows = [row.get("r") for row in root.iter("{" + fixtures.S_NS + "}row")]
+    assert rows == ["1", "16777214", "16777217"], rows
+    cells = list(root.iter("{" + fixtures.S_NS + "}c"))
+    assert len(cells) == 5, "five cells is what makes the declared extent a lie worth pinning"
+
+
+def test_the_chartsheet_is_a_chartsheet_part_named_as_a_sheet():
+    """The whole hazard: a chartsheet is a ``<sheet>`` like any other until it is opened."""
+    names = [info.filename for info in _members("chartsheet.xlsx")]
+    assert "xl/chartsheets/sheet1.xml" in names
+    assert not [name for name in names if name.startswith("xl/worksheets/")]
+    # The content type is what openpyxl decides the sheet's kind from, so it is the part
+    # of this fixture that cannot be got wrong quietly.
+    assert b"chartsheet+xml" in _part("chartsheet.xlsx", "[Content_Types].xml")
+    assert b'<sheet name="Chart1"' in _part("chartsheet.xlsx", "xl/workbook.xml")
+
+
+def test_the_corrupt_member_fails_in_zlib_and_the_others_read():
+    """``zlib.error``, not ``BadZipFile`` — the distinction step 6 turns on.
+
+    ``central-directory-mismatch.docx`` above raises ``BadZipFile`` because its local
+    header is damaged. Here the header is perfect and the deflate stream is not, so the
+    failure happens one layer down in the inflater, with the message the real
+    ``ofz18563.docx`` produces.
+    """
+    import zlib
+
+    data = fixtures.build("corrupt-deflate.docx")
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        assert "word/document.xml" in archive.namelist()
+        assert archive.read("[Content_Types].xml"), "the undamaged parts must still read"
+        with pytest.raises(zlib.error, match="invalid distance too far back"):
+            archive.read("word/document.xml")
+
+
 def test_macros_and_unknown_parts_are_where_the_record_says():
     assert "word/vbaProject.bin" in [i.filename for i in _members("macros.docx")]
     assert "word/afchunk.html" in [i.filename for i in _members("unknown-part.docx")]

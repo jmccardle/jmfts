@@ -80,6 +80,7 @@ from jmfts_core.office.cells import (
 from jmfts_core.registry import expose, register_service
 from jmfts_core.repositories.blob import BlobRepository
 from jmfts_core.repositories.evidence import EvidenceRepository
+from jmfts_core.repositories.search import SearchRepository
 from jmfts_core.repositories.document import (
     DocumentRepository,
     InFlightSubtreeError,
@@ -244,6 +245,12 @@ class DocumentService:
         race. Content-hash idempotency is scoped to (content, parent), matching
         ``find_by_hash_and_parent``; two legitimately-identical sibling messages under
         different parents are unaffected.
+
+        ``request.auto_index_bm25`` (default true) writes the document to the ``default``
+        BM25 index inline. This operation enqueues nothing — ``index:bm25`` is a task of
+        the queued ingest path — so without it a document created here reached the vector
+        and full-text legs of retrieval and not the BM25 one. See the field's comment on
+        ``DocumentCreate``.
         """
         repo = DocumentRepository(self.session)
         if dedup:
@@ -268,6 +275,12 @@ class DocumentService:
             sequential=request.sequential,
             event_time=request.event_time,
         )
+        if request.auto_index_bm25 and doc.content:
+            # Not best-effort. `index_document` returns False for a document the index
+            # holds out by usetype or that tokenises to nothing, which are both correct
+            # outcomes; anything it RAISES is a broken index and belongs at the call site,
+            # not swallowed into a document that reports success and cannot be found.
+            SearchRepository(self.session).index_document(doc.id, index_name="default")
         response = DocumentResponse.from_document(doc)
         # Commit before responding: get_db's teardown commit runs after the
         # response is sent, so a client acting on the returned id would race it.
@@ -547,7 +560,7 @@ class DocumentService:
         Refuses over-window content rather than embedding a prefix and reporting
         success. `token_count` is the number of *selected* token embeddings, so it was
         never a truncation signal — a caller had no way to learn that the tail of its
-        document had been discarded (docs/KNOWN-DEFECTS.md, D1).
+        document had been discarded (docs/archive/KNOWN-DEFECTS.md, D1).
 
         ``write_importance`` (opt-in) derives ``structured_content['importance']`` from
         the token salience computed here, instead of an LLM rating — the write side of

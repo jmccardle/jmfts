@@ -203,17 +203,35 @@ import pytest  # noqa: E402
 requires_db = pytest.mark.skipif(not DB_READY, reason="test database not provisioned")
 
 
-#: True in the development tree, False in a public checkout.
+#: The path whose presence says "this is the development tree".
 #:
-#: ``docs/`` is the marker because it is definitional rather than incidental: it is the
-#: one top-level directory that ``tests/test_readme_links.py::PUBLISHED`` will never
-#: name, so its absence *is* "this is the published subset".
-IS_INTERNAL_TREE = (_REPO_ROOT / "docs").is_dir()
+#: It was ``docs/`` until 0.5.0, on the stated ground that ``docs/`` is the one top-level
+#: directory ``tests/test_readme_links.py::PUBLISHED`` will never name. 0.5.0 published
+#: ``docs/reference/``, which made that ground false: the public tree then HAD a ``docs/``
+#: directory, ``IS_INTERNAL_TREE`` read True there, and all four tests this marker skips
+#: ran in the tree they were marked to skip in. The first public CI run of 0.5.0 failed on
+#: exactly that, eleven days after the run that introduced the marker failed on the
+#: unmarked versions of the same four tests.
+#:
+#: The marker is a FILE now, and the property that matters about it is not "it is in
+#: ``docs/``" but "``PUBLISHED`` does not name it" — which is a claim a test can hold, and
+#: ``test_readme_links.py::test_the_internal_tree_marker_is_not_published`` does. That test
+#: runs in BOTH trees, which is what the old premise lacked: nothing anywhere failed when
+#: adding a path to ``PUBLISHED`` invalidated it.
+#:
+#: ``ROADMAP.md`` is top-level, so publishing another ``docs/`` subdirectory cannot reach
+#: it, and it is internal by a decision recorded in ``CLAUDE.md``: ``CHANGELOG.md`` is the
+#: published account of what shipped, and ``ROADMAP.md`` is the internal one.
+INTERNAL_TREE_MARKER = "ROADMAP.md"
+
+#: True in the development tree, False in a public checkout.
+IS_INTERNAL_TREE = (_REPO_ROOT / INTERNAL_TREE_MARKER).is_file()
 
 #: Marker for a test that reads a file the release does not copy.
 #:
 #: ``tests/`` IS published, so every test in this suite runs again in the public
-#: repository, against a tree that is missing `docs/`, `ROADMAP.md`, `benchmarks/` and
+#: repository, against a tree that is missing the working record in ``docs/`` (all of it
+#: except the generated ``docs/reference/`` pages), ``ROADMAP.md``, ``benchmarks/`` and
 #: whatever ``NOT_PUBLISHED`` carves out. A test that reads one of those does not fail
 #: there because anything is wrong; it fails because it was asked a question that tree
 #: cannot answer.
@@ -222,7 +240,8 @@ IS_INTERNAL_TREE = (_REPO_ROOT / "docs").is_dir()
 #: where the SUBJECT of the test is internal — the office spec's pattern tables, the
 #: exclusion list's own entries. A test of shipped behaviour must run in both trees, and
 #: the first public CI run found four tests that had quietly never been checked against
-#: the tree they ship into.
+#: the tree they ship into. The marker skipping them is itself a claim about the public
+#: tree, so it has a test too — see ``INTERNAL_TREE_MARKER`` above.
 internal_tree_only = pytest.mark.skipif(
     not IS_INTERNAL_TREE,
     reason="reads a path the release does not publish; see conftest.IS_INTERNAL_TREE",

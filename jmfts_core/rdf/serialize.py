@@ -51,8 +51,6 @@ from jmfts_core.rdf.names import (
     STANDARD_PREFIXES,
     document_iri,
     document_namespace,
-    iri_problem,
-    predicate_iri,
     predicate_namespace,
 )
 
@@ -84,27 +82,6 @@ class TurtleExport:
     #: How many ``owl:sameAs`` statements were written. Zero unless ``coreferent`` was on
     #: and the anchor actually had aliases.
     same_as_count: int = 0
-
-
-def _literal_for(rdflib, triple):
-    """One ``Literal`` from ``object_literal`` and ``object_datatype``.
-
-    A NULL datatype is ``xsd:string`` — RDF's plain literal — and is written as one, so
-    ``"1999"`` round-trips as a string rather than acquiring a type it never had. A
-    non-NULL datatype must be an absolute IRI; the column is a ``VARCHAR(100)`` with no
-    CHECK on its shape, so this is where the shape is checked, and it raises rather than
-    dropping the datatype or guessing that ``xsd:integer`` meant the XSD namespace.
-    """
-    datatype = triple.object_datatype
-    if datatype is None:
-        return rdflib.Literal(triple.object_literal)
-    problem = iri_problem(datatype)
-    if problem is not None:
-        raise TurtleSerializationError(
-            f"triple {triple.id} has object_datatype {datatype!r}, which cannot be "
-            f"written as a datatype IRI: {problem}."
-        )
-    return rdflib.Literal(triple.object_literal, datatype=rdflib.URIRef(datatype))
 
 
 def _label_map(session: Session, document_ids: set[int]) -> dict[int, str]:
@@ -149,6 +126,14 @@ def triples_to_turtle(
     rdflib = require_rdflib()
     from jmfts_core.repositories.triple import TripleRepository
 
+    # ONE row→RDF mapping for the exporter and the validator, which is Block A step 1's
+    # leftover: a validator that read a row differently from the exporter would validate a
+    # graph nobody can export. It lives in `rdf/shacl.py` because that is the module that
+    # needs it per triple; imported HERE rather than at module scope because `rdf/shacl.py`
+    # imports `TurtleSerializationError` from this module, and a module-scope import in both
+    # directions is a cycle whose resolution would depend on which one Python loaded first.
+    from jmfts_core.rdf.shacl import triple_terms
+
     entity_ids: Optional[list[int]] = None
     if coreferent and entity_id is not None:
         from jmfts_core.graph_analysis import resolve_coreferent_ids
@@ -189,29 +174,13 @@ def triples_to_turtle(
 
     named_documents: set[int] = set()
     for triple in triples:
-        subject = rdflib.URIRef(document_iri(triple.subject_id, base_iri))
+        # Every refusal this loop used to make is still made, one level down and by one
+        # implementation: a predicate IRI or an `object_datatype` that is a CURIE or a
+        # relative reference raises `TurtleSerializationError` out of `triple_terms`.
+        graph.add(triple_terms(rdflib, triple, base_iri))
         named_documents.add(triple.subject_id)
-
-        predicate = triple.predicate
-        term = predicate.iri if predicate is not None and predicate.iri else None
-        if term is None:
-            name = predicate.name if predicate is not None else str(triple.predicate_id)
-            term = predicate_iri(name, base_iri)
-        else:
-            problem = iri_problem(term)
-            if problem is not None:
-                raise TurtleSerializationError(
-                    f"triple {triple.id} uses predicate {triple.predicate_id}, whose iri "
-                    f"{term!r} cannot be written as a predicate IRI: {problem}."
-                )
-
         if triple.object_id is not None:
-            obj = rdflib.URIRef(document_iri(triple.object_id, base_iri))
             named_documents.add(triple.object_id)
-        else:
-            obj = _literal_for(rdflib, triple)
-
-        graph.add((subject, rdflib.URIRef(term), obj))
 
     # Facts only. The owl:sameAs statements below and the rdfs:labels after them are the
     # export's own commentary on the facts, and counting them here would make "50 triples

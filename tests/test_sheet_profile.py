@@ -50,7 +50,7 @@ from jmfts_core.models.document import (  # noqa: E402
     Document,
     SETTLED_SETTLED,
     USETYPE_SHEET,
-    USETYPE_SUMMARY,
+    USETYPE_PROFILE,
 )
 from jmfts_core.models.task_queue import WRITE_CHILDREN  # noqa: E402
 from jmfts_core.office.sheets import (  # noqa: E402
@@ -847,7 +847,7 @@ class TestProfileSheetTask:
             summaries = [
                 child
                 for child in _children(db_session, sheet.id)
-                if child.usetype == USETYPE_SUMMARY
+                if child.usetype == USETYPE_PROFILE
             ]
             assert len(summaries) == 1
             assert summaries[0].content

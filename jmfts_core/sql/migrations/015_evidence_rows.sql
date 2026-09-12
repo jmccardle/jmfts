@@ -103,7 +103,15 @@ CREATE INDEX IF NOT EXISTS idx_document_evidence_stale ON document_evidence (nam
     WHERE state = 'stale';
 
 -- ---------------------------------------------------------------------------
--- The move. Twenty-nine keys out of the column, into rows, and then off the column.
+-- The move. Thirty keys out of the column, into rows, and then off the column.
+--
+-- ONE OF THE THIRTY MOVES NOTHING AND IS LISTED ANYWAY. `cell` was registered on
+-- 2026-09-08, long after this migration, so no database has a node carrying it in
+-- `structured_content` and its copy finds zero rows. The list is generated from the
+-- REGISTRY rather than from what any particular database holds — `test_evidence_rows.py`
+-- enforces that in both directions — because a name absent here is a key this migration
+-- would leave behind on whatever database is migrated next, and "it did not exist when I
+-- wrote the file" is not a property of the database being migrated.
 --
 -- 13.3 says twenty-three and that count is from before S7. Six more are the conversation
 -- rung's per-turn keys — `speaker`, `turn_index`, `timestamp`, `conversation_id`,
@@ -121,6 +129,7 @@ INSERT INTO _evidence_keys (column_key, name) VALUES
     ('anchor', 'source_anchor'),
     ('anchor_unresolved', 'source_anchor.unresolved'),
     ('attempts', 'attempts'),
+    ('cell', 'cell'),
     ('cells', 'cells'),
     ('chunk_index', 'chunk_index'),
     ('conversation_id', 'conversation_id'),

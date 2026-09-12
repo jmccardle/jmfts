@@ -40,6 +40,13 @@ Format level — a minimal ``.docx``, ``.xlsx`` and ``.pptx`` that parse; a pack
 ``vbaProject.bin``; a package carrying a part no reader models; and a ``.docx`` whose bytes
 are a PDF, which is the format-confusion case ``detect_format`` exists to catch.
 
+Defect level — three files that reproduce ``docs/SPRINT_0_4_0.md`` Block B steps 4, 5 and
+6: a workbook declaring 2.75e11 cells around five, a workbook whose only sheet is a chart,
+and a package whose deflate stream will not inflate. **Every one of those is a
+minimisation of a real file rather than a hazard we thought of**, which is the difference
+between this group and the two above it — the three defects survived into 0.3.0 precisely
+because everything in this generator was, until then, well formed by construction.
+
 Each of those is a manifest record with an ``expect`` of ``parses``, ``parses-lossy`` or
 ``must-reject``, and the record is where the claim lives — this module only builds bytes.
 """
@@ -50,6 +57,7 @@ import hashlib
 import io
 import warnings
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -487,6 +495,219 @@ def minimal_pdf(text: str = "one page, one line, no outline") -> bytes:
     return bytes(out)
 
 
+# ---------------------------------------------------------------------------
+# The three 0.4.0 defect fixtures — docs/SPRINT_0_4_0.md Block B steps 4, 5 and 6
+#
+# Each one was found by running the SHIPPED 0.3.0 `probe` and `measure_sheet` over 16,856
+# real workbooks, and none of them is reachable from the fixtures above: those are
+# well-formed by construction, which is exactly why three defects survived them into a
+# release. Each is a minimisation of a file that exists — the workbook or the message is
+# named in the docstring — because a fixture nobody can trace back to real bytes is a
+# fixture asserting what we already believe.
+#
+# The two spreadsheets build their own workbook parts rather than sharing
+# `minimal_xlsx`'s. Sharing would move `minimal.xlsx`'s bytes, and its recorded sha256 is
+# a determinism pin: a hash that moves for a refactor teaches a reader to accept a moved
+# hash.
+# ---------------------------------------------------------------------------
+
+S_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+
+#: `<Override>` rows for the parts openpyxl decides a sheet's KIND from. It reads the
+#: content type, not the relationship target, so a chartsheet mislabelled here would load
+#: as a worksheet and the fixture would stop being the fixture.
+XLSX_WORKBOOK_TYPE = (
+    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.'
+    'openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+)
+XLSX_WORKSHEET_TYPE = (
+    '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.'
+    'openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+)
+XLSX_CHARTSHEET_TYPE = (
+    '<Override PartName="/xl/chartsheets/sheet1.xml" ContentType="application/vnd.'
+    'openxmlformats-officedocument.spreadsheetml.chartsheet+xml"/>'
+)
+XLSX_REL_TYPE = f"{R_NS}/officeDocument"
+
+
+def _workbook_xml(sheet_name: str) -> bytes:
+    """``xl/workbook.xml`` naming one sheet. The name is what ``measure_sheet`` is given."""
+    return (
+        DECLARATION
+        + f'<workbook xmlns="{S_NS}" xmlns:r="{R_NS}">'
+        + f'<sheets><sheet name="{sheet_name}" sheetId="1" r:id="rId1"/></sheets>'
+        + "</workbook>"
+    ).encode("utf-8")
+
+
+def _workbook_rels(target: str, kind: str) -> bytes:
+    """``rId1`` -> the one sheet part, which is how openpyxl finds it at all."""
+    return (
+        DECLARATION
+        + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        + f'<Relationship Id="rId1" Type="{R_NS}/{kind}" Target="{target}"/>'
+        + "</Relationships>"
+    ).encode("utf-8")
+
+
+def declared_extent_xlsx() -> bytes:
+    """Five cells under ``<dimension ref="A1:XFE16777217"/>`` — 2.75e11 declared cells.
+
+    A minimisation of ``datasets/lo-qa/sc/qa/unit/data/xlsx/too-many-cols-rows.xlsx``
+    (LibreOffice's own QA corpus, 5,526 bytes), carrying the two properties that matter and
+    nothing else. **Both are needed.** The wide ``<dimension>`` is where openpyxl's
+    ``max_column`` comes from, and the ROW NUMBERS are what make it cost anything:
+    ``ReadOnlyWorksheet._cells_by_row`` fills the gap between two ``<row r="...">`` indices
+    by yielding one ``max_column``-wide empty row per missing index, so rows numbered 1,
+    16777214 and 16777217 across 16,385 declared columns are 2.75e11 iterations of
+    ``_scan``'s inner loop. Measured at ~1.2e7 cells/s that is six and a half hours, on a
+    worker that cannot be interrupted and whose heartbeat keeps beating throughout.
+
+    Sheet-level, not container-level: the ZIP is ordinary and every part is well formed.
+    """
+    rows = (
+        '<row r="1"><c r="A1" t="n"><v>1</v></c><c r="XFB1" t="n"><v>2</v></c>'
+        '<c r="XFE1" t="n"><v>3</v></c></row>'
+        '<row r="16777214"><c r="A16777214" t="n"><v>11</v></c></row>'
+        '<row r="16777217"><c r="A16777217" t="n"><v>21</v></c></row>'
+    )
+    worksheet = (
+        DECLARATION
+        + f'<worksheet xmlns="{S_NS}"><dimension ref="A1:XFE16777217"/>'
+        + f"<sheetData>{rows}</sheetData></worksheet>"
+    ).encode("utf-8")
+    return pack(
+        [
+            Member("[Content_Types].xml", _content_types(XLSX_WORKBOOK_TYPE, XLSX_WORKSHEET_TYPE)),
+            Member("_rels/.rels", _package_rels("xl/workbook.xml", XLSX_REL_TYPE)),
+            Member("xl/workbook.xml", _workbook_xml("Sheet1")),
+            Member(
+                "xl/_rels/workbook.xml.rels", _workbook_rels("worksheets/sheet1.xml", "worksheet")
+            ),
+            Member("xl/worksheets/sheet1.xml", worksheet),
+        ]
+    )
+
+
+def chartsheet_xlsx() -> bytes:
+    """A workbook whose only sheet is a chart, not a grid. 1.3% of open-web workbooks.
+
+    A chartsheet is a full-window chart on its own tab, drawn from cells that live on some
+    other sheet. It is a ``<sheet>`` in ``xl/workbook.xml`` and it appears in
+    ``workbook.sheetnames`` exactly like a worksheet, so anything that walks the sheet names
+    reaches it — and ``openpyxl`` hands back a ``Chartsheet``, which has no ``max_row``,
+    no ``max_column`` and no ``iter_rows``.
+
+    ``xl/chartsheets/_rels/sheet1.xml.rels`` is present and empty because ``openpyxl``'s
+    reader asks the chartsheet's relationships for a drawing before it constructs anything;
+    without the part it raises ``AttributeError: 'list' object has no attribute 'find'``
+    from inside ``load_workbook``, which would make this a fixture about a missing rels part
+    instead of a fixture about a chartsheet.
+    """
+    chartsheet = (
+        DECLARATION
+        + f'<chartsheet xmlns="{S_NS}"><sheetPr/>'
+        + '<sheetViews><sheetView workbookViewId="0" zoomScale="100"/></sheetViews>'
+        + "</chartsheet>"
+    ).encode("utf-8")
+    return pack(
+        [
+            Member("[Content_Types].xml", _content_types(XLSX_WORKBOOK_TYPE, XLSX_CHARTSHEET_TYPE)),
+            Member("_rels/.rels", _package_rels("xl/workbook.xml", XLSX_REL_TYPE)),
+            Member("xl/workbook.xml", _workbook_xml("Chart1")),
+            Member(
+                "xl/_rels/workbook.xml.rels",
+                _workbook_rels("chartsheets/sheet1.xml", "chartsheet"),
+            ),
+            Member("xl/chartsheets/_rels/sheet1.xml.rels", _empty_rels()),
+            Member("xl/chartsheets/sheet1.xml", chartsheet),
+        ]
+    )
+
+
+#: The paragraph ``corrupt_deflate_docx`` repeats. Repetition is the point: deflate answers
+#: it with long back-references, and a back-reference is what a spliced stream cannot
+#: resolve.
+_REPEATED = "the same sentence, over and over, so that deflate emits long matches"
+
+
+def _deflate(data: bytes) -> bytes:
+    """Raw deflate with ``zipfile``'s own parameters, so lengths line up byte for byte.
+
+    ``zipfile._get_compressor(ZIP_DEFLATED, None)`` is
+    ``zlib.compressobj(Z_DEFAULT_COMPRESSION, DEFLATED, -15)``; matching it is what lets
+    the splice below replace a member's payload IN PLACE, leaving every header, size and
+    offset in the archive untouched.
+    """
+    compressor = zlib.compressobj(zlib.Z_DEFAULT_COMPRESSION, zlib.DEFLATED, -15)
+    return compressor.compress(data) + compressor.flush()
+
+
+def corrupt_deflate_docx() -> bytes:
+    """A valid package whose ``word/document.xml`` will not inflate. Step 6.
+
+    The archive is intact — central directory, local headers, sizes, CRCs, every other
+    part — and one member's compressed payload is spliced from two different deflate
+    streams. The second half's back-references point into a window the first half never
+    produced, so ``zlib`` gives up with *"Error -3 while decompressing data: invalid
+    distance too far back"*: the same message
+    ``datasets/lo-qa/sw/qa/extras/uiwriter/data/ofz18563.docx`` produces, and the reason
+    that file was retried three times in 0.3.0.
+
+    **This is not ``central-directory-mismatch.docx`` again.** That one damages the local
+    HEADER, so ``zipfile`` refuses before inflating and raises ``BadZipFile``, which
+    ``probe_patterns`` already caught. This one has a perfect header and unreadable data,
+    which is one layer further down and a different exception class. The pair is what makes
+    the distinction testable rather than argued.
+    """
+    document = _document_xml(f"<w:p><w:r><w:t>{_REPEATED}</w:t></w:r></w:p>" * 40)
+    package = bytearray(
+        pack([Member(m.name, m.data, zipfile.ZIP_DEFLATED) for m in _docx_members(document)])
+    )
+
+    with zipfile.ZipFile(io.BytesIO(bytes(package))) as archive:
+        info = archive.getinfo("word/document.xml")
+    # The payload starts after the 30-byte local header, the name and the extra field —
+    # both lengths read from the header itself rather than assumed, because a `zipfile`
+    # that started writing an extra field would otherwise corrupt a different member.
+    name_length = int.from_bytes(
+        package[info.header_offset + 26 : info.header_offset + 28], "little"
+    )
+    extra_length = int.from_bytes(
+        package[info.header_offset + 28 : info.header_offset + 30], "little"
+    )
+    start = info.header_offset + 30 + name_length + extra_length
+    payload = bytes(package[start : start + info.compress_size])
+    if _deflate(document) != payload:
+        raise AssertionError(
+            "the member's payload is not this module's own deflate of the part; the "
+            "splice below would be operating on bytes it did not produce"
+        )
+
+    # Deliberately NOT repetitive: the second stream has to be at least as long as the
+    # member it fills, and a stream of one repeated sentence deflates shorter than the
+    # payload does.
+    other = _deflate(
+        _document_xml(
+            "".join(
+                f"<w:p><w:r><w:t>paragraph {n} of an unrelated document</w:t></w:r></w:p>"
+                for n in range(80)
+            )
+        )
+    )
+    half = len(payload) // 2
+    spliced = payload[:half] + other[half : len(payload)]
+    if len(spliced) != len(payload):
+        raise AssertionError(
+            f"the splice is {len(spliced)} bytes against a {len(payload)}-byte member; "
+            "the second stream is too short to fill it and every offset after this member "
+            "would move"
+        )
+    package[start : start + len(payload)] = spliced
+    return bytes(package)
+
+
 def pdf_named_docx() -> bytes:
     """A PDF. The manifest records the extension it will be uploaded under.
 
@@ -521,6 +742,11 @@ GENERATORS: dict[str, Callable[[], bytes]] = {
     "macros.docx": macros_docx,
     "unknown-part.docx": unknown_part_docx,
     "pdf-named.docx": pdf_named_docx,
+    # docs/SPRINT_0_4_0.md Block B steps 4, 5 and 6. Three defects in released 0.3.0, one
+    # fixture each, every one a minimisation of a real file.
+    "declared-extent.xlsx": declared_extent_xlsx,
+    "chartsheet.xlsx": chartsheet_xlsx,
+    "corrupt-deflate.docx": corrupt_deflate_docx,
 }
 
 

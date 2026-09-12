@@ -365,3 +365,77 @@ and this repository has no business carrying one. It is the RATIO, which is the 
 thing: an extraction budget has to be decided from the declared uncompressed size before
 decompressing, and this file is what says whether it was.
 """
+
+# ---------------------------------------------------------------------------
+# docs/SPRINT_0_4_0.md Block B steps 4, 5 and 6 — three defects in released 0.3.0, each
+# found by running the shipped probe and measure_sheet over 16,856 real workbooks and none
+# of them reachable from the records above, which are well formed by construction. That is
+# the argument for these three: a corpus that only carries files we authored correctly
+# tests a reader against its author's imagination.
+# ---------------------------------------------------------------------------
+
+[[file]]
+name = "declared-extent.xlsx"
+origin = "generated"
+source = "tests/corpus/fixtures.py:declared_extent_xlsx"
+licence = "MIT"
+sha256 = "f47c64e92ce2f874037d290ed72c9c1d3bf4dcbaec6c31523fc4c52337c10e58"
+size = 2530
+format = "xlsx"
+tags = ["has_content_types", "has_sheets"]
+expect = "must-reject"
+minimal = true
+note = """
+Five cells under <dimension ref="A1:XFE16777217"/> — 2.75e11 declared cells, and rows
+numbered 1, 16777214 and 16777217 so that openpyxl's read-only reader pads the gaps with
+16,385-wide empty rows. A minimisation of LibreOffice's own too-many-cols-rows.xlsx, which
+in 0.3.0 took a worker off the fleet for 54 minutes without finishing and had nothing to
+end it: the lease bounds heartbeat silence, not run time. must-reject means
+measure_sheet raises DeclaredExtentTooLarge before it scans anything — a truncated scan
+would report a fill_ratio and a distinct_count for part of a sheet in fields that mean the
+whole one.
+"""
+
+[[file]]
+name = "chartsheet.xlsx"
+origin = "generated"
+source = "tests/corpus/fixtures.py:chartsheet_xlsx"
+licence = "MIT"
+sha256 = "2423e0cb921acb2bd041b72db3f6ab4826e33cecb9b15df12d8ec0e239e39e65"
+size = 2628
+format = "xlsx"
+tags = ["has_content_types", "has_sheets"]
+expect = "must-reject"
+minimal = true
+note = """
+A workbook whose only sheet is a chart on its own tab, drawn from cells that live
+somewhere else. 135 of 10,702 open-web workbooks carry one (1.3%). It is a <sheet> in
+xl/workbook.xml and it is in workbook.sheetnames, so it reaches measure_sheet exactly like
+a worksheet and then has no max_row, no max_column and no iter_rows — an AttributeError
+naming a missing attribute rather than a file. has_sheets is tagged because probe emits it
+True here, which is the same disagreement in miniature: at the container level this IS a
+workbook with a sheet in it. must-reject is scoped to this single-sheet workbook, where
+refusing the one sheet leaves nothing to ingest.
+"""
+
+[[file]]
+name = "corrupt-deflate.docx"
+origin = "generated"
+source = "tests/corpus/fixtures.py:corrupt_deflate_docx"
+licence = "MIT"
+sha256 = "1f18edb23a770a99bb9a5c19596fc1a0073156ccf53e4343b83d9626ce741994"
+size = 1251
+format = "docx"
+tags = ["has_content_types", "is_damaged"]
+expect = "must-reject"
+minimal = true
+note = """
+A perfect archive around one member that will not inflate: word/document.xml's payload is
+spliced from two deflate streams, so the second half's back-references point outside any
+window the first half produced and zlib answers "Error -3 while decompressing data:
+invalid distance too far back". The pair with central-directory-mismatch.docx is the
+point — that one damages the local header and raises BadZipFile, which probe_patterns
+already caught, while this one raises zlib.error one layer down, which it did not, and
+classify_exception graded a permanently unreadable file RETRYABLE. Same message as
+lo-qa/sw/qa/extras/uiwriter/data/ofz18563.docx, 1 in 6,159 documents.
+"""

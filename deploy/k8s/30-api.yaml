@@ -1,0 +1,126 @@
+# The API. Serves HTTP; claims no tasks (JMFTS_INGEST_WORKER_ENABLED=false in
+# 10-config.yaml), so the fleet's capacity does not depend on how many replicas of this
+# happen to be running.
+#
+# THE PROBES ARE THE REASON THIS FILE EXISTS. Until it did, this directory defined three
+# worker pools and no API, so anybody deploying the API wrote their own manifest and chose
+# their own probe path — and the obvious choice, `GET /health`, used to make up to two
+# outbound HTTP calls to JMFTS_LLM_BASE_URL at a 5 s timeout each. A liveness probe that
+# blocks for ~10 s on somebody else's host restarts a healthy appliance.
+#
+# `/health` is now the cheap check: version and one `SELECT 1`. The LLM probe moved to
+# `GET /health/llm`, which needs a token and is not a probe path — its `degraded` is a
+# statement about a host this pod does not own, and a liveness probe must only report on
+# the process it is checking.
+#
+# `/health` is also the one path in `PUBLIC_PATHS`, which is what lets kubelet reach it
+# with no credential. Every other route, `/` included, answers 401 without a token — so
+# `/` is not a probe path either, however much it looks like one.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jmfts-api
+  namespace: jmfts
+  labels:
+    app.kubernetes.io/name: jmfts
+    app.kubernetes.io/component: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: jmfts
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: jmfts
+        app.kubernetes.io/component: api
+    spec:
+      # An in-flight HTTP request is short; `POST /ingest` is the exception and it is bounded
+      # by JMFTS_INGEST_SYNC_TIMEOUT_SECONDS (300 s). This matches that ceiling so a rolling
+      # update does not SIGKILL a synchronous ingest mid-drain. The tasks survive either way
+      # — they are rows — but the caller's request does not.
+      terminationGracePeriodSeconds: 300
+      containers:
+        - name: api
+          image: jmfts-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8100
+          envFrom:
+            - configMapRef:
+                name: jmfts-worker
+            - secretRef:
+                name: jmfts-worker-db
+            # The shared bearer. Create it before applying this:
+            #   kubectl -n jmfts create secret generic jmfts-api-token \
+            #     --from-literal=JMFTS_API_TOKEN="$(openssl rand -base64 32)"
+            # A BLANK JMFTS_API_TOKEN makes each replica generate its OWN ephemeral token
+            # and print it to its boot log, so a two-replica Deployment would accept two
+            # different tokens depending on which pod answered. Pin it here.
+            - secretRef:
+                name: jmfts-api-token
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              memory: "4Gi"
+          # Ready when the database answers. `/health` reports `degraded` rather than
+          # failing when it does not, so the probe keys on the body's status via the
+          # HTTP code the handler returns — which is 200 either way — and readiness here
+          # therefore means "the process is serving", not "the database is up". Taking
+          # replicas out of rotation for a database outage they all share would remove the
+          # endpoint that reports the outage.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          # One local query, no network. `failureThreshold: 3` at 20 s is a full minute of
+          # not answering before a restart: long enough that a slow query does not cost a
+          # pod, short enough that a wedged process is replaced.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # The model load is the slow part of startup and it is lazy — the first request
+          # that needs a vector pays for it. This probe covers the process coming up, and
+          # its budget (30 x 10 s) is sized for a cold image on a slow node rather than for
+          # the model.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jmfts-api
+  namespace: jmfts
+  labels:
+    app.kubernetes.io/name: jmfts
+    app.kubernetes.io/component: api
+spec:
+  # ClusterIP: this exposes the API inside the namespace, which is what a worker fleet and
+  # an in-cluster caller need. Anything reaching it from outside goes through an Ingress
+  # this directory does not presume to write — the credential is a bearer token, so a
+  # cluster that puts this on the internet is publishing a shared secret over whatever TLS
+  # the Ingress terminates.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: jmfts
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: 8100
+      targetPort: http

@@ -138,15 +138,95 @@ Output format:
 If no factual triples can be extracted, return an empty array: []"""
 
 
+#: Appended to the system prompt at call time, carrying the date the source was recorded on.
+#: Without it the ISO 8601 rule above asks the model to date "last Tuesday" against nothing
+#: — and a model answers anyway, with a date computed from whatever it believes today is.
+#: That lands in ``triples.valid_from`` as an ordinary fact, indistinguishable from a date
+#: the source actually stated. ``ROADMAP.md`` known gap 3; ``SPRINT_0_4_0.md`` Block B step
+#: 7, which is in a defect block rather than a feature block precisely because the output is
+#: silently wrong rather than absent.
+#:
+#: The final clause is the same discipline: an unresolvable expression leaves the field
+#: null. A guessed date is worse than no date, because only the guess survives into the
+#: store looking like evidence.
+_ANCHOR_RULE = (
+    "The source text was recorded on {anchor}. Resolve every relative date expression in "
+    'it ("today", "yesterday", "last Tuesday", "next quarter") against that date, and '
+    "write the result as an ISO 8601 date in valid_from / valid_until. Do not resolve any "
+    "of them against the current date. If an expression cannot be resolved against the "
+    "recorded date, leave the field null rather than guessing."
+)
+
+
+def extraction_anchor(doc: Document) -> datetime:
+    """The clock a relative date in ``doc`` is resolved against.
+
+    ``event_time`` where the caller set one, ``created_at`` (ingest time) otherwise. This is
+    ``SPRINT_0_4_0.md`` 4.2 with the recommendation taken. The case that decides it is a
+    backfilled transcript: "yesterday" in a turn recorded in March means March, not the day
+    the import ran, and the two are routinely months apart. ``event_time`` is the column
+    that records exactly that distinction (``models/document.py:142`` — domain time, sparse,
+    NULL for documents authored in place), so where it is set it is the only defensible
+    anchor, and where it is NULL the ingest clock is genuinely all the document knows.
+
+    **This outlives 0.4.0.** ``SPRINT_0_5_0.md`` 3.3 makes a change timeline a projection
+    over ``Triple.recorded_at`` / ``valid_from`` / ``valid_until`` and ``Document``'s
+    ``event_time`` — "both clocks the timeline needs already exist, on both sides". A fact
+    anchored to the wrong clock is therefore not a cosmetic error in one row: it poisons
+    that projection at its source, and nothing downstream can tell a mis-anchored
+    ``valid_from`` from one the source stated outright.
+
+    Raises ``ValueError`` when the document carries neither clock. A persisted row always
+    has ``created_at``, so that can only be an in-memory Document that has never been
+    flushed (``models/document.py:167`` — both timestamp defaults fire at INSERT, not on
+    attribute access). Substituting ``now()`` there would reintroduce the defect this
+    function exists to close, one layer down and harder to see.
+    """
+    anchor = doc.event_time or doc.created_at
+    if anchor is None:
+        raise ValueError(
+            f"Document {doc.id} has neither event_time nor created_at, so there is no clock "
+            "to resolve a relative date against (SPRINT_0_4_0.md 4.2)."
+        )
+    return anchor
+
+
+def build_extraction_prompt(doc: Document) -> str:
+    """The extraction system prompt, anchored to ``doc``'s clock.
+
+    The date only — not the time — because the expressions being resolved ("yesterday",
+    "last quarter") are day-grained, and an hour would imply a precision the anchor does not
+    carry. Rendered from the anchor as recorded, with no timezone conversion: the offset a
+    caller stamped on ``event_time`` is the offset the source's own "yesterday" was written
+    in, and normalising it to UTC could move the date by one day in either direction.
+    """
+    anchored = _ANCHOR_RULE.format(anchor=extraction_anchor(doc).date().isoformat())
+    return f"{EXTRACTION_SYSTEM_PROMPT}\n\n{anchored}"
+
+
 # ---------------------------------------------------------------------------
 # LLM call
 # ---------------------------------------------------------------------------
 
 
-async def _llm_extract(text: str, settings: Settings, llm_model: str | None = None) -> list[dict]:
+async def _llm_extract(
+    text: str,
+    settings: Settings,
+    llm_model: str | None = None,
+    *,
+    system_prompt: str = EXTRACTION_SYSTEM_PROMPT,
+) -> list[dict]:
     """Call the LLM to extract triples from a text passage.
 
     Returns parsed JSON list of triple dicts, or empty list on failure.
+
+    ``system_prompt`` defaults to the unanchored constant because this function is handed
+    text, not a document, and text has no clock; the anchor is required one level up, where
+    a ``Document`` exists — :func:`extract_facts_from_document` passes
+    :func:`build_extraction_prompt`, and that is the only route into the triple store. The
+    default is therefore the transport's own fixture, not a fallback for a missing anchor:
+    a document with no clock at all raises in :func:`extraction_anchor` rather than
+    arriving here with the date line quietly absent.
     """
     base_url, model = settings.require_llm("Fact extraction", llm_model)
 
@@ -160,7 +240,7 @@ async def _llm_extract(text: str, settings: Settings, llm_model: str | None = No
         base_url=base_url,
         model=model,
         messages=[
-            {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Extract factual triples from this text:\n\n{text}"},
         ],
         max_tokens=settings.extraction_max_tokens,
@@ -318,19 +398,56 @@ def _link_rbac_coref(
     return written
 
 
-def _upsert_link(session: Session, source_id: int, target_id: int, link_type: str) -> None:
+def _upsert_link(
+    session: Session,
+    source_id: int,
+    target_id: int,
+    link_type: str,
+    score: Optional[float] = None,
+) -> None:
     """Assert a ``DocumentLink``, idempotently.
 
     ``document_links`` is UNIQUE on (source, target, type), so a plain ``create_link``
     raises the second time the same mention is extracted — which, inside an extraction
     batch, takes the whole batch with it. Same reasoning as
     ``TripleRepository.get_or_create_predicate``.
+
+    **WHAT HAPPENS ON THE SECOND WRITE FOLLOWS FROM WHETHER A SCORE WAS PASSED**
+    (``docs/SPRINT_0_5_0.md`` Block D step 17). That is the whole rule, and it is a
+    property of the CALL rather than of the link type: which types carry a weight belongs
+    with the shipped predicate domain (0.5.0 Part 3.4) and a registry of scored type names
+    here would be a second, older answer to that question.
+
+    * No score — an unweighted assertion. It carries no information the stored row does not
+      already have, so it does nothing: ``on_conflict_do_nothing``. ``mentions`` is this
+      case, and the row is left untouched down to its ``created_at``. The INSERT omits
+      ``score`` entirely, so a first write takes the column's own DEFAULT 1.0.
+    * A score — a weighted assertion, and the number IS the new information. Discarding it
+      was the defect: ``document_links`` being UNIQUE on (source, target, type) meant
+      re-deriving an edge whose relevance moved from 0.3 to 0.8 SILENTLY KEPT 0.3. The
+      conflict updates ``score`` to the excluded row's value.
+
+    Only ``score`` is updated. ``created_at`` is when the edge was first asserted and a
+    re-assertion does not make it newer; ``derived_by`` is the rule's own stamp and is
+    written by :meth:`DocumentRepository.rederive_links`, whose delete-then-insert owns
+    that column's lifecycle. An upsert that quietly moved either would be the same class of
+    silent rewrite this step exists to remove.
     """
-    session.execute(
-        pg_insert(DocumentLink.__table__)
-        .values(source_id=source_id, target_id=target_id, link_type=link_type)
-        .on_conflict_do_nothing()
-    )
+    values: dict[str, object] = {
+        "source_id": source_id,
+        "target_id": target_id,
+        "link_type": link_type,
+    }
+    if score is None:
+        stmt = pg_insert(DocumentLink.__table__).values(**values).on_conflict_do_nothing()
+    else:
+        values["score"] = score
+        insert = pg_insert(DocumentLink.__table__).values(**values)
+        stmt = insert.on_conflict_do_update(
+            index_elements=["source_id", "target_id", "link_type"],
+            set_={"score": insert.excluded.score},
+        )
+    session.execute(stmt)
 
 
 def resolve_entity(
@@ -517,8 +634,13 @@ async def extract_facts_from_document(
         result.errors.append(f"Document {document_id} not found or has no content")
         return result
 
-    # Call LLM
-    raw_dicts = await _llm_extract(doc.content, settings, llm_model)
+    # Call LLM. The prompt is anchored to THIS document's clock — event_time where the
+    # caller set one, ingest time otherwise (SPRINT_0_4_0.md 4.2, Block B step 7) — so that
+    # a relative date in the source is resolved against when the source was recorded rather
+    # than against whatever the model takes today to be.
+    raw_dicts = await _llm_extract(
+        doc.content, settings, llm_model, system_prompt=build_extraction_prompt(doc)
+    )
     raw_triples = _parse_raw_triples(raw_dicts, max_facts)
     result.raw_triples = raw_triples
 

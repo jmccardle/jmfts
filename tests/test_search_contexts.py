@@ -1,34 +1,25 @@
 """Tests for search contexts (usetype presets) feature.
 
-Tests the pure wildcard matching logic and resolve_params behavior.
-These are extracted inline to avoid triggering the full model import chain
-which has a pre-existing pgvector compat issue in .venv.
+The wildcard matching logic and ``resolve_params`` behaviour.
+
+**These used to be inline copies of the functions under test**, pasted in "to avoid
+triggering the full model import chain which has a pre-existing pgvector compat issue in
+.venv". Both halves of that stopped being true, and the second one cost something: the copy
+of ``_usetype_to_like`` agreed with the original exactly, so when a preset spelled
+``"transcript:*,obsidian:*"`` was found to match nothing, eight passing tests said the
+translator was fine. A copy can only confirm the behaviour it was copied from. Every test
+here now imports the shipped function, and the set-of-globs behaviour those tests could not
+have caught is covered in ``tests/test_usetype_filter.py``.
 """
 
-import fnmatch
+import pytest
 
-# ============================================================================
-# Inline copies of the pure functions from search.py for testability.
-# The canonical implementations live in jmfts_core/repositories/search.py.
-# ============================================================================
-
-
-def _usetype_has_wildcard(usetype: str) -> bool:
-    return "*" in usetype or "?" in usetype
-
-
-def _usetype_to_like(usetype: str) -> str:
-    pattern = usetype.replace("%", r"\%").replace("_", r"\_")
-    pattern = pattern.replace("*", "%").replace("?", "_")
-    return pattern
-
-
-def _usetype_matches(usetype_filter, usetype_value):
-    if usetype_value is None:
-        return False
-    if _usetype_has_wildcard(usetype_filter):
-        return fnmatch.fnmatch(usetype_value, usetype_filter)
-    return usetype_value == usetype_filter
+from jmfts_client.contracts.search import usetype_globs
+from jmfts_core.repositories.search import (
+    _usetype_has_wildcard,
+    _usetype_matches,
+    _usetype_to_like,
+)
 
 
 def _resolve_params(config: dict, overrides: dict) -> dict:
@@ -60,6 +51,8 @@ class TestUsetypeHasWildcard:
 
 
 class TestUsetypeToLike:
+    """ONE glob in, one LIKE pattern out. Splitting a filter is ``usetype_globs``."""
+
     def test_star_to_percent(self):
         assert _usetype_to_like("conversation/*") == "conversation/%"
 
@@ -84,39 +77,60 @@ class TestUsetypeToLike:
     def test_multiple_wildcards(self):
         assert _usetype_to_like("a/*/b/*") == "a/%/b/%"
 
+    def test_a_comma_is_not_this_function_s_business(self):
+        """The defect, stated where it happened.
+
+        A filter naming two globs never reaches here whole any more — ``usetype_globs``
+        splits it first. This asserts what the translator does if one ever did, so that the
+        pattern below is read as a symptom rather than as intended behaviour.
+        """
+        assert _usetype_to_like("transcript:*,obsidian:*") == "transcript:%,obsidian:%"
+        assert usetype_globs("transcript:*,obsidian:*") == ("transcript:*", "obsidian:*")
+
 
 class TestUsetypeMatches:
+    """The BM25 post-filter. Takes the normalised globs, and matches ANY of them."""
+
+    @staticmethod
+    def _match(usetype_filter, value) -> bool:
+        return _usetype_matches(usetype_globs(usetype_filter), value)
+
     def test_exact_match(self):
-        assert _usetype_matches("conversation", "conversation") is True
+        assert self._match("conversation", "conversation") is True
 
     def test_exact_mismatch(self):
-        assert _usetype_matches("conversation", "notes") is False
+        assert self._match("conversation", "notes") is False
 
     def test_star_matches_suffix(self):
-        assert _usetype_matches("conversation/*", "conversation/session") is True
-        assert _usetype_matches("conversation/*", "conversation/summary") is True
+        assert self._match("conversation/*", "conversation/session") is True
+        assert self._match("conversation/*", "conversation/summary") is True
 
     def test_star_no_match_different_prefix(self):
-        assert _usetype_matches("conversation/*", "notes/daily") is False
+        assert self._match("conversation/*", "notes/daily") is False
 
     def test_star_matches_multi_level(self):
         # fnmatch * matches any characters including /
-        assert _usetype_matches("conversation/*", "conversation/a/b") is True
+        assert self._match("conversation/*", "conversation/a/b") is True
 
     def test_question_single_char(self):
-        assert _usetype_matches("doc?", "docs") is True
-        assert _usetype_matches("doc?", "doc1") is True
+        assert self._match("doc?", "docs") is True
+        assert self._match("doc?", "doc1") is True
 
     def test_question_too_many_chars(self):
-        assert _usetype_matches("doc?", "document") is False
+        assert self._match("doc?", "document") is False
 
     def test_none_value(self):
-        assert _usetype_matches("conversation/*", None) is False
+        assert self._match("conversation/*", None) is False
 
     def test_star_at_beginning(self):
-        assert _usetype_matches("*/summary", "conversation/summary") is True
-        assert _usetype_matches("*/summary", "notes/summary") is True
-        assert _usetype_matches("*/summary", "notes/detail") is False
+        assert self._match("*/summary", "conversation/summary") is True
+        assert self._match("*/summary", "notes/summary") is True
+        assert self._match("*/summary", "notes/detail") is False
+
+    def test_a_set_of_globs_matches_any_of_them(self):
+        assert self._match("transcript:*,obsidian:*", "transcript:daily") is True
+        assert self._match("transcript:*,obsidian:*", "obsidian:note") is True
+        assert self._match("transcript:*,obsidian:*", "wiki:url") is False
 
 
 # ============================================================================
@@ -165,3 +179,15 @@ class TestResolveParams:
     def test_empty_both(self):
         params = _resolve_params({}, {})
         assert params == {}
+
+    def test_a_stored_config_may_hold_either_spelling(self):
+        """A ``search_contexts.config`` blob passes through no contract, so both forms
+        reach the repository exactly as stored and normalise there."""
+        comma = _resolve_params({"usetype": "transcript:*,obsidian:*"}, {})
+        listed = _resolve_params({"usetype": ["transcript:*", "obsidian:*"]}, {})
+        assert usetype_globs(comma["usetype"]) == usetype_globs(listed["usetype"])
+
+    def test_a_stored_config_that_names_nothing_is_refused(self):
+        params = _resolve_params({"usetype": ""}, {})
+        with pytest.raises(ValueError):
+            usetype_globs(params["usetype"])

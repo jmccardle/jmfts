@@ -40,7 +40,7 @@ def _bypass(principal: Optional[CurrentPrincipal]) -> bool:
     return principal is None or principal.is_owner
 
 
-def _acr_ids(session: Session) -> list[int]:
+def acr_ids(session: Session) -> list[int]:
     """Every document that is an access-control root (has ≥1 grant)."""
     return list(session.execute(select(AccessGrant.document_id).distinct()).scalars())
 
@@ -87,7 +87,7 @@ def readable_filter(session: Session, principal: Optional[CurrentPrincipal] = No
         principal = get_current_principal()
     if _bypass(principal):
         return None
-    acrs = _acr_ids(session)
+    acrs = acr_ids(session)
     if not acrs:
         return None
     within_gov = _within_any(acrs)  # non-None: acrs is non-empty
@@ -120,7 +120,7 @@ def readable_sql(
         principal = get_current_principal()
     if _bypass(principal):
         return None
-    acrs = _acr_ids(session)
+    acrs = acr_ids(session)
     if not acrs:
         return None
     within_read = _within_sql(alias, _read_root_ids(session, principal.id))
@@ -137,13 +137,26 @@ def _governing_acrs(doc: Document, acr_ids: set[int]) -> set[int]:
     return chain & acr_ids
 
 
+def governing_acrs(session: Session, doc: Document) -> list[int]:
+    """The access-control roots at-or-above ``doc``, sorted. Empty means UNPROTECTED.
+
+    Asked of the tree, not of a principal: an empty list means no grant anywhere covers
+    this document, so every authenticated caller may read and write it. That is the
+    documented default and it is opt-out, which is why a caller that just created a node
+    should be able to see the answer — ``FileUploadResponse.governed`` and
+    ``IngestResponse.governed`` are where it is reported, and ``GET /access/audit`` is the
+    corpus-wide version.
+    """
+    return sorted(_governing_acrs(doc, set(acr_ids(session))))
+
+
 def can_read(session: Session, doc: Document, principal: Optional[CurrentPrincipal] = None) -> bool:
     """Whether ``principal`` may retrieve ``doc`` (existence-level read)."""
     if principal is None:
         principal = get_current_principal()
     if _bypass(principal):
         return True
-    gov = _governing_acrs(doc, set(_acr_ids(session)))
+    gov = _governing_acrs(doc, set(acr_ids(session)))
     if not gov:
         return True  # ungoverned → open
     return bool(gov & set(_read_root_ids(session, principal.id)))
@@ -157,7 +170,7 @@ def can_write(
         principal = get_current_principal()
     if _bypass(principal):
         return True
-    gov = _governing_acrs(doc, set(_acr_ids(session)))
+    gov = _governing_acrs(doc, set(acr_ids(session)))
     if not gov:
         return True  # ungoverned → open
     return bool(gov & set(_write_root_ids(session, principal.id)))
@@ -238,7 +251,7 @@ def filter_readable(session: Session, docs, principal: Optional[CurrentPrincipal
         principal = get_current_principal()
     if _bypass(principal):
         return list(docs)
-    acrs = set(_acr_ids(session))
+    acrs = set(acr_ids(session))
     if not acrs:
         return list(docs)
     read_roots = set(_read_root_ids(session, principal.id))
@@ -267,6 +280,34 @@ def readable_id_subset(
         return set(id_set)
     rows = session.execute(select(Document.id).where(Document.id.in_(id_set)).where(pred)).scalars()
     return set(rows)
+
+
+def readable_id_subquery(session: Session, principal: Optional[CurrentPrincipal] = None):
+    """The readable document ids as a SUBQUERY, or ``None`` when nothing is hidden.
+
+    The third form of the same rule, and it exists for one reason: ``readable_id_subset``
+    can only filter rows that have already been fetched, so a statement carrying
+    ``LIMIT``/``OFFSET`` cuts its page BEFORE the gate is applied and hands back a page the
+    filter then empties. That is ``SPRINT_0_5_0.md`` Block A finding 7 on
+    ``TripleRepository.query_triples`` and the same family as ``SPRINT_0_4_0.md`` Block A:
+    a short page that cannot be told from an exhausted one. ANDed into the statement
+    instead, ``LIMIT`` counts rows the principal may read and the ordinary paging contract
+    means what it says again.
+
+    A plain ``IN (SELECT …)`` rather than a correlated ``EXISTS`` per endpoint, because the
+    predicate ``readable_filter`` builds names ``Document`` itself rather than an alias, and
+    a triple has TWO document endpoints to check: one uncorrelated subquery is evaluated
+    once for both, where two correlated ``EXISTS`` would need two aliases and two
+    evaluations per row. Postgres plans ``IN (SELECT …)`` as a semi-join either way.
+
+    ``None`` has the same meaning it has in ``readable_filter`` and ``readable_sql``:
+    owner, unbound, or no ACRs anywhere — the default deployment, where the caller must add
+    no clause at all and the query stays byte-identical.
+    """
+    pred = readable_filter(session, principal)
+    if pred is None:
+        return None
+    return select(Document.id).where(pred).scalar_subquery()
 
 
 def require_write(

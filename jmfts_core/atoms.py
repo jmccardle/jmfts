@@ -51,6 +51,27 @@ PARENT".
 An ancestor read creates no within-node edge and needs no walk, because the evidence is
 already there: an ancestor is settled enough to have children only if what it holds was
 written before they existed.
+
+THERE IS NO FIFTH LOCUS, AND THREE ATOMS WRITE WHERE NONE OF THE FOUR REACHES. Every term
+above is a position RELATIVE TO THE NODE IN FRONT OF THE PLANNER — itself, below it, above
+it. ``extract:facts`` writes entity nodes under the entities root, ``derive:rule`` writes
+triples over a binding's scope, and ``summarize:tree`` writes a summary node under the
+derived-tree root; all three regions are keyed by ACCESS rather than by tree position, so
+none of them is at, below or above the node the task is scoped to. All three declare
+``self``, which is the narrowest reservation available and is true of everything they write
+in their own tree — nothing, in each case.
+
+**That declaration is INCOMPLETE and the incompleteness is deliberate.**
+``SPRINT_0_5_0.md`` open question 6.1 asks whether this vocabulary grows a term for "a node
+in another tree"; its recorded default is that the handler declares ``self`` and the debt is
+written down, because a term added outside the ``SPRINT_JOBS.md`` phase that owns ``EXPLAIN``
+would be a vocabulary term nothing reports on. Block C step 11 took that default. What it
+costs, exactly: ``EXPLAIN`` reports those three as touching one node, and
+:func:`derive_edges` derives no edge into whatever later reads what they wrote, because the
+fact they produce has no name to be consumed under. ``docs/INGEST_SPEC.md`` 5.3 carries the
+same record beside the write-mode table these loci are drawn from, and
+``tests/test_derived_tree_rollup.py::test_the_locus_vocabulary_still_has_no_term_for_another_tree``
+fails on the day the term arrives — which is the day both records stop being true.
 """
 
 from __future__ import annotations
@@ -148,6 +169,13 @@ EV_PROFILE = "profile"
 #: caller's, and a metadata PATCH deleted them.
 EV_RECORD = "record"
 
+#: The column name and typed value of one spreadsheet cell, on the ``cell`` node
+#: ``extract:sheet`` writes when a row was too long to embed whole. :data:`EV_RECORD` one
+#: level down, and a separate name for the same reason that one is separate from
+#: :data:`EV_TEXT`: the node's ``content`` is the labelled prose a query matches and this is
+#: the field it came from, which a split row would otherwise have no way to state.
+EV_CELL = "cell"
+
 #: The vectors: ``Document.embed``, and the token rows when they were asked for. Not a
 #: an evidence row — it is columns and a table — but it is evidence in exactly
 #: the sense that matters here, because ``structure:semantic`` cannot run without it.
@@ -182,6 +210,7 @@ EVIDENCE: frozenset[str] = frozenset(
         EV_SHEET_SHAPE,
         EV_PROFILE,
         EV_RECORD,
+        EV_CELL,
         EV_EMBEDDING,
         EV_EFFECTIVE_CONTENT,
         EV_SOURCE_SPAN,

@@ -21,6 +21,7 @@ from jmfts_client.contracts.upload import UploadedFile
 from jmfts_core.ingest_options import resolve_options
 from jmfts_core.ingest_tasks import (
     TASK_EMBED,
+    TASK_EXTRACT_SHEET,
     TASK_ROWS,
     TASK_STRUCTURE_DECLARED,
     TASK_SUMMARIZE,
@@ -30,8 +31,9 @@ from jmfts_core.models.document import (
     Document,
     SETTLED_IN_FLIGHT,
     SETTLED_SETTLED,
+    USETYPE_CELL,
     USETYPE_RECORD,
-    USETYPE_SUMMARY,
+    USETYPE_PROFILE,
 )
 from jmfts_core.models.task_queue import TASK_PENDING, WRITE_SELF, TaskQueue
 from jmfts_core.models.token_embedding import TokenEmbedding
@@ -319,12 +321,26 @@ class TestTheEmbedHandler:
         """The scope's second half is what keeps `embed` off a `section`: a container holds
         no text of its own, gets `effective_content` from the rollup, and `run_embed`
         refuses empty content — which is right of the handler and would be wrong of the
-        schedule."""
+        schedule.
+
+        `cell` is a LEAF KIND and that is why it is in the list, not an exception to the
+        sentence above. A spreadsheet row too long to embed becomes a container over its
+        columns (`sheet_records.plan_record`), and each column is a node that carries its
+        own text — so it needs the row for the same reason a chunk does. A cell that is
+        itself too long carries none, gets `chunk` children, and is reached by this scope's
+        FIRST entry rather than by the last.
+        """
         scope = next(r for r in TASK_ROWS if r.task == TASK_EMBED).scope
-        assert scope.usetypes == (USETYPE_CHUNK, USETYPE_RECORD, USETYPE_SUMMARY)
+        assert scope.usetypes == (
+            USETYPE_CHUNK,
+            USETYPE_RECORD,
+            USETYPE_PROFILE,
+            USETYPE_CELL,
+        )
         assert USETYPE_SECTION not in scope.usetypes
         assert scope.matches(TASK_STRUCTURE_DECLARED, USETYPE_CHUNK)
         assert not scope.matches(TASK_STRUCTURE_DECLARED, USETYPE_SECTION)
+        assert scope.matches(TASK_EXTRACT_SHEET, USETYPE_CELL)
 
     def test_a_node_with_no_content_raises_rather_than_completing(self, db_session):
         """Not a skip. The task was enqueued for text, and a node that has none is a chunk

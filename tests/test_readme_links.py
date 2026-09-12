@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from tests.conftest import internal_tree_only
+from tests.conftest import INTERNAL_TREE_MARKER, internal_tree_only
 
 REPO = Path(__file__).resolve().parents[1]
 README = (REPO / "README.md").read_text(encoding="utf-8")
@@ -50,6 +50,7 @@ PUBLISHED = (
     ".github/",
     ".githooks/",
     ".gitignore",
+    "CHANGELOG.md",
     "CLAUDE.md",
     "Dockerfile",
     "Dockerfile.worker",
@@ -58,6 +59,13 @@ PUBLISHED = (
     "bump-version.sh",
     "deploy/",
     "docker-compose.yml",
+    # The ONLY part of docs/ that ships, and it ships because none of it is written by
+    # hand: `scripts/generate_reference.py` renders all three pages from the registries the
+    # appliance reads at runtime, and `tests/test_reference_docs.py` refuses a stale or
+    # hand-written one. The working record in `docs/` explains WHY the appliance is shaped
+    # the way it is and stays internal; these say WHAT it accepts, which is what an
+    # integrator needs and what the held-back citations currently deny them.
+    "docs/reference/",
     "jmfts-client/",
     "jmfts_batch/",
     "jmfts_core/",
@@ -169,6 +177,29 @@ def test_published_paths_all_exist():
     )
 
 
+def test_the_internal_tree_marker_is_not_published():
+    """``conftest.IS_INTERNAL_TREE`` is a claim about this list, so hold it against it.
+
+    The marker is the path whose presence means "development tree". If a release adds that
+    path to ``PUBLISHED``, the marker reads True in the public tree and every test
+    ``internal_tree_only`` skips runs there — which is how 0.5.0 broke it: the marker was
+    ``docs/`` and this release published ``docs/reference/``.
+
+    This test runs in BOTH trees, deliberately. Nothing in the old arrangement failed at
+    the moment the premise stopped being true; the failure arrived a release later, in
+    public CI, as four tests nobody had changed.
+    """
+    covered = [
+        p for p in PUBLISHED if INTERNAL_TREE_MARKER == p or INTERNAL_TREE_MARKER.startswith(p)
+    ]
+    assert not covered, (
+        f"conftest.INTERNAL_TREE_MARKER is {INTERNAL_TREE_MARKER}, which PUBLISHED now "
+        f"carries via {covered}. The public tree will read IS_INTERNAL_TREE as True and "
+        "run every internal_tree_only test. Point the marker at something the release "
+        "does not copy — that is the decision, not this assertion."
+    )
+
+
 @internal_tree_only
 def test_excluded_paths_still_exist_and_sit_inside_a_published_one():
     """An exclusion that stopped matching is an exclusion that silently stopped working.
@@ -182,7 +213,9 @@ def test_excluded_paths_still_exist_and_sit_inside_a_published_one():
     ``NOT_PUBLISHED`` path is absent BY CONSTRUCTION, so asserting it exists there asks
     the release to prove it did not do the thing it was told to do. The first public CI
     run failed on exactly that, which is a better demonstration of the mechanism than the
-    test was.
+    test was — and so did the first public CI run of 0.5.0, because the marker itself had
+    stopped distinguishing the two trees. See
+    ``test_the_internal_tree_marker_is_not_published`` above.
     """
     for path in NOT_PUBLISHED:
         assert (REPO / path).exists(), (

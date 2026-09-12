@@ -1,8 +1,8 @@
 # kubectl apply -k deploy/k8s/
 #
-# The secret is NOT listed: 11-secret.example.yaml is a template, and applying it would
-# install the literal string CHANGE-ME as the database password. Create the real one first
-# (the command is in that file).
+# The secrets are NOT listed: 11-secret.example.yaml is a template, and applying it would
+# install the literal string CHANGE-ME as the database password. Create the real ones first
+# (the commands are in that file, and in 30-api.yaml for the API's bearer token).
 #
 # 40-keda-scaledobject.yaml is also not listed, because it needs KEDA installed. Apply it
 # separately once KEDA is present:
@@ -21,17 +21,21 @@ resources:
   - 20-worker-cpu.yaml
   - 21-worker-gpu.yaml
   - 22-worker-llm.yaml
+  - 30-api.yaml
 
-# Point both pools at wherever you pushed the images — this file is the single place a
-# registry appears, so a fork does not have to edit two Deployments to move it.
+# Point the API and both worker pools at wherever you pushed the images — this file is the
+# single place a registry appears, so a fork does not have to edit three Deployments to
+# move it.
 #
 #   kustomize edit set image jmfts-worker-cpu=registry.example/jmfts-worker-cpu:v1
 #
-# The two images are NAMED differently rather than tagged differently on one name, because
+# The images are NAMED differently rather than tagged differently on one name, because
 # kustomize matches an override by image name: a single `jmfts-worker` name would make one
-# entry rewrite both pools, and the GPU pool would silently run the CPU image — which
-# works, slowly, on the CPU, with the GPU idle and nothing reporting a problem.
+# entry rewrite both worker pools, and the GPU pool would silently run the CPU image —
+# which works, slowly, on the CPU, with the GPU idle and nothing reporting a problem.
 images:
+  - name: jmfts-api
+    newTag: latest
   - name: jmfts-worker-cpu
     newTag: latest
   - name: jmfts-worker-gpu

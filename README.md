@@ -68,6 +68,32 @@ jmfts-server --port 9000         # ...or override one setting for this run
 jmfts-server --help              # what the JMFTS_* defaults currently resolve to
 ```
 
+### Upgrading a database that already holds data
+
+`jmfts-init-db` loads `jmfts_core/sql/schema.sql` and never a migration. That file is the
+complete current DDL, so a database it builds is already current and has nothing
+outstanding. A database from an earlier version is the other case, and the upgrade deltas
+ship inside the package as `jmfts_core/sql/migrations/`.
+
+```bash
+jmfts-init-db --pending           # which shipped deltas has THIS database not applied?
+jmfts-init-db --list-migrations   # which deltas does this package ship at all?
+
+jmfts-init-db --pending 2>/dev/null   # just the names, for a script
+```
+
+`--pending` applies nothing; choosing to apply a delta is yours. It prints the names to
+stdout and everything a human reads to stderr, so discarding stderr leaves a plain list,
+and it exits the way `diff` does — 0 nothing outstanding, 1 some, 2 the question could not
+be answered. Apply what it names, in the order it names them, with
+`psql -v ON_ERROR_STOP=1 -f <file>`; each delta is one transaction and records itself, so
+re-running `--pending` is the check that it took.
+
+**Run it after every upgrade, not only when something looks wrong.** Most deltas add a
+column, and a database missing one of those raises at the first query that needs it. At
+least one changes an *index* — a database missing that delta answers, and answers worse,
+with nothing in a log to say so.
+
 For a working PostgreSQL and API in one command, the compose file brings up
 `pgvector/pgvector:pg16` alongside the API:
 
@@ -85,14 +111,22 @@ uvicorn jmfts_core.rest.main:app --host 0.0.0.0 --port 8100 --reload
 ```
 
 This tree builds two distributions, and the first line is not optional. `jmfts` declares
-`jmfts-client==0.2.1` with `==`, so the second line alone resolves that exact version
+`jmfts-client==0.5.0` with `==`, so the second line alone resolves that exact version
 from PyPI and shadows the checkout you meant to work in.
 
 ### Reading and driving the API
 
-`/docs` is Swagger UI over the live route table — 109 operations, grouped by tag, with the
+`/docs` is Swagger UI over the live route table — 115 operations, grouped by tag, with the
 request and response schemas. `/redoc` is the same document laid out for reading, and
 `/openapi.json` is the document itself.
+
+**Start at `GET /capabilities`.** It answers, without your sending anything: which optional
+extras are installed, whether this process can produce a vector at all (its own model, or
+another JMFTS via `JMFTS_RUNNER_URL`), which formats it identifies from the bytes, which
+ingest entry points it accepts, which retrieval methods it fuses and at what weights, and
+which usetypes it holds out of every result set. Add `?corpus=true` for the counts that say
+whether a method will return anything here — MaxSim ranks only documents that carry token
+vectors, and on a corpus with none it returns nothing whatever is installed.
 
 **A generated client already exists — do not write your own against `/openapi.json`.**
 `pip install jmfts-client` gives you every one of those operations as a Python method, with
@@ -206,6 +240,15 @@ tests/             pytest suite against an ephemeral database, plus the fidelity
 
 ## Where to go next
 
+- **What this appliance accepts**: three generated reference pages, tables only.
+  `docs/reference/INGEST.md` (entry points, formats, optional dependencies),
+  `docs/reference/INDEXING.md` (every ingest rung, its conditions, what it reads
+  and writes), `docs/reference/RETRIEVAL.md` (every retrieval method, what a
+  document must carry to be reachable by it, and every filter — including the
+  usetype exclusions applied when a request names none). They are rendered from
+  the same registries the appliance reads at runtime, by
+  `python -m scripts.generate_reference`, and a test refuses a stale one.
+- **What changed between releases**: `CHANGELOG.md`.
 - **Running a worker fleet**: `deploy/README.md` — what routes where, badges, the
   thin worker that does not hold the model, and the one way a badged fleet can
   stall.
@@ -228,14 +271,26 @@ ingest specification that a hundred source comments cite by section number —
 are not in this release. They are being refined for publication separately.
 The whole working record is held back, not a chosen few files, so a comment
 naming any of INGEST_SPEC.md, SPRINT_JOBS.md, OFFICE_SPEC.md, SPRINT_0_3_0.md,
-CORPUS.md, RELEASING.md, KNOWN-DEFECTS.md, ROADMAP.md,
-AGENTIC_KNOWLEDGEBASE.md, RERANKER_CRITIQUE.md,
+SPRINT_0_4_0.md, SPRINT_0_5_0.md, SPRINT_0_4_0_DRAFT.md, CORPUS.md, RELEASING.md,
+KNOWN-DEFECTS.md, MEASURE_SHACL_SCOPE.md, MEASURE_TYPED_WALK.md,
+MEASURE_BM25_BOUNDARY.md, ANN_INDEX_HEALTH.md, STRESS_CORPUS.md,
+ROADMAP.md, ROADMAP_HISTORY.md, AGENTIC_KNOWLEDGEBASE.md, RERANKER_CRITIQUE.md,
 API_UNIFICATION_CONTRACT_NOTES.md or research/INTERMEDIATE_FORMATS.md points at
-a document that will land later. The code stands on its own in the meantime.
+a document that will land later.
 
 Those names are deliberately not written as links. There is nothing in this
 tree for them to point at, and marking them up as paths would promise
 otherwise.
+
+**`docs/reference/` is the exception, and it is here now.** Around four hundred
+source comments cite a held-back document, so for a reader outside this project
+the explanation layer of the code pointed at files they could not open. The
+three pages under `docs/reference/` are the answer to that: they say what the
+appliance accepts, indexes and retrieves, in tables, with no history and no
+argument. They ship because nothing in them is written by hand — they are
+generated from the registries the appliance itself reads, so publishing them
+costs no editorial pass and cannot drift from the code. What stays internal is
+the *why*, which is what those citations are anchors for.
 
 ## Licence
 

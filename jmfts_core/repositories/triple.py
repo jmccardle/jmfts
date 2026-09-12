@@ -6,7 +6,7 @@ from sqlalchemy import select, and_, or_, exists
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, joinedload
 
-from jmfts_core.access import readable_id_subset
+from jmfts_core.access import readable_id_subquery
 from jmfts_core.models.triple import Triple, Predicate, FactType
 
 
@@ -244,6 +244,11 @@ class TripleRepository:
         scope that WAS asked for and came out empty widening to unscoped; see the comment
         on the filter below.
 
+        ``limit``/``offset`` page over the rows this principal may READ, because the access
+        filter is a condition on the same statement rather than a pass over its output (see
+        the comment on it below). So the ordinary paging contract holds: a full page may
+        have more behind it, a short page is the end of the result.
+
         ``provenance`` splits the asserted layer from a derived one (``derived_by``):
         ``"asserted"`` is ``derived_by IS NULL``, ``"derived"`` its complement, ``"any"``
         both. An unrecognised value raises rather than being read as ``"any"`` — a filter
@@ -302,31 +307,34 @@ class TripleRepository:
         elif provenance == "derived":
             conditions.append(Triple.derived_by.is_not(None))
 
+        # Subtree RBAC: hide any triple whose subject OR object is a document the current
+        # principal cannot read — a fact about a hidden entity must not leak its existence.
+        # Because find_path() walks the graph through this method, dropping edges to
+        # unreadable nodes here also prevents paths from traversing them.
+        #
+        # It is a CONDITION and not a post-filter, and that is `SPRINT_0_5_0.md` Block A
+        # finding 7. Applied to the rows LIMIT/OFFSET had already chosen, it cut a page and
+        # then emptied it: a caller asking for one row out of six it may read got back
+        # nothing, `offset` counted rows belonging to somebody else's grants, and an
+        # exhaustive walk stopped at the first page the filter thinned — a partial fact set
+        # that looks complete, which is `SPRINT_0_4_0.md` Block A's defect reached through a
+        # post-filter instead of an ANN scan bound. `tests/test_triple_paging_access.py`
+        # measures all three. Inside the statement, LIMIT counts rows the caller may read,
+        # so a short page means the end of the result and needs no flag to say so.
+        #
+        # A literal object has no document id and therefore no access rule of its own; the
+        # subject's is the whole check for it.
+        readable_ids = readable_id_subquery(self.session)
+        if readable_ids is not None:
+            conditions.append(Triple.subject_id.in_(readable_ids))
+            conditions.append(or_(Triple.object_id.is_(None), Triple.object_id.in_(readable_ids)))
+
         if conditions:
             query = query.where(and_(*conditions))
 
         query = query.order_by(Triple.id).offset(offset).limit(limit)
         result = self.session.execute(query)
-        triples = list(result.unique().scalars().all())
-
-        # Subtree RBAC: hide any triple whose subject OR object is a document the current
-        # principal cannot read — a fact about a hidden entity must not leak its existence.
-        # Single query; a no-op for owner/unbound callers and when no ACRs exist. Because
-        # find_path() walks the graph through this method, dropping edges to unreadable
-        # nodes here also prevents paths from traversing them.
-        # A literal object has no document id and therefore no access rule of its own; the
-        # subject's is the whole check for it. `None` must not reach readable_id_subset.
-        endpoint_ids = {t.subject_id for t in triples} | {
-            t.object_id for t in triples if t.object_id is not None
-        }
-        readable = readable_id_subset(self.session, endpoint_ids)
-        if len(readable) != len(endpoint_ids):
-            triples = [
-                t
-                for t in triples
-                if t.subject_id in readable and (t.object_id is None or t.object_id in readable)
-            ]
-        return triples
+        return list(result.unique().scalars().all())
 
     # =========================================================================
     # Edge Invalidation

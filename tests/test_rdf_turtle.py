@@ -343,3 +343,80 @@ class TestTurtleOut:
         export = triples_to_turtle(db_session, entity_id=acme.id, direction="both")
         graph = _parse(export.turtle)
         assert len(graph) == export.triple_count + 2  # two facts, two labels
+
+
+# ---------------------------------------------------------------------------
+# One row→RDF mapping, for the exporter and for the validator
+# ---------------------------------------------------------------------------
+
+
+class TestOneMapping:
+    """``SPRINT_0_5_0.md`` Block A step 1's leftover, closed.
+
+    ``rdf/shacl.triple_terms`` is the single mapping from a stored row to ``(subject,
+    predicate, object)`` RDF terms, and ``triples_to_turtle`` calls it rather than repeating
+    it. The reason is not tidiness: a validator that read a row differently from the exporter
+    would report violations against a graph nobody can export, and the two readings would
+    diverge exactly where the mapping is subtle — a predicate with no ``iri``, a NULL datatype,
+    a name that has to be percent-encoded.
+    """
+
+    def test_the_exporter_and_the_validator_mint_identical_terms(self, db_session):
+        from jmfts_core.rdf.shacl import triple_terms
+
+        docs, triples = DocumentRepository(db_session), TripleRepository(db_session)
+        acme, john = _entity(docs, "Acme"), _entity(docs, "John")
+        db_session.flush()
+        # One of each subtlety: a vocabulary predicate that keeps its own IRI, a local one
+        # with no `iri` whose NAME carries a space (so the IRI is percent-encoded), a NULL
+        # datatype (RDF's plain literal) and a typed one.
+        knows = triples.create_predicate(name="knows", iri="http://xmlns.com/foaf/0.1/knows")
+        trades_as = triples.create_predicate(name="trades as")
+        founded = triples.create_predicate(name="founded_in")
+        db_session.flush()
+        rows = [
+            triples.create_triple(subject_id=john.id, predicate_id=knows.id, object_id=acme.id),
+            triples.create_triple(
+                subject_id=acme.id, predicate_id=trades_as.id, object_literal="Acme Ltd"
+            ),
+            triples.create_triple(
+                subject_id=acme.id,
+                predicate_id=founded.id,
+                object_literal="1999",
+                object_datatype=XSD_INTEGER,
+            ),
+        ]
+        db_session.flush()
+
+        export = triples_to_turtle(db_session, include_labels=False)
+        assert export.triple_count == len(rows)
+        exported = set(_parse(export.turtle))
+        # The validator's reading of the same rows, term for term.
+        validated = {triple_terms(rdflib, row, DEFAULT_BASE_IRI) for row in rows}
+        assert exported == validated
+
+    def test_both_paths_refuse_the_same_unwritable_row(self, db_session):
+        """The refusals are one implementation too. A CURIE in ``object_datatype`` resolves
+        against the READER's prefixes, so writing it out would assert something the store
+        never said — and a validator that quietly accepted it would validate a graph the
+        exporter refuses."""
+        from jmfts_core.rdf.shacl import triple_terms
+
+        docs, triples = DocumentRepository(db_session), TripleRepository(db_session)
+        acme = _entity(docs, "Acme")
+        db_session.flush()
+        revenue = triples.create_predicate(name="revenue")
+        db_session.flush()
+        bad = triples.create_triple(
+            subject_id=acme.id,
+            predicate_id=revenue.id,
+            object_literal="128000",
+            object_datatype="xsd:integer",
+        )
+        db_session.flush()
+
+        with pytest.raises(TurtleSerializationError):
+            triples_to_turtle(db_session, entity_id=acme.id)
+        with pytest.raises(TurtleSerializationError) as caught:
+            triple_terms(rdflib, bad, DEFAULT_BASE_IRI)
+        assert str(bad.id) in str(caught.value)

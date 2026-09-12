@@ -27,6 +27,12 @@ import logging
 import re
 import xml.etree.ElementTree as ET
 import zipfile
+
+# `zipfile`'s inflater, named directly because `probe_patterns` has to catch what it
+# raises: a member whose deflate stream is damaged fails inside `zlib` before `zipfile`
+# gets far enough to check a CRC. See docs/SPRINT_0_4_0.md Block B step 6. Standard
+# library, so it costs the base install nothing.
+import zlib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Optional
@@ -95,6 +101,27 @@ _ZIP_MEMBERS: tuple[tuple[str, str, str], ...] = (
 #: in an ``.ncx`` or a nav document, which no prober here reads yet, and a plain ZIP
 #: declares nothing at all. Both therefore keep taking the empty-pattern path below.
 PROBERS_AVAILABLE: tuple[str, ...] = ("pdf", "text", "docx", "pptx", "xlsx", "ole2")
+
+
+def detectable_formats() -> tuple[str, ...]:
+    """Every format name :func:`detect_format` can produce FROM THE BYTES, sorted.
+
+    Derived from the two tables above rather than written out, so a signature added to
+    ``_MAGIC`` shows up here the same day. ``epub`` and ``zip`` come from
+    :func:`_refine_zip`'s two non-manifest outcomes and are named as literals for that
+    reason — they are outcomes of a function, not rows of a table.
+
+    NOT the whole answer to "what can this appliance ingest": :func:`detect_format` falls
+    back to the filename extension for bytes nothing here recognises, so an unlisted
+    format is still accepted and still gets a file node. What the list says is which
+    formats carry evidence rather than a hint. :data:`PROBERS_AVAILABLE` is the narrower
+    question of which of them anything can look INSIDE.
+    """
+    names = {fmt for _, _, fmt in _MAGIC}
+    names.update(fmt for _, _, fmt in _ZIP_MEMBERS)
+    names.update({"epub", "zip", "text"})
+    return tuple(sorted(names))
+
 
 #: A PDF averaging fewer characters per page than this, while carrying images, is called
 #: scanned. Named as a constant because probe writes it into its own attempt detail: a
@@ -1249,7 +1276,7 @@ def probe_patterns(data: bytes, detection: FormatDetection) -> tuple[dict, dict]
     if prober is not None:
         try:
             return prober(data)
-        except zipfile.BadZipFile as exc:
+        except (zipfile.BadZipFile, zlib.error) as exc:
             # A MEMBER failed to inflate, which `_open_package` cannot catch: it guards the
             # OPEN, and this archive opened. `central-directory-mismatch.docx` in
             # tests/corpus is exactly this shape — the directory is complete, namelist()
@@ -1260,9 +1287,25 @@ def probe_patterns(data: bytes, detection: FormatDetection) -> tuple[dict, dict]
             # `task_errors.classify_exception` grades it RETRYABLE, so probe would attempt
             # these bytes three times. A local header does not repair itself between
             # attempts. Same reasoning as `_open_package`, one layer in.
+            #
+            # `zlib.error` IS THE SAME EVENT ONE LAYER DOWN and was missing here until
+            # `docs/SPRINT_0_4_0.md` Block B step 6. `zipfile` checks the CRC and the
+            # headers and raises `BadZipFile`; the inflater underneath it raises
+            # `zlib.error` for a stream that is not decodable at all, and a decode failure
+            # comes FIRST — the CRC cannot be checked against output that was never
+            # produced. So the corruption `zipfile` reports is the corruption that still
+            # decompressed, and the more damaged file was the one taking the RETRYABLE
+            # path. Reproduced on `datasets/lo-qa/sw/qa/extras/uiwriter/data/ofz18563.docx`
+            # (1 in 6,159): "Error -3 while decompressing data: invalid distance too far
+            # back", three attempts and three backoffs for bytes that will never inflate.
+            # `tests/corpus`'s `corrupt-deflate.docx` is that shape, built deterministically.
             raise ValueError(
                 f"the {detection.format} package opened, but a part inside it could not be "
-                f"read, so its patterns cannot be measured: {exc}"
+                f"read, so its patterns cannot be measured: "
+                # Qualified, because `zlib.error.__name__` is the bare word "error" and
+                # the class is half of what an operator reading this needs: a
+                # `BadZipFile` is a damaged header and a `zlib.error` is a damaged stream.
+                f"{type(exc).__module__}.{type(exc).__name__}: {exc}"
             ) from exc
     return (
         {},

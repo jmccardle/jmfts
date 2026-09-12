@@ -21,7 +21,7 @@ the client.
 
 from typing import TYPE_CHECKING
 
-__version__ = "0.3.0"
+__version__ = "0.5.0"
 
 if TYPE_CHECKING:  # import-time cost avoided at runtime, type checkers still see the names
     from jmfts_client.errors import (

@@ -132,9 +132,9 @@ class TestShape:
         ]
         dicts = [e for e in stored if e.type == TYPE_DICT]
         stated = {
-            "registry entries": (len(REGISTRY), 43),
-            "evidence rows": (len(stored), 29),
-            "rows that are dicts": (len(dicts), 14),
+            "registry entries": (len(REGISTRY), 44),
+            "evidence rows": (len(stored), 30),
+            "rows that are dicts": (len(dicts), 15),
             "rows that are bare scalars": (len(stored) - len(dicts), 15),
         }
         wrong = {k: v for k, v in stated.items() if v[0] != v[1]}
@@ -169,7 +169,7 @@ class TestShape:
             "structure:inferred": "chunk",
             "structure:sheets": "sheet",
             "structure:semantic": "segment",
-            "profile:sheet": "summary",
+            "profile:sheet": "profile",
             "extract:sheet": "record",
         }
 
@@ -395,6 +395,11 @@ def ingested(db_session, drain_queue):
 UNREACHABLE_HERE = {
     "yield": "written exactly when a file node settles holding nothing; all three yielded",
     "cells": "written exactly for a cell with a formula or a forced text type",
+    "cell": (
+        "written exactly when a row does not fit the token/maxsim window and becomes a "
+        "container over its columns; this fixture's rows are values, not documents. "
+        "tests/test_sheet_record_split.py is the run that reaches it"
+    ),
     "source_anchor.unresolved": "the other branch of `citation`; every chunk here got one",
     "effective_content": "written by the rollup tasks, and `drain_queue` runs NO_ROLLUP",
     "source": "written only when a document is NAMED rather than uploaded; this uploads",

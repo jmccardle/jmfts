@@ -36,7 +36,7 @@ from pydantic import Json
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from jmfts_core.access import require_add_child
+from jmfts_core.access import governing_acrs, require_add_child
 from jmfts_client.contracts.attempt import AttemptRecord
 from jmfts_client.contracts.explain import (
     AlreadyStored,
@@ -102,6 +102,18 @@ _UNKNOWN_MIME = "application/octet-stream"
 #: on `document_links` is what makes re-uploading the same bytes under the same parent
 #: idempotent at the schema level rather than only in this function.
 LINK_CONTAINS = "contains"
+
+
+def _governance(session, node) -> dict:
+    """The ``governed``/``governing_acrs`` pair for a node, as response kwargs.
+
+    One helper rather than three copies, because the three ``FileUploadResponse``
+    construction sites below answer the same question about the same node and a copy that
+    drifted would report a node protected when it is not — which is the one direction of
+    error this field exists to prevent.
+    """
+    acrs = governing_acrs(session, node)
+    return {"governed": bool(acrs), "governing_acrs": acrs}
 
 
 @register_service
@@ -333,6 +345,10 @@ class IngestService:
             # Set only on a hit, matching path A: on a fresh ingest there is no OTHER
             # document to name, and `source_document_id` already carries the new one.
             existing_document_id=stored.document_id if stored.was_existing else None,
+            # `stored` is the FileUploadResponse this path already built for the same node,
+            # so the two answers cannot disagree.
+            governed=stored.governed,
+            governing_acrs=list(stored.governing_acrs),
         )
 
     @expose(
@@ -650,6 +666,7 @@ class IngestService:
             ],
             was_existing=already_fetched,
             linked_into_parent=False,
+            **_governance(self.session, node),
         )
 
     def _store_file(
@@ -816,6 +833,7 @@ class IngestService:
             ],
             was_existing=False,
             linked_into_parent=False,
+            **_governance(db, node),
         )
 
     def _place_existing_file(
@@ -925,6 +943,7 @@ class IngestService:
             ],
             was_existing=True,
             linked_into_parent=linked,
+            **_governance(db, node),
         )
 
     @expose(

@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 import datetime
 
+from jmfts_client.contracts.access import AccessAuditResponse
 from jmfts_client.contracts.access import GrantCreate
 from jmfts_client.contracts.access import GrantResponse
 from jmfts_client.contracts.access import PrincipalCreate
@@ -60,10 +61,15 @@ from jmfts_client.contracts.index import IndexResponse
 from jmfts_client.contracts.ingest import IngestRequest
 from jmfts_client.contracts.ingest import IngestResponse
 from jmfts_client.contracts.ingest import PipelineInfo
+from jmfts_client.contracts.meta import CapabilitiesResponse
 from jmfts_client.contracts.rdf import OntologyImportResponse
 from jmfts_client.contracts.rdf import OntologyResponse
+from jmfts_client.contracts.rdf import RuleDerivationRequest
+from jmfts_client.contracts.rdf import RuleDerivationRunResponse
 from jmfts_client.contracts.rdf import ShapeBindingCreate
 from jmfts_client.contracts.rdf import ShapeBindingResponse
+from jmfts_client.contracts.rdf import ShapeValidationRequest
+from jmfts_client.contracts.rdf import ShapeValidationRunResponse
 from jmfts_client.contracts.rdf import TurtleExportResponse
 from jmfts_client.contracts.search import AutoSearchRequest
 from jmfts_client.contracts.search import AutoSearchResponse
@@ -105,6 +111,24 @@ from jmfts_client.transport import _VerbTransport
 
 class _GeneratedVerbs(_VerbTransport):
     """Every exposed JMFTS operation, as a method. Mixed into ``RemoteJmftsClient``."""
+
+    def audit(
+        self,
+        *,
+        limit: int = 20,
+    ) -> AccessAuditResponse:
+        """What is NOT protected by any access-control root
+
+        ``GET /access/audit`` — AccessService.audit
+
+        Raises on 400 (server: ValueError).
+        """
+        return self._call(
+            "GET",
+            "/access/audit",
+            query={"limit": limit},
+            response=AccessAuditResponse,
+        )
 
     def create_principal(
         self,
@@ -1214,6 +1238,22 @@ class _GeneratedVerbs(_VerbTransport):
             response=FileUploadResponse,
         )
 
+    def capabilities(
+        self,
+        *,
+        corpus: bool = False,
+    ) -> CapabilitiesResponse:
+        """What this appliance accepts and can do
+
+        ``GET /capabilities`` — MetaService.capabilities
+        """
+        return self._call(
+            "GET",
+            "/capabilities",
+            query={"corpus": corpus},
+            response=CapabilitiesResponse,
+        )
+
     def create_binding(
         self,
         name: str,
@@ -1271,6 +1311,26 @@ class _GeneratedVerbs(_VerbTransport):
             "/ontologies/{name}",
             path={"name": name},
             response=None,
+        )
+
+    def derive_binding(
+        self,
+        name: str,
+        request: RuleDerivationRequest,
+    ) -> RuleDerivationRunResponse:
+        """Enqueue a rule-derivation run for one of this vocabulary's bindings
+
+        ``POST /ontologies/{name}/derive`` — OntologyService.derive_binding
+
+        Raises on 404 (server: LookupError, ShapeNotDeclaredError).
+        Raises on 422 (server: ScopeAccessNotUniformError, ScopeEmptyError, ValueError).
+        """
+        return self._call(
+            "POST",
+            "/ontologies/{name}/derive",
+            path={"name": name},
+            body=request,
+            response=RuleDerivationRunResponse,
         )
 
     def get_ontology(
@@ -1341,6 +1401,26 @@ class _GeneratedVerbs(_VerbTransport):
             "GET",
             "/ontologies",
             response=list[OntologyResponse],
+        )
+
+    def validate_binding(
+        self,
+        name: str,
+        request: ShapeValidationRequest,
+    ) -> ShapeValidationRunResponse:
+        """Enqueue a validation run for one of this vocabulary's bindings
+
+        ``POST /ontologies/{name}/validate`` — OntologyService.validate_binding
+
+        Raises on 404 (server: LookupError, ShapeNotDeclaredError).
+        Raises on 422 (server: ScopeAccessNotUniformError, ScopeEmptyError, ValueError).
+        """
+        return self._call(
+            "POST",
+            "/ontologies/{name}/validate",
+            path={"name": name},
+            body=request,
+            response=ShapeValidationRunResponse,
         )
 
     def export_turtle(

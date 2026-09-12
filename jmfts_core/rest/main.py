@@ -226,26 +226,33 @@ def _openapi_matching_the_gate() -> dict:
 app.openapi = _openapi_matching_the_gate
 
 
-@app.get("/", response_model=HealthResponse, tags=["meta"])
-def health_check():
-    """Health check endpoint"""
-    settings = get_settings()
-
-    # Test database connection
+def _db_status() -> str:
+    """``"connected"``, or the error that says why not. One round trip, no network."""
     try:
         engine = get_engine()
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
-        db_status = "connected"
+        return "connected"
     except Exception as e:
-        db_status = f"error: {str(e)}"
+        return f"error: {str(e)}"
 
+
+def _cheap_health() -> HealthResponse:
+    """Database reachability and the version. Bounded by one query and nothing else."""
+    settings = get_settings()
+    db_status = _db_status()
     return HealthResponse(
         status="ok" if db_status == "connected" else "degraded",
         version=__version__,
         database=db_status,
         embedding_model=settings.embedding_model,
     )
+
+
+@app.get("/", response_model=HealthResponse, tags=["meta"])
+def health_check():
+    """Health check endpoint. Same answer as ``GET /health``, and needs a token."""
+    return _cheap_health()
 
 
 def _probe_llm() -> LlmHealthStatus:
@@ -305,18 +312,34 @@ def _probe_llm() -> LlmHealthStatus:
 
 
 @app.get("/health", response_model=HealthResponse, tags=["meta"])
-def health_check_full():
-    """Comprehensive health check — includes LLM reachability probe."""
+def health_check_liveness():
+    """Liveness check: version and database reachability. One query, no network.
+
+    THIS IS THE PROBE ENDPOINT, and it is cheap because that is what a probe is for. It
+    used to run ``_probe_llm()``, which makes up to two outbound ``httpx.get`` calls at a
+    5 s timeout each — so a Kubernetes ``livenessProbe`` on this path could block for ~10 s
+    and report the appliance unhealthy because somebody else's LLM host was slow. It is
+    also the one health path in ``PUBLIC_PATHS``, so those outbound calls could be
+    triggered without a token.
+
+    The LLM probe moved to ``GET /health/llm``, which needs a token. A client that read
+    ``llm`` off this response reads ``null`` now and must call that path instead.
+    ``deploy/k8s/`` carries the probe stanzas that go with this.
+    """
+    return _cheap_health()
+
+
+@app.get("/health/llm", response_model=HealthResponse, tags=["meta"])
+def health_check_llm():
+    """Everything ``/health`` reports, plus an LLM reachability probe.
+
+    SLOW ON PURPOSE and not a liveness probe: two outbound HTTP calls at a 5 s timeout
+    each. ``status`` is ``degraded`` when the LLM is unreachable, which for an install with
+    no ``JMFTS_LLM_BASE_URL`` is the ordinary state — see ``_probe_llm``, which says
+    "not configured" rather than reporting a protocol error.
+    """
     settings = get_settings()
-
-    try:
-        engine = get_engine()
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        db_status = "connected"
-    except Exception as e:
-        db_status = f"error: {str(e)}"
-
+    db_status = _db_status()
     llm_status = _probe_llm()
     overall = "ok" if db_status == "connected" and llm_status.reachable else "degraded"
 

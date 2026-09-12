@@ -279,6 +279,12 @@ CREATE TABLE document_links (
     link_type VARCHAR(50) NOT NULL,
     score FLOAT DEFAULT 1.0,
     metadata JSONB DEFAULT '{}'::jsonb,
+    -- Which rule produced this edge; NULL means asserted (migration 019). Same column,
+    -- same convention and same width as `triples.derived_by`: a rule identity is one
+    -- string, and a link and a triple that one rule produced must be findable under the
+    -- same name. `WHERE derived_by = :rule` is a complete description of one rule's
+    -- output, which is what makes re-derivation a delete-then-insert rather than a diff.
+    derived_by VARCHAR(200),
     created_at TIMESTAMPTZ DEFAULT NOW(),
 
     UNIQUE (source_id, target_id, link_type)
@@ -462,6 +468,15 @@ CREATE INDEX idx_documents_usetype ON documents(usetype);
 -- answering "which children here did a person assert" (9.4). See migration 016.
 CREATE INDEX idx_documents_produced_by ON documents(parent_id, produced_by);
 
+-- Containers — a settled node with no `content` of its own, whose text is its children's.
+-- PARTIAL because the query only ever asks this direction, and `content` is the widest
+-- column on a table that reaches 458 MB on a real corpus, so answering "is this a
+-- container" by visiting the row is the expensive way. The predicate must stay identical to
+-- `SearchRepository._container_candidates`'s or PostgreSQL will not use it. See migration
+-- 020 for the 34.8 ms -> 23.5 ms this bought.
+CREATE INDEX idx_documents_container
+    ON documents (id) WHERE content IS NULL AND settled = 'settled';
+
 -- Full-text search (GIN) — PARTIAL: only settled rows are retrievable, so only
 -- settled rows are indexed. fulltext_search carries the matching predicate.
 CREATE INDEX idx_documents_content_fts ON documents
@@ -475,6 +490,17 @@ CREATE INDEX idx_documents_structured ON documents USING GIN (structured_content
 -- Vector search (HNSW) - cosine similarity — PARTIAL: a chunk that is written,
 -- embedded, superseded and rebuilt during ingestion never causes an insert-then-delete
 -- in the HNSW graph. It enters the graph once, when it settles.
+--
+-- The predicate does NOT cover a rolled-back transaction, which leaves index entries
+-- behind exactly as a DELETE does. `docs/ANN_INDEX_HEALTH.md` 1.7 measures what dead
+-- entries at a query point cost this index: recall@10 falls from 1.0 to 0.100 at
+-- pgvector's default scan mode, and holds at 0.979 under the `strict_order` that
+-- `repositories/search.py:432` sets. IVFFlat lost nothing in the same cells.
+--
+-- Two costs of the choice of HNSW here, both from `ANN_INDEX_HEALTH.md` 1.8, and both
+-- to weigh before anyone reaches for a VACUUM-on-delete policy: VACUUM of this index
+-- takes 87 s at 100 000 rows against IVFFlat's 0.24 s at the same size, and it costs
+-- the same whether one row was deleted or fifty thousand were.
 CREATE INDEX idx_documents_embed ON documents
     USING hnsw (embed vector_cosine_ops)
     WITH (m = 16, ef_construction = 64)
@@ -484,9 +510,32 @@ CREATE INDEX idx_documents_embed ON documents
 CREATE INDEX idx_token_embeddings_doc ON token_embeddings(document_id);
 CREATE INDEX idx_token_embeddings_importance ON token_embeddings(document_id, importance_score DESC);
 
--- Token embedding vector indexes (IVFFlat) - halfvec for ~2x storage savings
-CREATE INDEX idx_token_embed_256_ivf ON token_embeddings
-    USING ivfflat (embed_256 halfvec_cosine_ops) WITH (lists = 1024);
+-- Token embedding vector indexes - halfvec for ~2x storage savings.
+--
+-- `embed_256` IS HNSW AND WAS IVFFlat UNTIL MIGRATION 022. The IVFFlat index this file
+-- built was created here, against a table holding zero rows, and `git grep REINDEX --
+-- jmfts_core` returns nothing — so its 1024 k-means centroids were fitted to an empty
+-- table and never recomputed. `docs/ANN_INDEX_HEALTH.md` 5.4 measured what that costs and
+-- 5.7 measured the property that decided the replacement: an HNSW graph is built by
+-- INSERTION, so creating it here and filling it later produces the same index as creating
+-- it on a full table. IVFFlat cannot do that, and no `lists` value and no `probes` value
+-- repairs it — only a rebuild somebody has to remember to run.
+--
+-- What it bought, on the real corpus (`docs/STRESS_CORPUS.md` 6.2, 1.37M rows): recall@10
+-- 0.7533 -> 0.9667 at IDENTICAL query latency (0.65 ms both), 15 of 30 queries degraded
+-- down to 1 of 30. What it cost: 2.7x build (55.9 s vs 20.6 s) and 46% more disk
+-- (1050 MB vs 720 MB).
+--
+-- THE COST THAT IS NOT ON THAT LIST, and the reason `repositories/search.py` sets a scan
+-- mode on this path: `token_embeddings` has no `settled` column, so unlike
+-- `idx_documents_embed` above this index CANNOT be partial and cannot keep rewritten rows
+-- out of the graph. `repositories/document.py:1069` deletes every token row for a document
+-- and rewrites them on each re-embed, which left 113,313 dead against 1,370,494 live on
+-- the reference corpus (`STRESS_CORPUS.md` 6.3). That is the Parts 1-2 failure mode, and
+-- `ANN_INDEX_HEALTH.md` 1.7 measures it at recall 0.100 under pgvector's default scan.
+-- `search.py`'s `HNSW_ITERATIVE_SCAN` is what holds it at 0.979.
+CREATE INDEX idx_token_embed_256_hnsw ON token_embeddings
+    USING hnsw (embed_256 halfvec_cosine_ops) WITH (m = 16, ef_construction = 64);
 CREATE INDEX idx_token_embed_384 ON token_embeddings
     USING hnsw (embed_384 halfvec_cosine_ops) WITH (m = 16, ef_construction = 64);
 CREATE INDEX idx_token_embed_512 ON token_embeddings
@@ -502,6 +551,11 @@ CREATE INDEX idx_term_postings_doc ON search_term_postings(index_id, document_id
 -- Document links
 CREATE INDEX idx_links_source ON document_links(source_id);
 CREATE INDEX idx_links_target ON document_links(target_id);
+-- "Asserted only" and "derived by this rule", on a column that is NULL for every row
+-- today. Partial for `ix_triples_derived_by`'s reason: derived edges are the minority of a
+-- link graph, so the index holds only them and the asserted majority is served by not
+-- being in it. See migration 019.
+CREATE INDEX ix_links_derived_by ON document_links(derived_by) WHERE derived_by IS NOT NULL;
 
 -- Uploaded blobs. document_id and lob_oid are already indexed by their UNIQUE
 -- constraints; the content hash is not, and it is the lookup that answers "have
@@ -770,6 +824,86 @@ CREATE TABLE entity_roots (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- One derived-tree root per (ACCESS, TREE KIND) (migration 018). Same shape as
+-- `entity_roots` and for the same reason — a derived tree hangs under a root whose grants
+-- are the effective access of the sub-corpus it derives from, so a derivation owns nothing
+-- in the tree it derived from. The ONE difference is the key: `entity_roots` is per access,
+-- this is per (access, kind), because a summary tree, a keyword tree and an argument tree
+-- over the same access sharing one root would make the kind a `usetype` filter over a mixed
+-- subtree, and SPRINT_0_5_0.md 3.1's leaf projection is per tree. `document_id` is
+-- separately UNIQUE: a root serves one (access, kind) pair and can never accumulate a
+-- second meaning. Nothing writes here yet; the writer is 0.5.0 Block C step 11.
+CREATE TABLE derived_roots (
+    id SERIAL PRIMARY KEY,
+    access_key TEXT NOT NULL,
+    tree_kind VARCHAR(100) NOT NULL,
+    document_id INTEGER NOT NULL UNIQUE REFERENCES documents(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (access_key, tree_kind)
+);
+
+-- ============================================================================
+-- MIGRATION LEDGER
+-- ============================================================================
+
+-- Which deltas a database has seen (migration 017). Until 017 nothing tracked this, and
+-- choosing which files in `jmfts_core/sql/migrations/` to apply was an operator's
+-- undocumented knowledge. `name` is the FILE name because that is what identifies a
+-- migration everywhere else in the package; `recorded_at` is when the row appeared and is
+-- always known; `applied_at` is when the named DDL actually ran here and is NULL exactly
+-- for backfilled rows, where nobody knows. `source` is the warrant behind the row —
+-- 'schema' (this file built the database and already contained the delta's effect),
+-- 'delta' (the migration ran here and wrote its own row), 'backfill' (017 asserted it about
+-- an existing database). See 017_migration_ledger.sql for the full argument.
+CREATE TABLE schema_migrations (
+    name TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    source TEXT NOT NULL CHECK (source IN ('schema', 'delta', 'backfill')),
+    CONSTRAINT schema_migrations_backfill_has_no_applied_at CHECK (
+        (source = 'backfill' AND applied_at IS NULL)
+        OR (source <> 'backfill' AND applied_at IS NOT NULL)
+    )
+);
+
+-- A DATABASE BUILT FROM THIS FILE IS NOT AT ZERO. `schema.sql` is the complete current DDL,
+-- so everything 002 through 018 add is already here and the ledger has to say so. Leave
+-- these rows out and a brand-new database reads as "seventeen deltas pending", and an
+-- operator following it applies deltas to a database that has their effects already — which
+-- `jmfts_core/sql/__init__.py` calls "neither necessary nor safe". The ledger records the
+-- STATE of a database, not the route it took there, so `applied_at` is the build time: that
+-- is honestly when the DDL entered this database.
+--
+-- EVERY SHIPPED MIGRATION MUST APPEAR HERE. The fence is machine-readable —
+-- `jmfts_core.sql.schema_ledger_names()` parses it and `migration_names()` lists the files —
+-- so a delta added without its row here is drift a test can catch, rather than a fresh
+-- database quietly claiming a migration is outstanding. There is no 001: the original
+-- schema was never a delta.
+-- BEGIN MIGRATION LEDGER -- mirrors jmfts_core/sql/migrations/; keep in step
+INSERT INTO schema_migrations (name, applied_at, source) VALUES
+    ('002_temporal_triples.sql', NOW(), 'schema'),
+    ('003_purge_ghost_predicates.sql', NOW(), 'schema'),
+    ('004_document_position.sql', NOW(), 'schema'),
+    ('005_document_event_time.sql', NOW(), 'schema'),
+    ('006_access_control.sql', NOW(), 'schema'),
+    ('007_term_postings_doc_index.sql', NOW(), 'schema'),
+    ('008_document_settled_lifecycle.sql', NOW(), 'schema'),
+    ('009_document_blobs.sql', NOW(), 'schema'),
+    ('010_task_queue.sql', NOW(), 'schema'),
+    ('011_task_queue_heartbeat.sql', NOW(), 'schema'),
+    ('012_task_queue_batched.sql', NOW(), 'schema'),
+    ('013_rdf_layer.sql', NOW(), 'schema'),
+    ('014_entity_roots.sql', NOW(), 'schema'),
+    ('015_evidence_rows.sql', NOW(), 'schema'),
+    ('016_document_produced_by.sql', NOW(), 'schema'),
+    ('017_migration_ledger.sql', NOW(), 'schema'),
+    ('018_derived_roots.sql', NOW(), 'schema'),
+    ('019_link_derived_by.sql', NOW(), 'schema'),
+    ('020_container_lookup.sql', NOW(), 'schema'),
+    ('021_profile_usetype.sql', NOW(), 'schema'),
+    ('022_token_embed_256_hnsw.sql', NOW(), 'schema');
+-- END MIGRATION LEDGER
+
 -- ============================================================================
 -- DEFAULT DATA
 -- ============================================================================
@@ -777,3 +911,46 @@ CREATE TABLE entity_roots (
 -- Create default search index
 INSERT INTO search_indexes (name, description, capabilities)
 VALUES ('default', 'Default search index for all documents', '{"bm25": true, "maxsim": true}'::jsonb);
+
+-- NO named search-context preset is seeded (ROADMAP.md known gap 5), and this comment is
+-- the record of why, because an absent row leaves no other trace.
+--
+-- THREE WERE SPECIFIED 2026-08. `docs/archive/ROADMAP_HISTORY.md:697` named
+-- `agent-sessions` -> `adjutant:*`, `personal-notes` -> `transcript:*,obsidian:*` and
+-- `hardware` -> `kicad:*,freecad:*`. A preset is data with no validator: nothing checks at
+-- write time that its `usetype` names anything, so a preset naming a usetype this
+-- appliance never writes ships to every install as a named filter that returns an empty
+-- page and gives no reason.
+--
+-- `personal-notes` and `hardware` are UNEXPRESSIBLE: their four namespaces are written by
+-- nothing in `jmfts_core`, so either would ship that empty page.
+--
+-- `agent-sessions` is expressible and WITHHELD, which is a different fact and is a
+-- deliberate decision rather than a gap in the filter. `adjutant:*` matches two usetypes
+-- (`adjutant:template`, `services/template_service.py:51`, and `adjutant:container`,
+-- `:104`) — the prompt-template library and the node it hangs under. It does NOT reach an
+-- adjutant session: a transcript stopped being a usetype when conversation ingestion moved
+-- onto the queue (`conversation_tasks.py:9`), so a session's turns are `chunk` nodes
+-- indistinguishable by usetype from a PDF's leaves. Seeding it would put a preset in every
+-- install whose name says sessions and whose filter selects templates, and would carry a
+-- caller-visible reference to one downstream consumer of this appliance into the schema
+-- every fork of it starts from. Neither is a trade worth a convenience filter.
+--
+-- WHAT WOULD CLOSE THIS is a filter key `config` does not have: `produced_by`, which is
+-- `structure:conversation` on exactly the turns `agent-sessions` was meant to select
+-- (`models/document.py:117`). That is a change to `SearchContextRepository.resolve_params`
+-- and to the search methods, not a seed, and it is what makes the preset mean its name.
+--
+-- The filter mechanism this gap used to be about is FIXED and is not what is missing.
+-- `config.usetype` accepts either spelling of `UsetypeFilter`
+-- (`jmfts-client/jmfts_client/contracts/search.py:81`) and `usetype_globs` normalises
+-- both, so a multi-glob preset written as a JSON list is no longer the silent
+-- `LIKE 'transcript:%,obsidian:%'` that stopped the 2026-09-05 attempt
+-- (`_usetype_to_like`'s docstring, `repositories/search.py:126`).
+--
+-- `SearchContextRepository.resolve_params` hands a preset's blob to the search methods
+-- unvalidated — it passes through no contract at all — so the seal is a test:
+-- `tests/test_search_context_presets.py` asserts of every row seeded here that its globs
+-- match a usetype `jmfts_core` can produce, reading the producible set out of the source
+-- with `ast` rather than from a checked-in copy. That gate is armed against an empty
+-- table, so it is the first thing the next seeding attempt meets.

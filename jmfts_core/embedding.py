@@ -96,7 +96,7 @@ class TextTooLongError(ValueError):
     embedder used to pass `truncation=True, max_length=512` and return
     `{"embedded": true}` for a document of any length: the tail simply did not
     exist as far as vector or maxsim search was concerned, and a caller had no
-    way to find out (docs/KNOWN-DEFECTS.md, D1).
+    way to find out (docs/archive/KNOWN-DEFECTS.md, D1).
     """
 
     def __init__(self, token_count: int, limit: int, chars_total: int, path: str):

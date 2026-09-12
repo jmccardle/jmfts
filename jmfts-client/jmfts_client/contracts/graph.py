@@ -142,14 +142,28 @@ class NeighborItem(BaseModel):
 
 
 class NeighborsResponse(BaseModel):
-    """Response for GET /graph/neighbors."""
+    """Response for GET /graph/neighbors.
+
+    ``truncated`` is a property of the GRAPH, not of the request. It says the walk stopped
+    with reachable nodes still behind it, which is the one thing a caller cannot work out
+    from the page in front of them — and it is measured by the walk overshooting its node
+    cap by exactly one, not inferred from ``total``. An over-large ``limit`` or
+    ``max_depth`` is refused at the wire (422) rather than clamped, so this flag never has
+    to double as "your bound was overruled".
+
+    Depth is not truncation. A caller who asked for ``max_depth`` hops and received every
+    node within ``max_depth`` hops was answered; depth is an ordinary predicate on the
+    result set, the way ``link_types`` is.
+    """
 
     root_id: int
     max_depth: int
     direction: str
     link_types: Optional[list[str]]
     total: int
-    truncated: bool  # True if `limit` capped the walk before it ran dry
+    #: A ``limit + 1``th neighbour exists within ``max_depth`` — this page is a cut of the
+    #: reachable set. Measured by the walk, never inferred from ``total``.
+    truncated: bool
     neighbors: list[NeighborItem]
 
 

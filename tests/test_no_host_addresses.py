@@ -13,7 +13,7 @@ records of runs against a specific machine, and the address there is the *data* 
 rewriting it would be falsifying a measurement.
 
 ``scripts/`` is in scope, because the README and CLAUDE.md tell a reader to run things
-from it. Sixteen research scripts in it do hardcode this machine's dataset mount, and
+from it. Fifteen research scripts in it do hardcode this machine's dataset mount, and
 they are listed in ``KNOWN_UNFIXED`` rather than quietly excluded. That list is held
 against the tree by ``test_known_unfixed_is_current``: fix a script and the test fails
 until you delete its line, so the carve-out can only ever shrink.
@@ -67,7 +67,6 @@ KNOWN_UNFIXED = {
     "scripts/benchmark_overnight.py",
     "scripts/benchmark_twostage.py",
     "scripts/benchmark_write.py",
-    "scripts/create_ivf_index.py",
     "scripts/embedding_similarity.py",
     "scripts/ingest_missing_steelman.py",
     "scripts/maxsim_token_demo.py",
@@ -120,7 +119,7 @@ def test_no_shipped_file_names_one_machine():
         + "\n".join(found)
         + "\n\nRewrite the path or address so it is a placeholder or comes from the "
         "environment. Do NOT add the file to KNOWN_UNFIXED — that list is for the "
-        "sixteen research scripts already there, and it only shrinks."
+        "research scripts already there, and it only shrinks."
     )
 
 
@@ -128,7 +127,10 @@ def test_known_unfixed_is_current():
     """A fixed script must leave the list, and a listed script must still exist.
 
     Without this the carve-out would outlive the defect it names, and the next reader
-    would believe sixteen scripts are broken when three of them are fine.
+    would believe every script on the list is broken when some of them are fine.
+    `scripts/create_ivf_index.py` left it that way: migration 022 made the index it
+    built the wrong one, and the rewrite that followed (`scripts/create_token_index.py`)
+    took the hardcoded path out with it.
     """
     tracked = set(_tracked())
     stale: list[str] = []

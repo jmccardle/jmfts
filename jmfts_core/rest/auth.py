@@ -93,6 +93,11 @@ RUNNER_BEARER = BearerScheme(
 
 # Paths that are reachable without a token. `/health` is the liveness probe;
 # `/health/` covers trailing-slash routing if it is ever added.
+#
+# `/health/llm` is NOT here and must not be added. It makes up to two outbound HTTP calls
+# to `JMFTS_LLM_BASE_URL`, and an unauthenticated path that causes the appliance to dial a
+# configured host on demand is a request amplifier. The liveness probe is open because it
+# costs one local query; the LLM probe costs somebody else's latency budget.
 PUBLIC_PATHS = frozenset({"/health", "/health/"})
 
 # The runner surface. `require_token` steps aside for these paths — NOT because they are

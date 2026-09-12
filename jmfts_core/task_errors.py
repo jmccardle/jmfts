@@ -121,6 +121,23 @@ def classify_exception(exception: BaseException) -> ErrorType:
     if isinstance(exception, (ValueError, TypeError, KeyError, AttributeError, ImportError)):
         return ErrorType.PERMANENT
 
+    # The SAME RULE, for the database's way of saying it. `DataError` is "these bytes
+    # cannot go in this column" and `IntegrityError` is "this row breaks a constraint" —
+    # both are statements about the value, decided by the value, and identical on every
+    # attempt. Left to the RETRYABLE default they burn the whole retry budget before the
+    # node reaches its terminal state, and everything that depends on that task waits for
+    # it. Measured: a PDF whose text layer carried a NUL took three 22-second attempts to
+    # fail at a `jsonb` write that could not have gone any other way
+    # (`docs/STRESS_CORPUS.md` 4.2).
+    #
+    # `OperationalError` is deliberately NOT here — it is above, as RETRYABLE, because it
+    # covers a lost connection and a lock timeout, which are facts about the moment rather
+    # than about the row. `ProgrammingError` is not here either: it is our own malformed
+    # SQL, which the `DatabaseError` base would sweep up, and keeping it out means this
+    # arm names only the two the DATA decides.
+    if isinstance(exception, (sqlalchemy.exc.DataError, sqlalchemy.exc.IntegrityError)):
+        return ErrorType.PERMANENT
+
     # A full disk is the one OSError worth retrying — it is the only one an operator
     # can clear without changing the input. Everything else (missing file, permission
     # denied, bad descriptor) is a fact about the environment that a retry repeats.

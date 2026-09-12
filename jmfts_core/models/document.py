@@ -4,12 +4,14 @@ from datetime import datetime
 from typing import Optional, List, Any
 from sqlalchemy import (
     CheckConstraint,
+    Index,
     String,
     Text,
     Integer,
     Float,
     ForeignKey,
     DateTime,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import JSONB
@@ -60,16 +62,53 @@ USETYPE_SEGMENT = "segment"
 #: One worksheet of a workbook (8.1). The whole of a workbook's declared rung.
 USETYPE_SHEET = "sheet"
 
-#: A measured summary node — today, the profile `profile:sheet` writes under a sheet (8.5).
-#: The same string the RAPTOR summaries use, and deliberately: a profile is a summary of the
-#: node above it, it is retrieved the same way, and a reader filtering `usetype='summary'`
-#: wants both.
+#: A summary written by a model, or a roll-up standing in for the nodes it names. Held out
+#: of every default result set by `Settings.search_exclude_usetypes` and
+#: `bm25_exclude_usetypes`, which is right for the two things that carry it: a
+#: `summarize:tree` node's vector is byte-identical to its source node's (13,755 of 13,755
+#: pairs at cosine distance 0.000000 on the reference corpus), so admitting them would
+#: return every answer twice, and an LLM summary's text is reachable on the node it
+#: summarises through `effective_content`.
 USETYPE_SUMMARY = "summary"
+
+#: What `profile:sheet` writes under a sheet — the measured description of a worksheet
+#: (`INGEST_SPEC.md` 8.5): its columns, their cardinalities, which one identifies a row.
+#:
+#: SPLIT FROM `USETYPE_SUMMARY` on 2026-09-07 and this is a behaviour change. It used to be
+#: `summary`, on the reasoning that "a profile is a summary of the node above it, it is
+#: retrieved the same way". The second half was false: `summary` is in both exclusion lists,
+#: so the profile was retrieved no way at all — while 8.5 says outright that it "is embedded
+#: and retrievable like any other node" and that "a retrieval hit on the profile tells the
+#: agent which columns exist". The spec and the shipped config disagreed and the config won.
+#:
+#: The two do not belong together. A profile is MEASURED — counted from cells, no model, no
+#: inference about meaning (8.5's factoid table) — and it is the only text a header-less
+#: sheet produces at all: 18 of 33 sheets on the reference corpus wrote zero records, and
+#: their profile is what the appliance knows about them. A summary is authored by a model or
+#: is a duplicate of something else's vector. Sharing one string made the first invisible
+#: for the second's reasons.
+USETYPE_PROFILE = "profile"
 
 #: One row of a worksheet, as typed JSON (8.4's `records` shape). `record` and not `row`:
 #: what the node holds is one instance of whatever the sheet is a table of, and its row
 #: NUMBER is a fact about where it was found.
+#:
+#: A record is a LEAF while its prose fits the token/maxsim window and a CONTAINER when it
+#: does not, which is the same rule `section` follows one level up. See
+#: `jmfts_core.sheet_records.plan_record`.
 USETYPE_RECORD = "record"
+
+#: One column of one row, on the node it gets when the row it belongs to was too long to
+#: embed whole. Like `record` it is a leaf while its own labelled text fits and a container
+#: over `chunk` nodes when it does not.
+#:
+#: NOT `chunk`, though a cell that fits is a text leaf exactly as a chunk is. A chunk is a
+#: piece of prose whose boundary this appliance chose; a cell is a field the SHEET named,
+#: and its `cell` evidence carries the column name and the typed value that `record` keeps
+#: for the whole row. Sharing one string would make "which column is this" underivable for
+#: the one node kind that knows the answer — the mistake `USETYPE_PROFILE` was split out of
+#: `USETYPE_SUMMARY` to undo.
+USETYPE_CELL = "cell"
 
 
 class Document(Base):
@@ -230,6 +269,19 @@ class Document(Base):
         return result
 
 
+#: The edge from a summary node down to one node it covers.
+#:
+#: ON THE MODEL FOR `USETYPE_SHEET`'s REASON, and it arrived here the same way: it was
+#: written twice. `raptor_summarize` (`summarization.py`) spelled it as a literal and
+#: `rollup_tasks.SUMMARIZES_LINK_TYPE` spelled it as a constant, which is the copy-drift
+#: `USETYPE_SHEET` was consolidated to end. Two derivations write this ONE edge type
+#: deliberately: `SPRINT_0_5_0.md` 3.1's leaf projection resolves a derived node to source
+#: leaves by following one type, and a second spelling would make it ask which derivation
+#: produced a node before it could follow anything. A constant in one writer cannot hold
+#: that invariant, because the other writer is where it breaks.
+SUMMARIZES_LINK_TYPE = "summarizes"
+
+
 class DocumentLink(Base):
     """Graph edges between documents"""
 
@@ -245,6 +297,47 @@ class DocumentLink(Base):
     link_type: Mapped[str] = mapped_column(String(50), nullable=False)
     score: Mapped[float] = mapped_column(Float, default=1.0)
     link_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
+
+    # WHICH RULE PRODUCED THIS EDGE. NULL means asserted — a person, an importer or an
+    # ingest handler wrote it — exactly as it does on `Triple.derived_by`
+    # (`models/triple.py:167`), and "asserted only" is then `WHERE derived_by IS NULL`.
+    # `VARCHAR(200)` matches the triple column rather than `Document.produced_by`'s 100: a
+    # rule identity is one string, and a link and a triple that one rule produced must be
+    # findable under the same name.
+    #
+    # What it buys is stated in `docs/SPRINT_0_5_0.md` Block D step 15: `WHERE derived_by =
+    # :rule` is a complete description of what one rule produced, so re-derivation is a
+    # delete-then-insert rather than a diff.
+    #
+    # ONE writer stamps it, and IT REBUILDS. `summarize:tree` (Block C step 11,
+    # `rollup_tasks._rewrite_member_links`) sets `summarize:tree` on the `summarizes` edges a
+    # roll-up mints, and a second run over a changed member set DELETES that node's edges and
+    # writes them again. An earlier draft of this comment said the column had no rebuilder
+    # yet and that Part 3.1's reprojection would be the first; that was true when it was
+    # written and false by the end of the same pass, and Block D corrects it in its own text.
+    #
+    # The delete is scoped to one derived node's outgoing edges, NOT to the rule:
+    # `DocumentRepository.rederive_links(rule, links)` deletes everything a rule produced
+    # across the whole store, and `summarize:tree` produces edges for every container in it,
+    # so a per-node rebuild through that method would delete every other node's edges. Block
+    # C finding 5 records the mismatch; `rederive_links` is uncalled until a rule identity
+    # carries a scope.
+    #
+    # EVERY OTHER WRITER LEAVES IT NULL, which is the asserted-edge case and is correct:
+    # each writes once at ingest and never rebuilds, so there is no rule identity to record.
+    # `bridge` (`summarization.py:354`, `:624`), `summarizes` from RAPTOR
+    # (`summarization.py:472`), `LINK_CONTAINS` (`services/ingest_service.py:918`), and
+    # `MENTIONS_LINK_TYPE` plus `RBAC_COREF_LINK_TYPE`, both through
+    # `fact_extraction._upsert_link` (`:401`).
+    #
+    # THAT IS FIVE TYPES, NOT FOUR. Block D step 15 counts four and names `bridge`,
+    # `summarizes`, `contains` and `mentions`; `rbac_coref` is a fifth, written by
+    # `resolve_entity` when an entity gets a copy under a second entities root. It leaves
+    # the column NULL for the same reason as the rest, so the count is the only thing wrong
+    # and nothing follows from it — but the number is corrected here rather than copied.
+    # See migration 019.
+    derived_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
     # Relationships
@@ -255,6 +348,20 @@ class DocumentLink(Base):
         "Document", foreign_keys=[target_id], back_populates="incoming_links"
     )
 
+    # ONE ENTRY, and the rest of this table's DDL is deliberately not mirrored here. The
+    # class never declared its UNIQUE (source_id, target_id, link_type) or its source/target
+    # indexes — `sql/schema.sql` is where this table is defined and the mapper is not the
+    # authority — so adding them alongside the new index would be inventing constraint names
+    # the database does not use. The partial index is declared because it is the half of
+    # step 15 that has to exist for `WHERE derived_by = :rule` to be cheap, and because
+    # `Triple` declares its counterpart at `models/triple.py:222` in exactly this shape.
+    __table_args__ = (
+        # Partial, for `ix_triples_derived_by`'s reason and NOT `documents.produced_by`'s:
+        # derived edges are the minority of a link graph, so the index holds only them and
+        # the asserted majority is served by not being in it.
+        Index("ix_links_derived_by", "derived_by", postgresql_where=text("derived_by IS NOT NULL")),
+    )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -263,6 +370,7 @@ class DocumentLink(Base):
             "link_type": self.link_type,
             "score": self.score,
             "metadata": self.link_metadata,
+            "derived_by": self.derived_by,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 

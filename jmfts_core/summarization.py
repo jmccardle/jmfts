@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from jmfts_core.config import get_settings, Settings
 from jmfts_core.llm_client import complete
+from jmfts_core.models.document import SUMMARIZES_LINK_TYPE
 from jmfts_core.repositories.document import DocumentRepository
 
 logger = logging.getLogger(__name__)
@@ -375,7 +376,12 @@ async def raptor_summarize(
         result.total_summaries += len(summary_ids)
         result.total_bridge_links += bridge_count
 
-        # Next layer: cluster the summaries
+        # Next layer: cluster the summaries. This is the ONE list layer N+1 clusters over,
+        # and it is carried in memory from layer N's return values — the tree is not
+        # re-read between layers. `_get_embedded_child_ids` is called exactly once, before
+        # the loop (`:293`), to seed layer 0. That is why deleting the reparent from
+        # `_summarize_cluster` (`docs/SPRINT_0_5_0.md` Block C step 12) does not touch
+        # multi-layer roll-up: the reparent never fed the clustering, only the tree.
         current_ids = summary_ids
 
     session.flush()
@@ -390,7 +396,11 @@ async def _summarize_cluster(
     settings: Settings,
     llm_model: str | None,
 ) -> int:
-    """Summarize a single cluster: collect text, call LLM, create summary doc, re-parent."""
+    """Summarize a single cluster: collect text, call LLM, create the summary, link down.
+
+    It does NOT re-parent the members. `docs/SPRINT_0_5_0.md` Block C step 12 deleted the
+    ``repo.reparent(doc_id, summary_doc.id)`` that used to run here; see the loop below.
+    """
     # Collect text from cluster members
     texts = []
     for doc_id in cluster.member_ids:
@@ -418,10 +428,48 @@ async def _summarize_cluster(
         auto_embed=True,
     )
 
-    # Re-parent cluster members under the summary document
+    # Link the summary down to each member. The link is the ONLY record of the relation:
+    # `docs/SPRINT_0_5_0.md` Block C step 12 deleted the ``repo.reparent(doc_id,
+    # summary_doc.id)`` that used to run on this same iteration, and nothing replaces it.
+    # Part 1.1 states the property the whole of Part 3 rests on — a derived tree LINKS to
+    # the source leaves and does not OWN them — and the reparent was the ownership. The
+    # two lines recorded the same relation and only this one can record it correctly:
+    # `reparent` "Move[s] a document under a new parent, updating path for it and all
+    # descendants" (`repositories/document.py:847`-`:850`), so it is single-valued and it
+    # is destructive.
+    #
+    # This repository already made exactly this fix once, for entities: until
+    # `SPRINT_0_3_0.md` 7.5 an entity was a CHILD of the document that mentioned it, and
+    # "an entity mentioned by two documents could only be a child of one of them. As a
+    # link it is many-to-many" (`fact_extraction.py:35`-`:41`, MENTIONS_LINK_TYPE). RAPTOR
+    # had the identical defect and never got the migration.
+    #
+    # Three things change, and each is an improvement (Block C, step 12):
+    #
+    #   * a leaf keeps its PELT parent, so subtree search over a chapter finds its own
+    #     leaves — `Document.path @> jsonb_build_array(parent_id)`
+    #     (`repositories/search.py:187`, `:271`) is read off a path the roll-up no longer
+    #     rewrites (`tests/test_raptor_structure.py`, test 2);
+    #   * a leaf that Leiden placed in two clusters gets two ``summarizes`` links instead
+    #     of one arbitrary parent — ``structured_content.member_ids`` above already
+    #     records the true membership the tree could not represent;
+    #   * a leaf keeps the ACR it was ingested under, because subtree RBAC resolves a
+    #     principal's readable set with the same containment (`access.py:78`)
+    #     (`tests/test_raptor_structure.py`, test 3).
+    #
+    # Removing the reparent loses no edge — the link carries everything the parent edge
+    # carried, plus provenance, plus many-to-many. What it does NOT yet do is put the
+    # summary somewhere of its own: `summary_doc` is still created under
+    # ``root_parent_id`` above, and the derived root minted by
+    # `sql/migrations/018_derived_roots.sql` has no writer until Block C step 11, which is
+    # held out of this pass. Block C states that interim state rather than leaving it to
+    # be discovered.
+    #
+    # ONE SPELLING, AND IT IS NOT THIS MODULE'S. `SPRINT_0_5_0.md` Block C finding 6: this
+    # site and `rollup_tasks` both write the edge 3.1's leaf projection follows, so the name
+    # lives on the model where neither writer can drift from the other.
     for doc_id in cluster.member_ids:
-        repo.reparent(doc_id, summary_doc.id)
-        repo.create_link(source_id=summary_doc.id, target_id=doc_id, link_type="summarizes")
+        repo.create_link(source_id=summary_doc.id, target_id=doc_id, link_type=SUMMARIZES_LINK_TYPE)
 
     return summary_doc.id
 
@@ -446,6 +494,23 @@ def _collect_report_summaries(repo: DocumentRepository, portfolio_id: int) -> li
     Walks each immediate child (report) of the portfolio and collects its
     usetype='summary' children — these are the RAPTOR summaries produced by
     per-document RAPTOR. Only summaries with embeddings are returned.
+
+    **What this returns changed with `docs/SPRINT_0_5_0.md` Block C step 12, and the
+    change is not hidden here.** Every summary `_summarize_cluster` writes is created
+    under ``root_parent_id`` — the report — at EVERY layer, so all of them are immediate
+    children of the report. While the reparent existed, layer N+1 pulled layer N's
+    summaries down underneath itself, and this ``depth=1`` walk therefore saw only the
+    TOP layer. Without it they all stay siblings, so this now returns every layer's
+    summaries and the portfolio roll-up clusters an L0 summary alongside the L1 summary
+    that already covers it.
+
+    That is left as observed rather than filtered on ``structured_content.raptor_layer``,
+    because picking the top layer is a decision about what a portfolio tree summarises
+    and Block C step 11 — the handler that writes into the derived root — is the pass
+    that makes it. No test asserts against this path today (nothing under `tests/` calls
+    `portfolio_raptor_summarize`; its only caller is
+    `services/document_service.py:1190`), so under `SPRINT_0_4_0.md` Part 0's rule this
+    is a recorded consequence and not an open defect.
     """
     report_docs = repo.get_children(portfolio_id, depth=1, limit=10000)
     summary_ids: list[int] = []

@@ -58,7 +58,7 @@ from jmfts_core.models.document import (
     USETYPE_RECORD,
     USETYPE_SECTION,
     USETYPE_SHEET,
-    USETYPE_SUMMARY,
+    USETYPE_PROFILE,
 )
 from jmfts_core.repositories.document import DocumentRepository
 from jmfts_core.repositories.task_queue import TaskQueueRepository
@@ -136,14 +136,21 @@ class TestTheScopeVocabulary:
         assert not scope.matches(TASK_STRUCTURE_DECLARED, None)
 
     def test_both_halves_are_disjunctions(self):
-        """`embed` is one row over five rules and three leaf kinds, and `Scope`'s docstring
+        """`embed` is one row over five rules and four leaf kinds, and `Scope`'s docstring
         argues why: five near-identical rows is the copy-drift `DECLARED_STRUCTURE` refuses
-        for thirteen formats."""
+        for thirteen formats.
+
+        FOUR AND NOT THREE since `cell` joined on 2026-09-08 — a spreadsheet row too long to
+        embed becomes a container over its columns, and each column is a leaf carrying its
+        own text (`sheet_records.plan_record`). The cross-product widens and still costs
+        nothing: `profile:sheet` writes no cell, and a row only fires for a child that
+        exists.
+        """
         scope = _row(TASK_EMBED).scope
-        assert len(scope.produced_by) == 5 and len(scope.usetypes) == 3
+        assert len(scope.produced_by) == 5 and len(scope.usetypes) == 4
         assert scope.matches(TASK_STRUCTURE_CONVERSATION, USETYPE_CHUNK)
         assert scope.matches(TASK_EXTRACT_SHEET, USETYPE_RECORD)
-        assert scope.matches(TASK_PROFILE_SHEET, USETYPE_SUMMARY)
+        assert scope.matches(TASK_PROFILE_SHEET, USETYPE_PROFILE)
 
     def test_a_scope_prints_as_something_a_person_can_read(self):
         """It goes on the wire, in `ExplainedTaskResponse.scope`, so it has to say which
@@ -446,7 +453,7 @@ class TestTheSheetTierThroughTheQueue:
             if child.produced_by is not None
         }
         assert stamps[USETYPE_SHEET] == TASK_STRUCTURE_SHEETS
-        assert stamps[USETYPE_SUMMARY] == TASK_PROFILE_SHEET
+        assert stamps[USETYPE_PROFILE] == TASK_PROFILE_SHEET
         assert stamps[USETYPE_RECORD] == TASK_EXTRACT_SHEET
 
     def test_a_callers_max_rows_reaches_the_queue_row(self, db_session, workbook_bytes):

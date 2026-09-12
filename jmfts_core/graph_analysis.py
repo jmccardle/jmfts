@@ -746,7 +746,34 @@ class NeighborNode:
     direction: str
 
 
-def compute_neighbors(
+@dataclass
+class NeighborWalk:
+    """A bounded walk together with what the walk learned about its own bounds.
+
+    ``truncated`` is a MEASUREMENT and not an inference. The browse endpoint used to read
+    it off the page length (``len(nodes) >= limit``), which is wrong in both directions:
+    a walk that ran dry on exactly ``limit`` nodes reads as cut, and a walk that stopped
+    one node short of a thousand more reads the same as one that saw everything. That is
+    the defect ``ANN_INDEX_HEALTH.md`` 1.5 records on the retrieval side — a short page
+    there is short-because-nothing-matched far more often than short-because-the-walk-
+    stopped, and the flag fired on 86.3% of the suite's ANN pages with nothing wrong.
+    Here the producer knows, because it overshoots the node cap by exactly one.
+
+    ``depth_exhausted`` is only measured when the caller asks (``measure_depth``); see
+    ``walk_neighbors``. It is deliberately NOT surfaced on the browse response: a caller
+    who asked for ``max_depth`` hops and received every node within ``max_depth`` hops was
+    not truncated, they were answered. Depth is an ordinary predicate on the result set,
+    the way a ``link_types`` filter is, and a predicate needs no flag.
+    """
+
+    nodes: list[NeighborNode]
+    #: A ``limit + 1``th neighbour exists within ``max_depth``; ``nodes`` is a cut of the set.
+    truncated: bool
+    #: Reachable nodes lie past ``max_depth``. Only meaningful with ``measure_depth=True``.
+    depth_exhausted: bool
+
+
+def walk_neighbors(
     session: Session,
     root_id: int,
     *,
@@ -754,14 +781,22 @@ def compute_neighbors(
     direction: str = "both",
     link_types: Optional[Iterable[str]] = None,
     limit: int = 200,
-    raise_on_truncation: bool = False,
-) -> list[NeighborNode]:
+    measure_depth: bool = False,
+) -> NeighborWalk:
     """Breadth-first walk of the ``DocumentLink`` graph outward from ``root_id``.
 
     The read-side counterpart to ``create_link``/``delete_link``: the link graph is a
     real graph but the only exposed reads were per-document ``get_links``. This gives the
     transitive picture — everything reachable within ``max_depth`` hops — cycle-guarded
     (each node is emitted once, at its shortest hop) and bounded by ``limit`` total nodes.
+
+    **What bounds the cost is ``limit``, not ``max_depth``.** ``next_frontier`` is built
+    inside the loop that fills ``reached``, so every frontier node is also a reached node
+    and the sum of all frontier sizes is at most ``limit``. Total edges iterated is
+    therefore about ``limit × degree`` however deep the walk runs; depth buys round trips
+    (two per hop at ``direction="both"``), not expansion. ``MEASURE_TYPED_WALK.md`` measures
+    both ends of that: 3.6–8.6 ms at ``limit=200``, and 17.4–20.8 s once the cap is removed
+    and a depth-3 walk reaches 36,822 of 36,823 documents.
 
     Args:
         root_id: the document to start from (not itself emitted).
@@ -770,20 +805,15 @@ def compute_neighbors(
             (target→source), or ``both``.
         link_types: if given, only traverse edges whose ``link_type`` is in this set.
         limit: stop once this many distinct neighbors have been collected.
-        raise_on_truncation: raise :class:`GraphWalkTruncated` instead of returning a
-            partial walk. A browse endpoint wants the partial list and a "there is more"
-            flag; a caller that needs the WHOLE reachable set — coreference, per
-            ``SPRINT_0_3_0.md`` 7.3 — cannot tell a complete cluster from a cut one and
-            must not be handed the cut one silently.
+        measure_depth: also spend one hop establishing whether anything is reachable past
+            ``max_depth``. Only a caller whose question is "the WHOLE reachable set" needs
+            it — for a caller who chose ``max_depth``, depth is a predicate they were
+            answered on rather than a bound that cut them.
 
     Returns:
-        Neighbors ordered by (depth, discovery), each carrying the first edge that
-        reached it. The root is never included; ``limit`` caps the result — the caller
-        should surface truncation to the user rather than treat it as the whole graph.
-
-    Raises:
-        GraphWalkTruncated: only with ``raise_on_truncation``, when either bound cut the
-            walk with reachable nodes still unvisited.
+        A :class:`NeighborWalk`: neighbors ordered by (depth, discovery), each carrying
+        the first edge that reached it, never more than ``limit`` of them and never one
+        past ``max_depth``; plus whether either bound had more behind it.
     """
     type_filter = list(link_types) if link_types else None
     follow_out = direction in ("outgoing", "both")
@@ -795,13 +825,16 @@ def compute_neighbors(
     frontier: list[int] = [root_id]
     depth = 0
 
-    # A walk that must know whether it saw everything overshoots each bound by exactly one
+    # A walk that must know whether it saw everything overshoots the bound by exactly one
     # and then measures. Stopping AT a bound is ambiguous — a frontier is non-empty whether
     # or not expanding it would find anything new, and a walk that collected `limit` nodes
-    # may or may not have had a 201st. One extra hop and one extra node settle both, and
-    # cost nothing when nothing is truncated. Only `raise_on_truncation` pays for it.
-    node_cap = limit + 1 if raise_on_truncation else limit
-    depth_cap = max_depth + 1 if raise_on_truncation else max_depth
+    # may or may not have had a 201st. One extra node settles the node cap, and it is free
+    # except at the exact boundary: the break fires mid-edge-list on an already-fetched hop
+    # unless `reached` landed precisely on `limit`, which is the one case no page length
+    # could ever have read. The extra HOP that settles the depth cap is a real round trip
+    # and only `measure_depth` pays for it.
+    node_cap = limit + 1
+    depth_cap = max_depth + 1 if measure_depth else max_depth
 
     while frontier and depth < depth_cap and len(reached) < node_cap:
         depth += 1
@@ -860,21 +893,15 @@ def compute_neighbors(
                 break
         frontier = next_frontier
 
-    # The overshoot, read back. An extra node means there was a `limit + 1`th; an extra hop
-    # that found anything means `max_depth` was cutting the walk short.
-    if raise_on_truncation:
-        if len(reached) > limit:
-            raise GraphWalkTruncated(
-                f"walk from document {root_id} hit its node cap of {limit}; the reachable "
-                f"set is larger and this result is a cut of it"
-            )
-        beyond = sum(1 for n in reached if n.depth > max_depth)
-        if beyond:
-            raise GraphWalkTruncated(
-                f"walk from document {root_id} hit its depth cap of {max_depth}; "
-                f"{beyond} more node(s) lie past it and this result is a cut of the "
-                f"reachable set"
-            )
+    # The overshoot, read back, and then discarded. An extra node means there was a
+    # `limit + 1`th; an extra hop that found anything means `max_depth` was cutting the walk
+    # short. The two are mutually exclusive by construction: reaching the extra hop at all
+    # requires the node cap not to have fired, and the node cap firing requires it inside
+    # `max_depth`. Whichever is true is the bound that actually stopped the walk.
+    within_depth = [n for n in reached if n.depth <= max_depth]
+    depth_exhausted = len(within_depth) < len(reached)
+    truncated = len(within_depth) > limit
+    reached = within_depth[:limit]
 
     # One query to hydrate titles/usetypes for every reached node.
     if reached:
@@ -889,7 +916,55 @@ def compute_neighbors(
         for node in reached:
             node.title, node.usetype = meta.get(node.document_id, (None, None))
 
-    return reached
+    return NeighborWalk(nodes=reached, truncated=truncated, depth_exhausted=depth_exhausted)
+
+
+def compute_neighbors(
+    session: Session,
+    root_id: int,
+    *,
+    max_depth: int = 2,
+    direction: str = "both",
+    link_types: Optional[Iterable[str]] = None,
+    limit: int = 200,
+    raise_on_truncation: bool = False,
+) -> list[NeighborNode]:
+    """``walk_neighbors`` for a caller that wants the list and a policy on truncation.
+
+    Two callers, two questions, one walk. A browse endpoint wants the partial list and a
+    "there is more" flag, and reads :class:`NeighborWalk` directly. A caller that needs the
+    WHOLE reachable set — coreference, per ``SPRINT_0_3_0.md`` 7.3 — cannot tell a complete
+    cluster from a cut one and must not be handed the cut one silently; it passes
+    ``raise_on_truncation`` and gets a plain list it may trust. The difference between them
+    is what to DO about a cut walk, which is policy, not traversal.
+
+    Raises:
+        GraphWalkTruncated: only with ``raise_on_truncation``, when either bound cut the
+            walk with reachable nodes still unvisited.
+    """
+    walk = walk_neighbors(
+        session,
+        root_id,
+        max_depth=max_depth,
+        direction=direction,
+        link_types=link_types,
+        limit=limit,
+        measure_depth=raise_on_truncation,
+    )
+    if raise_on_truncation:
+        # Node cap first: it is the bound that fired, and reaching the depth probe at all
+        # requires it not to have.
+        if walk.truncated:
+            raise GraphWalkTruncated(
+                f"walk from document {root_id} hit its node cap of {limit}; the reachable "
+                f"set is larger and this result is a cut of it"
+            )
+        if walk.depth_exhausted:
+            raise GraphWalkTruncated(
+                f"walk from document {root_id} hit its depth cap of {max_depth}; more "
+                f"node(s) lie past it and this result is a cut of the reachable set"
+            )
+    return walk.nodes
 
 
 # ---------------------------------------------------------------------------

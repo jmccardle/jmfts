@@ -77,9 +77,10 @@ from jmfts_core.ingest_options import TASK_PARAM_DEFAULTS, resolve_options
 from jmfts_core.models.document import (
     Document,
     USETYPE_CHUNK,
+    USETYPE_CELL,
     USETYPE_RECORD,
     USETYPE_SHEET,
-    USETYPE_SUMMARY,
+    USETYPE_PROFILE,
 )
 from jmfts_core.models.task_queue import WRITE_CHILDREN, WRITE_SELF, WRITE_SUBTREE, TaskQueue
 from jmfts_core.probe import PROBERS_AVAILABLE, detect_format, probe_patterns
@@ -207,6 +208,29 @@ TASK_SUMMARIZE = "summarize"
 #: the one ``structure:semantic`` already uses — a task whose product is more tasks.
 TASK_SUMMARIZE_LLM = "summarize:llm"
 
+#: ``SPRINT_0_5_0.md`` Block C step 11 — hang the summary ``summarize`` already produced
+#: under the derived-tree root as a NODE, with ``summarizes`` links down to the members it
+#: covers. :func:`jmfts_core.rollup_tasks.run_summarize_tree` is the handler.
+#:
+#: **The difference from** :data:`TASK_SUMMARIZE` **is where the summary lives, not what it
+#: says.** ``summarize`` writes ``effective_content@self``: the summary is a FIELD on a
+#: structural node, which makes it a property of the as-written tree. This reads that field
+#: and gives it a node of its own in a PARALLEL tree (3.1), so the summary tree can be
+#: retrieved from, projected down onto the source leaves it covers, and compared against
+#: another derived tree — none of which a field on somebody else's node can do. It calls no
+#: model and no LLM: the vector it copies is the one ``summarize`` computed over exactly
+#: this text, so recomputing it would spend a forward pass to get the same numbers.
+#:
+#: **NOT A ROW OF** :data:`TASK_ROWS`, and for :data:`TASK_SUMMARIZE`'s reason rather than
+#: :data:`TASK_VALIDATE_SHAPE`'s. The three rollup types are enqueued by
+#: :class:`~jmfts_core.rollup_tasks.IngestRollupPlanner` at the instant the settling walk
+#: finds a node's whole subtree complete, because their eligibility is a fact about the
+#: children a node HAS — which is not knowable when ``probe`` finishes and is not stable
+#: while the tree below is still being built. A row in that table would be evaluated once,
+#: from ``(format, patterns, options)``, and would have to name a scope for a node that does
+#: not exist yet.
+TASK_SUMMARIZE_TREE = "summarize:tree"
+
 #: Give one node the vectors that make it retrievable. A ROW OF :data:`TASK_ROWS` SINCE
 #: PHASE 3, and the widest-scoped one: it applies to the leaves of five different rules.
 #:
@@ -238,6 +262,43 @@ TASK_SUMMARIZE_LLM = "summarize:llm"
 #: planner is not called until every chunk under it has finished. See
 #: :func:`jmfts_core.structure_tasks._TreeWriter._write_chunks`.
 TASK_EMBED = "embed"
+
+#: ``SPRINT_0_5_0.md`` Block A step 2 — run one bound SHACL shape against the data graph its
+#: binding's scope resolves to, and write the violation report onto the node the request
+#: minted for it. :mod:`jmfts_core.validate_tasks` is the handler and
+#: :meth:`~jmfts_core.services.ontology_service.OntologyService.validate_binding` is what
+#: enqueues one.
+#:
+#: **NOT A ROW OF** :data:`TASK_ROWS`, **and it cannot be one.** That table is evaluated from
+#: ``(format, patterns, options)`` the moment ``probe`` finishes, and nothing probe measures
+#: decides whether a validation run was ASKED FOR — a shape binding is a statement about a
+#: scope of documents made long after any of them were ingested, and the scope is usually not
+#: one file's subtree at all. A row with no condition would enqueue a validation run for
+#: every uploaded file; a row with a condition would need a pattern nothing measures. The
+#: three ``fetch:*`` types are already outside the table for the mirror-image reason (they
+#: run BEFORE probe has an output), and the shape here is the same one: **a task the REQUEST
+#: enqueues, not one the planner does.** ``scripts/generate_reference`` reports both under
+#: "enqueued by something other than the table", which is where this belongs.
+TASK_VALIDATE_SHAPE = "validate:shape"
+
+#: ``SPRINT_0_5_0.md`` Block B steps 6, 7 and 8 — run one bound shape's ``sh:rule`` set over
+#: the ASSERTED triples its binding's scope resolves to, and replace everything that rule had
+#: derived with what it concludes now. :mod:`jmfts_core.derive_tasks` is the handler,
+#: :mod:`jmfts_core.shacl_rules` the machinery, and
+#: :meth:`~jmfts_core.services.ontology_service.OntologyService.derive_binding` is what
+#: enqueues one.
+#:
+#: **NOT A ROW OF** :data:`TASK_ROWS`, for :data:`TASK_VALIDATE_SHAPE`'s reason exactly: the
+#: table is evaluated from ``(format, patterns, options)`` the moment ``probe`` finishes, and
+#: nothing probe measures says whether somebody bound a shape that carries rules. A row with
+#: no condition would run a derivation for every uploaded file.
+#:
+#: **The one task type in this appliance that writes rows in ``triples`` with**
+#: ``derived_by`` **set.** ``extract:facts`` writes triples too and writes them ASSERTED —
+#: an extractor works from a source document, which is what a NULL ``derived_by`` means
+#: (``models/triple.py``). The two are different layers of the same table and the column is
+#: the only thing that says which.
+TASK_DERIVE_RULE = "derive:rule"
 
 #: The write mode ``probe`` declares (spec 5.3). ``self``, not ``children``: probe writes
 #: this node's own evidence and creates no nodes. Enqueuing follow-on work
@@ -1188,7 +1249,7 @@ TASK_ROWS: tuple[TaskRow, ...] = (
             TASK_STRUCTURE_CONVERSATION,
             TASK_PROFILE_SHEET,
             TASK_EXTRACT_SHEET,
-            usetypes=(USETYPE_CHUNK, USETYPE_RECORD, USETYPE_SUMMARY),
+            usetypes=(USETYPE_CHUNK, USETYPE_RECORD, USETYPE_PROFILE, USETYPE_CELL),
         ),
         params_key="embed",
     ),
@@ -2602,3 +2663,14 @@ from jmfts_core import conversation_tasks  # noqa: E402,F401  (side effect: regi
 # SPRINT_JOBS.md 15.4 S8's three fetchers. AFTER `structure_tasks`, whose `_scope_node`
 # they share with every other handler.
 from jmfts_core import fetch_tasks  # noqa: E402,F401  (side effect: registration)
+
+# SPRINT_0_5_0.md Block A step 2's validator. Last, and it needs nothing from the modules
+# above it: it reads a shape binding, the triples its scope resolves to, and the node the
+# request minted to hold the report. It touches no evidence block and no ingest rung.
+from jmfts_core import validate_tasks  # noqa: E402,F401  (side effect: registration)
+
+# SPRINT_0_5_0.md Block B steps 6-8's rule pass, beside the validator and after it for the
+# same reasons. It imports `jmfts_core.shacl_rules`, which is domain code and imports no task
+# module — deliberately, because a task module that imported its sibling would make the order
+# of the two lines above load-bearing.
+from jmfts_core import derive_tasks  # noqa: E402,F401  (side effect: registration)

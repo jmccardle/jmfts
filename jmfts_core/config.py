@@ -3,7 +3,7 @@
 from typing import ClassVar
 from urllib.parse import quote_plus
 from pydantic import model_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
 
 
@@ -164,7 +164,7 @@ class Settings(BaseSettings):
     embedding_batch_size: int = 32
     token_batch_size: int = 32  # Documents per batch for token-level embedding
 
-    # Embedding windows (see docs/KNOWN-DEFECTS.md, D1)
+    # Embedding windows (see docs/archive/KNOWN-DEFECTS.md, D1)
     #
     # The model handles 8192 tokens. The token-level path is capped far lower
     # because embed_with_tokens runs the transformer with output_attentions=True
@@ -185,7 +185,7 @@ class Settings(BaseSettings):
     # Late interaction settings
     token_top_percent: float = 0.50  # Store top 50% of tokens for tiered benchmarking
 
-    # Chunking (see docs/KNOWN-DEFECTS.md, D2 and D4)
+    # Chunking (see docs/archive/KNOWN-DEFECTS.md, D2 and D4)
     #
     # A hard character cap enforced by chunk_text after splitting, for every
     # strategy. Chunks are produced to be embedded, so the cap is sized to land
@@ -201,8 +201,22 @@ class Settings(BaseSettings):
     # nodes under it. Both are held out: a root is a container with no content, so it
     # cannot match a vector or BM25 query anyway, but its title can match a full-text one
     # and "Entities" is a plausible thing to type. Neither is ever the answer to a search.
-    bm25_exclude_usetypes: list[str] = ["entity", "entities", "summary"]
-    search_exclude_usetypes: list[str] = ["entity", "entities", "summary"]
+    #
+    # `derived` is the ROOT of a derived tree (SPRINT_0_5_0.md 10, `derived_roots.py`), and
+    # it is here for the same sentence: contentless, titled "Derived: summary", and
+    # `to_tsvector(title || content)` would answer a query for "derived" with a container.
+    # The NODES under it carry `summary`, which this list already held out — so the summary
+    # tree is out of a default result set as a whole, and a caller who wants it names the
+    # usetype (a positive `usetype` filter overrides exclusion entirely,
+    # `repositories/search.py:effective_exclusions`) or passes `exclude_types=[]`.
+    #
+    # WHAT AN EXISTING INSTALL LOSES BY THIS: nothing it had. No document carries usetype
+    # `derived` before migration 018 and `summarize:tree`, which are the same release —
+    # 018 mints the first one and it is created by the handler that adds this line. From
+    # here on a default-filtered search will not return a derived-tree ROOT, which is a
+    # contentless container whose only matchable text is the word "Derived".
+    bm25_exclude_usetypes: list[str] = ["entity", "entities", "summary", "derived"]
+    search_exclude_usetypes: list[str] = ["entity", "entities", "summary", "derived"]
 
     # LLM endpoint (any OpenAI-compatible server: llama-server, vLLM, Ollama, ensonet, or
     # a metered web API).
@@ -216,6 +230,10 @@ class Settings(BaseSettings):
     # LLM-backed work is optional. Ingestion, embedding, chunking, indexing and all four
     # search modes run with these empty; only summarize:llm, RAPTOR, fact extraction and
     # synthesis need them.
+    # `llm_base_url` is the SERVER ROOT and must not end in `/v1` — `llm_client.py` appends
+    # it. Named here as well as in `.env.example` because every OpenAI-compatible server
+    # advertises the `/v1` form, so the value an operator is handed is one segment too long
+    # and the resulting 404 at `/v1/v1` arrives per task rather than at startup.
     llm_base_url: str = ""  # env JMFTS_LLM_BASE_URL
     llm_model: str = ""  # env JMFTS_LLM_MODEL
     llm_timeout: float = 0  # env JMFTS_LLM_TIMEOUT; 0 = use ensonet_timeout
@@ -258,6 +276,35 @@ class Settings(BaseSettings):
     extraction_entity_similarity_threshold: float = 0.8  # string similarity for entity resolution
     extraction_temperature: float = 0.1
     extraction_max_tokens: int = 4096
+
+    # SHACL — how large a scope one validation or derivation run may be given. Open question
+    # 6.3 of `docs/SPRINT_0_5_0.md`, taken 2026-09-10; the spelling of this field is pinned by
+    # `rdf/shacl.MAX_SCOPE_DOCUMENTS_SETTING` and it is read at exactly one place,
+    # `services/ontology_service._pin_scope`, which is the front door both runs go through.
+    #
+    # 512 IS DELIBERATELY CONSERVATIVE AND IS NOT A CAPACITY LIMIT. `pyshacl` has no streaming
+    # mode, so a scope that does not fit in memory is a refusal rather than a slow success, and
+    # a run has no partial progress: an OOM kill is followed by a retry that allocates the same
+    # graph and dies the same way. MEASURED over ten rungs through a real worker
+    # (`docs/MEASURE_SHACL_SCOPE.md`): 138,000 documents peaks at 2,039–2,042 MiB — the cpu
+    # worker pod's whole memory *request* — and the graph build, not `pyshacl`, holds 95% of
+    # that. 512 is far below every rung anybody ran, which is the point: a fresh install
+    # refuses long before it can be killed, and an operator who wants a larger scope raises
+    # this knowing what it buys. Where to raise it to is recorded in 6.3: 138,000 for a worker
+    # that runs one validation, 99,000 for a fleet that runs them back to back, because a
+    # worker does not give the memory back (VmRSS after a drain is 93–95% of the peak, and
+    # three consecutive runs came to 1.33x a single run's).
+    #
+    # None means unbounded — `_pin_scope` skips the count entirely — and it is IN-PROCESS
+    # ONLY. Measured 2026-09-10: `JMFTS_SHACL_MAX_SCOPE_DOCUMENTS` set to blank, `null` or
+    # `None` is a pydantic `int_parsing` error at startup, not "no bound", so an operator
+    # configuring by environment cannot reach it. An earlier version of this comment said it
+    # was a supported value without saying supported from where, and `.env.example` says the
+    # narrower thing.
+    #
+    # `0` IS reachable and is not unbounded either: the guard is `total > bound`, so zero
+    # refuses every scope holding a document. Nothing rejects it at startup.
+    shacl_max_scope_documents: int | None = 512  # env JMFTS_SHACL_MAX_SCOPE_DOCUMENTS
 
     # Cross-encoder reranker (second stage for ?rerank=true)
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
@@ -355,9 +402,14 @@ class Settings(BaseSettings):
     # dependency and is not installed — so the one thing it produced would have failed at
     # `create_engine`. The synchronous `database_url` above is the only connection string.
 
-    class Config:
-        env_prefix = "JMFTS_"
-        env_file = ".env"
+    # Pydantic v2 settings key. `docs/SPRINT_0_4_0.md` Block D step 13 moved the thirteen
+    # class-based `Config` bodies to `model_config`; v1's inner class still works in 2.12
+    # but only through a deprecation shim that v3 drops. Twelve of the thirteen are
+    # contract models and took `ConfigDict`. This one is the exception and takes
+    # `SettingsConfigDict`: `env_prefix` and `env_file` are pydantic-SETTINGS keys, absent
+    # from `ConfigDict`, and the wrong one here type-checks as an unknown-key error while
+    # still reading correctly at runtime — the kind of divergence that survives a test run.
+    model_config = SettingsConfigDict(env_prefix="JMFTS_", env_file=".env")
 
 
 @lru_cache

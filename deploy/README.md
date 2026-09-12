@@ -166,12 +166,15 @@ for a one-shot batch or a smoke test.
 ## Kubernetes
 
 ```
+docker build -f Dockerfile -t jmfts-api:latest .
 docker build -f Dockerfile.worker -t jmfts-worker-cpu:latest .
 docker build -f Dockerfile.worker -t jmfts-worker-gpu:latest \
        --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu126 .
 
 kubectl -n jmfts create secret generic jmfts-worker-db \
         --from-literal=JMFTS_DB_PASSWORD='...'
+kubectl -n jmfts create secret generic jmfts-api-token \
+        --from-literal=JMFTS_API_TOKEN="$(openssl rand -base64 32)"
 kubectl apply -k deploy/k8s/
 ```
 
@@ -179,6 +182,26 @@ The manifests carry no registry, no storage class and no node labels, so they ap
 cluster; `deploy/k8s/kustomization.yaml` is the single place to point them at your images.
 The database is assumed reachable at `postgres.jmfts.svc.cluster.local` — change it in
 `10-config.yaml` if yours lives elsewhere.
+
+### The API, and which path to probe
+
+`30-api.yaml` is the API Deployment and its Service. It exists mostly for the probes, and
+the probe path is the part worth reading before you write your own manifest:
+
+| path | costs | needs a token | use it as a probe |
+|---|---|---|---|
+| `/health` | one `SELECT 1` | no | **yes** — liveness, readiness and startup |
+| `/` | one `SELECT 1` | yes | no — kubelet sends no `Authorization` header |
+| `/health/llm` | up to two outbound HTTP calls, 5 s timeout each | yes | never |
+
+`/health` used to run the LLM probe, so the obvious choice for a `livenessProbe` could
+block for around ten seconds on a host this pod does not own and restart a healthy
+appliance. It is now the cheap one, and the LLM probe has its own path with its own
+credential.
+
+`JMFTS_API_TOKEN` must be PINNED in a Secret for a multi-replica Deployment. Left blank,
+each replica generates its own ephemeral token and prints it to its boot log, so which
+token works depends on which pod answered.
 
 Autoscaling needs [KEDA](https://keda.sh) and is applied separately:
 

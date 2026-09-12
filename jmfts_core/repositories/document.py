@@ -32,8 +32,8 @@ the partial retrieval indexes of Part 2.2 and left it there.
 
 import hashlib
 from datetime import datetime
-from typing import Optional, Any, Sequence
-from sqlalchemy import and_, select, func, nullslast, text
+from typing import NamedTuple, Optional, Any, Sequence
+from sqlalchemy import and_, delete, select, func, nullslast, text, tuple_
 from sqlalchemy.orm import Session, joinedload
 
 from jmfts_core.access import (
@@ -120,6 +120,54 @@ class PopulatedMoveError(RuntimeError):
             f"Document {document_id} has {child_count} child(ren) and cannot be moved by "
             "a children-mode task: the move would rewrite every descendant's path and "
             "invalidate the rollups above it. Use a subtree-mode correction instead."
+        )
+
+
+class DerivedLink(NamedTuple):
+    """One edge a rule wants to exist, as handed to :meth:`DocumentRepository.rederive_links`.
+
+    A tuple rather than a contract class: this crosses no wire and no process boundary — it
+    is the argument shape of one repository method — and ``jmfts-client``'s contracts are
+    the definition of shapes that DO cross one. ``metadata`` is optional and separate from
+    ``score`` because ``score`` is what the UNIQUE row carries and ranks on; the rest is the
+    rule's own record of how it got there.
+    """
+
+    source_id: int
+    target_id: int
+    link_type: str
+    score: float = 1.0
+    metadata: Optional[dict] = None
+
+
+class DerivedLinkCollisionError(RuntimeError):
+    """A re-derivation's output collides with an edge the rule does not own.
+
+    ``docs/SPRINT_0_5_0.md`` Block D step 16. After ``DELETE WHERE derived_by = :rule`` the
+    rule owns none of the surviving edges, so a UNIQUE (source, target, type) conflict means
+    something else — an assertion, or another rule — already holds that edge.
+
+    Deliberately NOT absorbed by ``ON CONFLICT DO NOTHING``, which is the failure this
+    exists to prevent: the rule's output would be silently incomplete, the re-run would
+    report success, and the missing edge would be indistinguishable from one the rule chose
+    not to produce. Deliberately not an overwrite either — that destroys an assertion
+    nobody asked to lose. The caller decides: retract the conflicting edge, or narrow the
+    rule.
+
+    Deliberately not a ValueError: every argument was well formed and the refusal is about
+    the state of the graph.
+    """
+
+    def __init__(self, rule: str, collisions: list[tuple[int, int, str]]):
+        self.rule = rule
+        self.collisions = collisions
+        shown = ", ".join(f"({s}->{t}, {ltype!r})" for s, t, ltype in collisions[:5])
+        more = f" and {len(collisions) - 5} more" if len(collisions) > 5 else ""
+        super().__init__(
+            f"Rule {rule!r} would produce {len(collisions)} edge(s) that already exist under "
+            f"a different provenance: {shown}{more}. Re-derivation replaces only what the "
+            "rule itself produced; claiming an asserted edge would destroy the assertion, "
+            "and skipping it would leave this rule's output incomplete without saying so."
         )
 
 
@@ -1087,6 +1135,85 @@ class DocumentRepository:
         self.session.add(link)
         self.session.flush()  # Get the ID and created_at
         return link
+
+    def rederive_links(self, rule: str, links: Sequence[DerivedLink]) -> tuple[int, int]:
+        """Replace everything ``rule`` produced with ``links``. Returns (deleted, inserted).
+
+        ``docs/SPRINT_0_5_0.md`` Block D step 16, and it is Block B step 8's discipline for
+        triples applied to edges. ``DocumentLink.derived_by`` (migration 019) makes
+        ``WHERE derived_by = :rule`` a COMPLETE description of what one rule produced, so a
+        re-run deletes that set and rebuilds it: no diffing, no reconciliation, no question
+        about what a changed rule leaves behind. A rule that writes rows it cannot later
+        identify is a rule whose output can only be removed by dropping everything derived.
+
+        Delete-then-insert, in one session, so the two halves are one transaction. Asserted
+        edges (``derived_by IS NULL``) and other rules' edges are outside the DELETE's scope
+        and are never touched — which is exactly the property the column bought and the
+        reason "delete every ``contains-keyword`` edge" was not an acceptable substitute.
+
+        A requested edge that already exists under NULL or another rule is a
+        :class:`DerivedLinkCollisionError`, not a silent skip. After the DELETE, this rule
+        owns none of the surviving rows, so a UNIQUE conflict means the rule is trying to
+        claim an edge somebody else asserted. ``ON CONFLICT DO NOTHING`` there would leave
+        the rule's output incomplete with nothing reporting it, and overwriting would
+        destroy an assertion; refusing is the only answer that loses neither.
+
+        **NOTHING IN ``jmfts_core`` CALLS THIS, and that is scheduled rather than
+        overlooked.** No rule writes links through it yet — the first writer is the
+        reprojection pattern of 0.5.0 Part 3.1, and Part 3.4's predicate domain is not
+        built. (``rollup_tasks.py:1173`` stamps ``derived_by`` on its own edges without
+        going through here, because a roll-up mints edges once rather than re-deriving a
+        set.) This ships with migration 019 so that the first rule is a rule and not a rule
+        plus a column plus a lifecycle.
+
+        Which deadcode mode reports it is the useful detail. ``tests/test_link_lifecycle.py``
+        drives it, and the default ``scripts.deadcode_scan`` counts ``tests/`` as callers,
+        so the default mode does NOT flag it; ``--published-only`` does, because the only
+        caller lives outside the wheel. That is the mode's whole purpose and this paragraph
+        is the record that the finding is expected.
+        """
+        deleted = self.session.execute(
+            delete(DocumentLink).where(DocumentLink.derived_by == rule)
+        ).rowcount
+        if not links:
+            self.session.flush()
+            return deleted, 0
+
+        wanted = {(link.source_id, link.target_id, link.link_type) for link in links}
+        if len(wanted) != len(links):
+            raise ValueError(
+                f"rederive_links({rule!r}) was given the same (source, target, type) twice; "
+                "the UNIQUE constraint admits one row per edge and this call has no way to "
+                "know which score was meant."
+            )
+        # After the DELETE this rule owns nothing, so anything still standing on one of
+        # these keys belongs to another writer. One query, before any insert, so the
+        # refusal is not half-applied.
+        standing = self.session.execute(
+            select(DocumentLink.source_id, DocumentLink.target_id, DocumentLink.link_type).where(
+                tuple_(DocumentLink.source_id, DocumentLink.target_id, DocumentLink.link_type).in_(
+                    sorted(wanted)
+                )
+            )
+        ).all()
+        if standing:
+            raise DerivedLinkCollisionError(rule, sorted(tuple(row) for row in standing))
+
+        self.session.add_all(
+            [
+                DocumentLink(
+                    source_id=link.source_id,
+                    target_id=link.target_id,
+                    link_type=link.link_type,
+                    score=link.score,
+                    link_metadata=dict(link.metadata) if link.metadata else {},
+                    derived_by=rule,
+                )
+                for link in links
+            ]
+        )
+        self.session.flush()
+        return deleted, len(links)
 
     def get_links(
         self,

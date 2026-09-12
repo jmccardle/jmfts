@@ -97,6 +97,52 @@ _PR_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 #: newline would end the row.
 _MARKDOWN_UNSAFE = re.compile(r"[|\r\n]")
 
+#: How fast :func:`_scan` runs over the empty rows a wide ``<dimension>`` pads with.
+#: MEASURED, 2026-09-05, openpyxl 3.1.5 on CPython 3.11: three synthetic sheets of five
+#: cells declaring 8.2e6, 3.3e7 and 8.2e7 cells scanned in 0.66s, 2.87s and 6.87s, which is
+#: 1.25e7, 1.14e7 and 1.19e7 declared cells per second. It is here so the refusal below can
+#: say what the scan WOULD have cost — "2.75e11 cells" means nothing to an operator and
+#: "6 hours" means something — and so the derivation of :data:`DECLARED_CELLS_MAX` is
+#: arithmetic somebody can redo rather than a number to trust. A cell holding a value costs
+#: more than this; the rate is the padding rate, which is what the pathological case is
+#: made of.
+SCAN_CELLS_PER_SECOND = 1.2e7
+
+#: The largest ``declared_rows * declared_cols`` :func:`measure_sheet` will scan.
+#: ``docs/SPRINT_0_4_0.md`` Block B step 4, and a RESOURCE BOUND like
+#: :data:`DISTINCT_TRACKED_MAX` rather than one of 8.8's thresholds — nothing branches on
+#: it and no shape is decided by it.
+#:
+#: **Why the declaration and not a clock.** ``ReadOnlyWorksheet._cells_by_row`` fills the
+#: gap between two ``<row r="...">`` indices by yielding an empty row per missing index,
+#: each one ``max_column`` wide, and ``max_column``/``max_row`` come from ``<dimension>``.
+#: So a five-cell sheet whose rows are numbered 1, 16777214 and 16777217 under
+#: ``<dimension ref="A1:XFE16777217"/>`` makes :func:`_scan`'s inner loop run 2.75e11
+#: times. Nothing downstream ends it: ``repositories/task_queue.py:458`` says
+#: ``lease_seconds`` bounds how long a live worker may go without beating and not how long
+#: a task may run, the heartbeat thread keeps beating, and ``ingest_worker.py:288`` says
+#: the thread cannot interrupt the handler — so that one file removes a worker from the
+#: fleet permanently. A wall clock would stop it and would also be untestable and
+#: unreproducible: two workers on different hardware would disagree about the same file,
+#: and the same file would pass and fail on the same worker under different load. The
+#: declared extent is a property of the bytes, so the answer is the same everywhere.
+#:
+#: **Where the number comes from.** Two measurements, both taken 2026-09-05:
+#:
+#: * ``<dimension>`` read out of 35,547 worksheet parts in 11,447 real workbooks
+#:   (``datasets/corpus-fuse`` open-web, ``datasets/lo-qa``, ``datasets/poi-testdata``).
+#:   Sheets declaring more than 1e6 cells: 249. More than 1e7: 17. More than 5e7: 5. More
+#:   than 1e8: 4. More than 1e9: 3 — which is exactly the three failures Block B measured.
+#:   The four above this bound are 2.7e11, 1.7e10, 1.1e9 and 3.3e8 cells and every one of
+#:   them declares the whole grid or more; the largest accepted is 6.3e7. The cut lands in
+#:   a 5x gap in the distribution rather than through a cluster.
+#: * :data:`SCAN_CELLS_PER_SECOND`, the rate the padded rows are scanned at.
+#:
+#: 1e8 cells is therefore about 8 seconds of CPU for one sheet — under a tenth of
+#: ``Settings.worker_lease_seconds`` (90) — while the four refused sheets are 27 seconds,
+#: 90 seconds, 24 minutes and 6.4 hours. Raising this costs exactly that time, per sheet.
+DECLARED_CELLS_MAX = 100_000_000
+
 
 class WorksheetPartMissing(ValueError):
     """The workbook does not resolve this sheet's name to a part in the package.
@@ -104,6 +150,34 @@ class WorksheetPartMissing(ValueError):
     Raised rather than returning a merged-cell count of zero. Zero merges and "the sheet's
     XML could not be found" are different facts, and a profile that recorded the second as
     the first would put a measurement into the record that nothing measured.
+    """
+
+
+class DeclaredExtentTooLarge(ValueError):
+    """The sheet declares more cells than :data:`DECLARED_CELLS_MAX`. Step 4.
+
+    A ``ValueError`` subclass so ``task_errors.classify_exception`` grades it PERMANENT,
+    which is the correct grade and not a convenient one: a declared extent is a string in
+    the file's own ``<dimension>`` element and does not shrink between attempts. Retrying
+    it would spend the budget three times over on the one input where a single attempt
+    already costs more than the worker.
+
+    It is a refusal and not a truncation. Scanning the first ``DECLARED_CELLS_MAX`` cells
+    and reporting the result would put a measurement of part of a sheet into a record whose
+    every other field means the whole sheet — ``fill_ratio``, ``distinct_count`` and
+    ``is_unique`` would each be a number nobody could tell from the real one.
+    """
+
+
+class SheetIsNotAWorksheet(ValueError):
+    """The workbook resolves this name to something with no cell grid. Step 5.
+
+    A chartsheet — 135 of 10,702 open-web workbooks carry one (``docs/SPRINT_0_4_0.md``
+    Block B) — is a ``sheet`` in ``xl/workbook.xml`` and is named in
+    ``workbook.sheetnames``, so it reaches :func:`measure_sheet` exactly like a worksheet
+    and then has no ``max_row`` at all. Left alone that is an ``AttributeError`` reading
+    ``'Chartsheet' object has no attribute 'max_row'``, which is already PERMANENT and
+    tells the operator nothing about the file. This says what the sheet is.
     """
 
 
@@ -496,8 +570,20 @@ def measure_sheet(
     ``with_sketches`` false is for a caller that wants the measurements on an install with
     no ``datasketch``. It is not the default: a column with no sketch is invisible to 8.6's
     containment search whatever its cardinality, and going without has to be asked for.
+
+    **Two things it refuses before it scans anything** (``docs/SPRINT_0_4_0.md`` Block B
+    steps 4 and 5, both reproduced against real workbooks in 0.3.0). A name that resolves
+    to a chartsheet has no grid to measure — :class:`SheetIsNotAWorksheet`. A sheet whose
+    ``<dimension>`` declares more than :data:`DECLARED_CELLS_MAX` cells costs more to scan
+    than the worker is worth — :class:`DeclaredExtentTooLarge`. Both checks read what is
+    already read here, so neither costs a pass over the part, and both are named
+    ``ValueError`` subclasses so a caller can tell them from a bug.
     """
     openpyxl = require_openpyxl()
+    # Tier 2, at the point of use like `require_openpyxl` itself: `tests/test_office_
+    # packaging.py` fails if either import reaches the application's import path.
+    from openpyxl.chartsheet import Chartsheet
+
     # `data_only=True`: a profile measures VALUES. `=SUM(B2:B9)` is not a value, and a
     # column of them would count as text with 1,284 distinct strings. The cost is that a
     # workbook whose formulas were never evaluated by Excel — one openpyxl itself wrote —
@@ -512,8 +598,40 @@ def measure_sheet(
                 "stored bytes do not describe the same workbook"
             )
         worksheet = workbook[sheet_name]
+        # Step 5. `Chartsheet` is what `read_only=True` hands back for a `<sheet>` whose
+        # relationship targets `xl/chartsheets/`; the `iter_rows` arm is the same question
+        # asked of whatever openpyxl adds next, and both say which class arrived rather
+        # than which attribute was missing.
+        if isinstance(worksheet, Chartsheet) or not hasattr(worksheet, "iter_rows"):
+            raise SheetIsNotAWorksheet(
+                f"the workbook resolves {sheet_name!r} to a "
+                f"{type(worksheet).__name__}, which has no cell grid: it is a sheet tab "
+                "holding a chart drawn from cells that live on some OTHER sheet. There is "
+                "nothing here to measure, and a profile reporting zero rows and zero "
+                "columns would be indistinguishable from an empty worksheet"
+            )
         declared_rows = worksheet.max_row
         declared_cols = worksheet.max_column
+        # Step 4. Both are None for a sheet that declares no `<dimension>`, and that case
+        # is deliberately NOT guarded: with no declaration `_cells_by_row` pads with an
+        # EMPTY tuple rather than a `max_column`-wide one, so the gap-filling loop costs
+        # one iteration per missing row index instead of `max_column` of them, and the
+        # scan finishes. The declaration is what makes the pad wide, so the declaration is
+        # what is bounded.
+        if declared_rows is not None and declared_cols is not None:
+            declared_cells = declared_rows * declared_cols
+            if declared_cells > DECLARED_CELLS_MAX:
+                raise DeclaredExtentTooLarge(
+                    f"sheet {sheet_name!r} declares {declared_rows:,} rows by "
+                    f"{declared_cols:,} columns = {declared_cells:,} cells, over the "
+                    f"{DECLARED_CELLS_MAX:,} this appliance will scan for one sheet "
+                    f"(~{declared_cells / SCAN_CELLS_PER_SECOND:,.0f}s against a "
+                    f"~{DECLARED_CELLS_MAX / SCAN_CELLS_PER_SECOND:,.0f}s budget). The "
+                    "cells that hold a value may be few — a declared extent is what the "
+                    "writer put in <dimension>, not what it filled — but the scan is over "
+                    "the declared extent, so this sheet cannot be profiled without taking "
+                    "the worker out of the fleet for the duration"
+                )
         scanned = _scan(
             worksheet,
             render_cell_budget=render_cell_budget,

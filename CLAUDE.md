@@ -38,6 +38,22 @@ uvicorn jmfts_core.rest.main:app --host 0.0.0.0 --port 8100 --reload
 # docstrings via build_openapi_tags(), so there is no separate list to keep current.
 #   http://localhost:8100/docs
 
+# What this appliance accepts, asked without sending it anything: installed extras, whether
+# it can produce a vector at all, the formats it identifies from the bytes, the ingest entry
+# points, the retrieval methods and their weights, and the usetypes held out of every result
+# set. `?corpus=true` adds the counts that say whether a method will return anything here.
+# Answered from the live registries; it makes no network call.
+#   GET /capabilities
+#
+# Health: `/health` is the CHEAP one (one SELECT 1, no token) and is the probe path.
+# `/health/llm` runs the LLM reachability probe — two outbound calls at 5 s each — and
+# needs a token. `/` is the same cheap check but gated. See deploy/k8s/30-api.yaml.
+#
+# What is NOT protected by any access-control root. A document under no ACR is readable and
+# writable by anyone with a token, which is the default; this is how to ask which documents
+# are in that state. Owner-only.
+#   GET /access/audit
+
 # Ingest worker (drains the task queue; --runner-url points it at another JMFTS for vectors)
 jmfts-worker
 jmfts-worker --runner-url http://the-gpu-box:8100
@@ -85,7 +101,7 @@ git config core.hooksPath .githooks
 
 ### Auditing for dead code
 
-**Do not run `vulture` directly on this tree.** It reports 258 findings and almost none
+**Do not run `vulture` directly on this tree.** It reports 270 findings and almost none
 are real: `@expose` and `@register_task_handler` make about a hundred functions reachable
 with no in-repo caller, and Pydantic fields, SQLAlchemy columns and the generated client
 account for most of the rest.
@@ -96,15 +112,34 @@ python -m scripts.deadcode_scan                  # what nothing in the repo call
 python -m scripts.deadcode_scan --published-only # what nothing in the WHEEL calls
 ```
 
+`scripts/deadcode_scan.py` finds vulture with `shutil.which`, so the commands above report
+"vulture is not installed" when it lives in `.venv/bin` and `.venv/bin` is not on `PATH`.
+Prefix it: `PATH=.venv/bin:$PATH ./.venv/bin/python -m scripts.deadcode_scan`.
+
 The script builds its allowlist from the **live** registries — it imports the app and
 reads `REGISTRY`, `TASK_HANDLERS`, the mounted route table, contract `model_fields`, the
 SQLAlchemy mappers — so deleting an `@expose` drops its name from the allowlist the same
 day. A checked-in list of excused names would hide exactly what the audit is for. That
-takes 258 findings down to 13.
+takes 260 findings down to 12, read 2026-09-10 (770 names excused). It was 17 on 2026-09-05
+and 12 on 2026-09-06, and the five that cleared are the reason to run the scan rather than
+maintain a list: `SPRINT_0_5_0.md`
+step 11 landed and gave `jmfts_core/derived_roots.py` and the two ledger readers in
+`jmfts_core/sql/__init__.py` their callers on the same day, with no edit to any allowlist.
+One survivor is still in that file — `derived_roots.py:157 derived_root_ids`, which says so
+at the definition. **The count held at 12 across four days and sixteen commits, and that is
+a reading too, not a target**: the raw number moved 258 → 270 over the same window, which is
+the allowlist doing its job rather than the tree getting cleaner. `--published-only` reads
+42. Run the scan rather than trusting any of these.
 
 Two questions, two modes. The default counts `tests/` and `scripts/` as callers. The
-`--published-only` mode does not, which surfaces code whose only caller lives outside
-`tests/test_readme_links.py::PUBLISHED` — reachable in the repository, dead in the wheel.
+`--published-only` mode does not, which surfaces code whose only caller lives outside the
+WHEEL — `pyproject.toml` packages `jmfts_core*` and `jmfts_batch*` and nothing else, so
+code reachable only from `tests/` or `scripts/` is reachable in the repository and dead in
+an installed appliance. (Both of those directories ARE in
+`tests/test_readme_links.py::PUBLISHED` — that constant is what the public *repository*
+carries, which is a different question from what the wheel carries. `scripts/deadcode_scan.py`
+cites it the same wrong way at its `REFERENCE_ONLY` definition; the mode is right, the
+citation is not.)
 
 Neither mode is a delete list. Coverage answers a different question again: 0% covered
 means untested, not dead. `jmfts_core/arxiv_fetch.py` is 0% and is reached through the
@@ -155,6 +190,21 @@ python -m scripts.generate_client
 
 `tests/test_client_codegen.py` fails if it is stale, and `tests/test_client_roundtrip.py`
 drives the generated client against the real app to check the wire, not just the shape.
+
+**`docs/reference/` is generated too, and it is the only part of `docs/` that ships.**
+Three pages — what can be ingested, what gets indexed by which rung, what can be retrieved
+and under which filters — rendered from `INGEST_USETYPES`, `TASK_ROWS`, `ATOMS`, `probe`'s
+format tables, `SEARCH_METHODS` and `Settings`. Tables only; no history, no sprint numbers.
+
+```bash
+python -m scripts.generate_reference           # rewrite the pages
+python -m scripts.generate_reference --check   # exit 1 if any is stale
+```
+
+`tests/test_reference_docs.py` runs the check and also refuses a hand-written page in that
+directory, because the directory is published wholesale. The working record in `docs/`
+explains WHY and stays internal; these say WHAT and ship, which is what the four hundred
+held-back citations otherwise deny an outside reader.
 
 **The two release in lockstep: one number, two wheels, one tag.** `./bump-version.sh`
 sets all three copies of the version. See `docs/RELEASING.md` step 1 for why.
@@ -246,12 +296,20 @@ All settings use `JMFTS_` prefix. See `.env.example` for the full list. Key grou
 
 ## Search Repository (jmfts_core/repositories/search.py)
 
-This is the most complex file (~1375 lines). It implements:
+This is the most complex file (1958 lines, read 2026-09-10; it was ~1666 on 2026-09-06 and
+1906 before this session's merges — it grows every sprint and the number is a reading, not
+a budget). It implements:
 - **Vector search**: HNSW-indexed cosine similarity on document embeddings
 - **MaxSim**: Late interaction scoring — sum of per-query-token max similarities against document tokens
 - **BM25**: Custom inverted index with configurable k1/b parameters
 - **Hybrid search**: Weighted combination of vector + BM25 + optional MaxSim reranking
 - **Full-text search**: PostgreSQL `ts_vector` with trigram fallback
+
+Every retrieval method filters `settled = 'settled'`, and the gate goes INSIDE the scored
+statement rather than after it — a post-filter trims the page after `LIMIT` and returns a
+short page instead of a wrong one. BM25's leaf scan was the last path without that gate
+(fixed 2026-09-10): its postings CTE never reached `documents`, so the join is now
+unconditional rather than tagging along with subtree/`as_of`/access filtering.
 
 ## Code Style
 
@@ -281,10 +339,10 @@ pytest tests/corpus -q             # no database, no optional dependency
 
 ## Documentation
 
-`docs/` is the working record and stays in this tree; the public repository carries only
-`README.md` and `CLAUDE.md`. The subset that ships is
-`tests/test_readme_links.py::PUBLISHED`, and `docs/RELEASING.md` cites that constant
-rather than repeating it.
+`docs/` is the working record and stays in this tree; the public repository carries
+`README.md`, `CLAUDE.md`, `CHANGELOG.md` and the generated `docs/reference/` pages. The
+subset that ships is `tests/test_readme_links.py::PUBLISHED`, and `docs/RELEASING.md` cites
+that constant rather than repeating it.
 
 Over four hundred source comments cite a `docs/` file by part and section. Count them
 rather than trusting the number below, which is a reading and not a rule:
@@ -295,17 +353,67 @@ git grep -hoE "(research/)?[A-Z][A-Z0-9_-]*\.md" -- \
   sort | uniq -c | sort -rn
 ```
 
-Read at 0.2.1+28: `SPRINT_JOBS.md` 156, `INGEST_SPEC.md` 136, `OFFICE_SPEC.md` 76,
-`SPRINT_0_3_0.md` 54, `CORPUS.md` 12, `RELEASING.md` 11, `KNOWN-DEFECTS.md` 7 (D1–D4
-anchors, all resolved), `AGENTIC_KNOWLEDGEBASE.md` 4, `ROADMAP.md` 2,
-`RERANKER_CRITIQUE.md` 1, `research/INTERMEDIATE_FORMATS.md` 1. The command also reports
-`README.md`, `CLAUDE.md` and `INVENTORY-2026-04-05.md`; the first two ship, and the third
-is a corpus filename in `scripts/ingest_missing_steelman.py` rather than a `docs/`
-citation. In the public tree every held-back document is absent by design. **Do not treat
+Read 2026-09-10: `SPRINT_JOBS.md` 158, `INGEST_SPEC.md` 149, `SPRINT_0_5_0.md` 80,
+`OFFICE_SPEC.md` 78, `SPRINT_0_3_0.md` 69, `SPRINT_0_4_0.md` 43, `STRESS_CORPUS.md` 17,
+`ANN_INDEX_HEALTH.md` 14, `CORPUS.md` 12,
+`RELEASING.md` 11, `ROADMAP.md` 9, `MEASURE_SHACL_SCOPE.md` 7, `KNOWN-DEFECTS.md` 7 (D1–D4
+anchors, all resolved; the file moved to `docs/archive/` on 2026-09-04 and the six
+citations that carried a path were updated with it — the bare `KNOWN-DEFECTS D1` form
+names an anchor, not a path, and was left alone),
+`AGENTIC_KNOWLEDGEBASE.md` 4, `archive/ROADMAP_HISTORY.md` 2, `RERANKER_CRITIQUE.md` 1,
+`research/INTERMEDIATE_FORMATS.md` 1, `MEASURE_TYPED_WALK.md` 1,
+`MEASURE_BM25_BOUNDARY.md` 1, `archive/SPRINT_0_4_0_DRAFT.md` 1. The command also reports
+`README.md`, `CLAUDE.md`, `CHANGELOG.md` and `INVENTORY-2026-04-05.md`; the first three
+ship, and the fourth is a corpus filename in `scripts/ingest_missing_steelman.py` rather
+than a `docs/` citation. It also reports `INDEXING.md`, `INGEST.md` and `RETRIEVAL.md`,
+which are the generated `docs/reference/` pages and ship. In the public tree every
+held-back document is absent by design. **Do not treat
 the citations as broken links to fix, and do not delete them** — they are the anchors the
 documents will be republished against.
+
+The numbers move fast and unevenly — `SPRINT_0_5_0.md` went 41 → 80 in four days — which is
+why the command is here and the reading is dated. `docs/PROPOSE_TASK_RESOURCES.md` is new on
+2026-09-10 and has **zero** citations; it is the one recent document the redaction rule below
+does not reach, and that is the rule working rather than an omission.
 
 The public README's "A note on documentation" names the same list in prose, so a reader
 who follows a citation finds out why it goes nowhere. A release that adds a new `docs/`
 file which source comments cite adds its name there too; that is the redaction step, and
-it is the only one — no shipped file is rewritten at release time.
+it is the only one — no shipped file is rewritten at release time. `SPRINT_0_4_0.md` joined
+that prose list when `tests/test_filtered_recall.py` cited it and `tests/` ships.
+`SPRINT_0_5_0.md` joined it on 2026-09-06 for the same reason: nine shipped test files
+cite it. `MEASURE_SHACL_SCOPE.md` joined it the same day on ONE citation
+(`tests/test_atom_declarations.py`), which is the rule working as written — the count does
+not matter, only whether a shipped file names it.
+
+Four more joined it on 2026-09-10, and only one of them is new: `MEASURE_BM25_BOUNDARY.md`
+(`scripts/measure_bm25_boundary.py`), and then `MEASURE_TYPED_WALK.md`
+(`scripts/measure_typed_walk.py`), `ROADMAP_HISTORY.md`
+(`tests/test_search_context_presets.py`, `sql/schema.sql`) and `SPRINT_0_4_0_DRAFT.md`
+(`sql/migrations/017_migration_ledger.sql`), which had been cited from shipped files for
+days without being listed. **`scripts/` is in `PUBLISHED`** — that is the step that was
+missed, twice, and it is why the rule says "shipped file" rather than "source comment".
+`PROPOSE_TASK_RESOURCES.md`, also new on 2026-09-10, is NOT listed, because nothing shipped
+cites it; if something starts to, it joins.
+
+### Where the plans are, and where defects are
+
+| Question | File |
+|---|---|
+| What is 0.4.0 | `docs/SPRINT_0_4_0.md` |
+| What is 0.5.0 | `docs/SPRINT_0_5_0.md` |
+| What was cut, and what verified a scope decision | `docs/ROADMAP_PLANS_AFTER_0_3_0.md` |
+| What is beyond 0.5.0 | the same file, tiers 3 through 6 |
+| What shipped | `ROADMAP.md`, and `docs/archive/ROADMAP_HISTORY.md` behind it |
+| What shipped, for somebody outside this tree | `CHANGELOG.md`, which is published |
+| What the appliance accepts, indexes and retrieves | `docs/reference/`, generated and published |
+
+**An open defect is a numbered step in the current sprint plan, and the entry condition
+is a failing test.** Not an argument that something could go wrong, and not a measurement
+of how often it does. There is no standing defect file: `docs/archive/KNOWN-DEFECTS.md`
+holds D1–D7, all resolved, and is history. `docs/SPRINT_0_4_0.md` Part 0 states the rule
+and works two live cases through it.
+
+`docs/archive/SPRINT_0_4_0_DRAFT.md` and `docs/archive/SPRINT_0_5_0_DRAFT.md` are
+2026-08-24 drafts of those release numbers that plan different sprints. Their step
+numbers are not the shipped ones, and neither shipped plan uses them.

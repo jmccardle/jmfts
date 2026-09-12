@@ -64,8 +64,11 @@ def test_hybrid_search_is_exposed_once():
 
 # --- 1b. Phase E seal: no hand-written domain route escapes generation ----------
 
-# The only hand-written routes allowed to survive on the app are these three
-# infra endpoints, defined in jmfts_core/rest/main.py (health probes + non-sensitive config).
+# The only hand-written routes allowed to survive on the app are these four
+# infra endpoints, defined in jmfts_core/rest/main.py (health probes + non-sensitive
+# config). `/capabilities` is deliberately NOT among them: an integrator asking the
+# appliance what it accepts should get that answer through the generated client like any
+# other operation, so it is an @expose'd MetaService method.
 # They are NOT domain operations, so they stay out of the @expose registry.
 # The /runner routes are here rather than in the registry because @expose generates the
 # domain surface: routes that resolve a principal and enforce subtree access on documents.
@@ -76,6 +79,7 @@ def test_hybrid_search_is_exposed_once():
 INFRA_ALLOWLIST = {
     "/",
     "/health",
+    "/health/llm",
     "/config",
     "/runner/info",
     "/runner/embed",
@@ -168,6 +172,13 @@ class _StubRepo:
 
     def __init__(self, doc):
         self._doc = doc
+        # SearchRepository sets this in __init__ and SearchService._applied reads it after
+        # every search (docs/SPRINT_0_4_0.md Block A step 3). This double does not subclass
+        # the repository, so it does not inherit the attribute and has to carry it. None is
+        # the faithful value, not a placeholder: it is what the real repository holds when
+        # no approximate scan has run, and this stub runs none — it returns a fixed hit
+        # without touching an index. "Nothing to report", which is distinct from "complete".
+        self.scan_truncated = None
 
     def hybrid_search(self, **kwargs):
         return [_StubResult(self._doc, 0.9, "hybrid")]

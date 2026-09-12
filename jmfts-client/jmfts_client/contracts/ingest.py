@@ -78,6 +78,21 @@ class IngestResponse(BaseModel):
         default=None,
         description="Set when was_existing=true; the document that already held this content.",
     )
+    governed: bool = Field(
+        default=False,
+        description=(
+            "Whether an access-control root sits at or above this node. FALSE means the "
+            "node is UNPROTECTED — readable and writable by anyone holding a token — which "
+            "is the documented default, not a fault. It is reported because until now the "
+            "two states were indistinguishable on the wire: a subtree meant to be governed "
+            "whose grant was never issued looked exactly like one meant to be open. "
+            "`GET /access/audit` is the corpus-wide version of the same question."
+        ),
+    )
+    governing_acrs: list[int] = Field(
+        default_factory=list,
+        description="The access-control roots at or above this node. Empty when `governed` is false.",
+    )
 
 
 class PipelineInfo(BaseModel):

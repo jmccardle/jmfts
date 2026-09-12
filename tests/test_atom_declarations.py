@@ -181,7 +181,7 @@ class TestRegistryAndDeclarations:
         # second path would be the one that skips the declaration.
         assert set(TASK_HANDLERS) == set(ATOMS)
 
-    def test_eighteen_atoms_ship(self):
+    def test_twenty_one_atoms_ship(self):
         # SPRINT_JOBS.md Part 2 counted twelve, and an earlier draft said "about fifteen".
         # The number is pinned so that adding a handler is a decision about the design
         # rather than a line that slips in — which is what it was: the thirteenth is
@@ -193,7 +193,28 @@ class TestRegistryAndDeclarations:
         # instead of the two prose ones. Sixteen through eighteen are `fetch:url`,
         # `fetch:arxiv` and `fetch:path` (S8) — three names over one body, because the
         # work is identical and only the pool a deployment routes them to is not.
-        assert len(ATOMS) == 18
+        #
+        # NINETEEN THROUGH TWENTY-ONE ARRIVED 2026-09-06 with 0.5.0, and each is a
+        # decision this comment exists to record. They are unlike the first eighteen in
+        # one way worth stating up front: none of the three is scheduled by
+        # `IngestPlanner` off a document's format, so none of them widens what an upload
+        # runs. All three are enqueued by an explicit request or by the settling walk.
+        #
+        # * `validate:shape` (0.5.0 Block A step 4) — running a SHACL shape over a bound
+        #   scope and writing the report as a node. A rung rather than a synchronous
+        #   endpoint because the scope is a document set and `docs/MEASURE_SHACL_SCOPE.md`
+        #   measures 138,000 documents as comfortable and ~288,000 as an OOM with no
+        #   partial progress; that is a queue's problem, not a request's.
+        # * `derive:rule` (Block B step 9) — `sh:rule` writing triples that carry
+        #   `derived_by`. Separate from `validate:shape` and not a mode of it, because
+        #   validation reads and derivation WRITES, and step 9's access hazard is a
+        #   property of the writing half alone (see
+        #   `tests/test_derived_triple_visibility.py`).
+        # * `summarize:tree` (Block C step 11) — the RAPTOR roll-up, which was a rung
+        #   before this sprint in everything but name: `IngestRollupPlanner` enqueued it at
+        #   settle time and `commit 232cf4f` gave the summary its own node. Registering it
+        #   is what makes `EXPLAIN` able to see it.
+        assert len(ATOMS) == 21
 
     def test_every_evidence_name_is_written_by_something(self):
         # An atom waiting on evidence nothing produces would never be schedulable, and the

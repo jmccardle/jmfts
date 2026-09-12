@@ -2,7 +2,7 @@
 
     file node (usetype="file")
     └── sheet node (usetype="sheet")        <- declared, guaranteed (8.1)
-        └── profile node (usetype="summary")<- measured, one per sheet (8.5)
+        └── profile node (usetype="profile")<- measured, one per sheet (8.5)
 
 All three of 8.2's tasks live here. ``structure:sheets`` writes the sheet list a workbook
 declares about itself, which is the whole of its declared rung; ``profile:sheet`` measures
@@ -52,6 +52,7 @@ from sqlalchemy.orm import Session
 from jmfts_core.atoms import (
     COST_CPU,
     EV_BLOB,
+    EV_CELL,
     EV_MATCHED,
     EV_PROFILE,
     EV_SHEET,
@@ -67,8 +68,10 @@ from jmfts_core.atoms import (
     Fanout,
     fixed,
 )
+from jmfts_core.chunking import ChunkStrategy, chunk_text
 from jmfts_core.config import get_settings
 from jmfts_core.embedding import get_embedding_service
+from jmfts_core.ingest_options import STRUCTURE_CHUNK_PARAMS
 from jmfts_core.ingest_tasks import (
     TASK_EXTRACT_SHEET,
     TASK_PROFILE_SHEET,
@@ -82,12 +85,14 @@ from jmfts_core.models.document import (
     Document,
     SETTLED_IN_FLIGHT,
     SETTLED_SETTLED,
+    USETYPE_CELL,
+    USETYPE_CHUNK,
     USETYPE_RECORD,
     USETYPE_SHEET,
-    USETYPE_SUMMARY,
+    USETYPE_PROFILE,
 )
 from jmfts_core.models.task_queue import TaskQueue, WRITE_CHILDREN
-from jmfts_core.office.cells import read_rows
+from jmfts_core.office.cells import json_value, read_rows
 from jmfts_core.office.sheets import measure_sheet
 from jmfts_core.office.workbook import read_sheets
 from jmfts_core.repositories.blob import BlobRepository
@@ -99,8 +104,10 @@ from jmfts_core.sheet_records import (
     NO_HEADER_REASON,
     SHAPE_BASIS,
     SHAPE_RECORDS,
+    RecordPlan,
     build_records,
     header_labels,
+    plan_record,
 )
 from jmfts_core.structure_tasks import RUNG_DECLARED, RUNG_INFERRED
 
@@ -377,7 +384,7 @@ def _sheet_blob(session: Session, node: Document, *, task_type: str, name: str) 
     produces=(f"{EV_SHEET_MEASUREMENTS}@self", f"{EV_PROFILE}@children", f"{EV_TEXT}@children"),
     write_mode=WRITE_CHILDREN,
     cost_class=COST_CPU,
-    fanout=fixed(1, counts=USETYPE_SUMMARY),
+    fanout=fixed(1, counts=USETYPE_PROFILE),
     child_key=ChildKey(KEY_NATURAL, path="profile.sheet_name"),
 )
 def run_profile_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
@@ -448,12 +455,12 @@ def run_profile_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
 
     content, profile_record = build_profile_content(measurement, fits=service.fits_token_window)
     repo = DocumentRepository(session)
-    frontier = plan_frontier(session, node, produced_by=TASK_PROFILE_SHEET, usetype=USETYPE_SUMMARY)
+    frontier = plan_frontier(session, node, produced_by=TASK_PROFILE_SHEET, usetype=USETYPE_PROFILE)
     profile = repo.create(
         title=f"{name} — sheet profile",
         content=content,
         parent_id=node.id,
-        usetype=USETYPE_SUMMARY,
+        usetype=USETYPE_PROFILE,
         produced_by=TASK_PROFILE_SHEET,
         evidence={"profile": dict(profile_record, sheet_name=name)},
         # The model does not run here. `embed` is its own task and this node is not
@@ -509,6 +516,139 @@ def run_profile_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
 # ---------------------------------------------------------------------------
 
 
+def chunk_prose(text: str) -> list:
+    """A cell's prose, in pieces that each fit — with the parameters prose is chunked by.
+
+    NOT ``EmbeddingService.chunk_to_fit``, which is the same call with the library's bare
+    defaults: ``ChunkStrategy.sentence``, unpacked. That is the strategy
+    :data:`~jmfts_core.ingest_options.STRUCTURE_CHUNK_PARAMS` was measured against and
+    beat — over 25 extracted papers the share of leaves too short to carry a retrievable
+    idea is 9.7% for ``sentence`` and 0.1% at 120 words packed. `ran` against the reference
+    corpus's two document-bearing sheets, with this function and without it: 20 over-window
+    cells became 311 chunks averaging 203 characters with 8 under eight words on the bare
+    default, and 93 chunks averaging 683 with NONE under eight words here. Same cells, same
+    predicate, a third as many nodes.
+
+    A cell's prose is prose. ``STRUCTURE_CHUNK_PARAMS`` says how to chunk it and its own
+    comment already records that ``structure_tasks`` reads it directly for the same reason
+    — the values belong to the ACT of chunking, not to the format that fed it, which is
+    what :mod:`jmfts_core.ingest_options` argues at length. A second copy under the
+    ``sheet_records`` group would be two numbers for one decision.
+
+    ``fits`` is the measurement rather than ``max_chars``' proxy (``KNOWN-DEFECTS`` D7), so
+    every piece is checked against the tokenizer and not against an exchange rate.
+    """
+    service = get_embedding_service()
+    return [
+        chunk.text
+        for chunk in chunk_text(
+            text,
+            strategy=ChunkStrategy(STRUCTURE_CHUNK_PARAMS["chunk_strategy"]),
+            max_tokens=int(STRUCTURE_CHUNK_PARAMS["max_tokens"]),
+            min_chunk_length=int(STRUCTURE_CHUNK_PARAMS["min_chunk_length"]),
+            max_chars=get_settings().chunk_max_chars,
+            fits=service.fits_token_window,
+        )
+    ]
+
+
+def _born(frontier) -> str:
+    """The ``settled`` a freshly created node takes, from the frontier its subtree gets.
+
+    ``Frontier.in_flight`` says it for a leaf — a node created ``settled`` with work queued
+    is a false claim its ancestors roll up over. A CONTAINER reads the frontier of the
+    children it is about to get, because it has no work of its own: what will settle it is
+    the walk arriving from below once those children are done, and that walk only happens
+    if something down there was queued at all.
+    """
+    return SETTLED_IN_FLIGHT if frontier.in_flight else SETTLED_SETTLED
+
+
+def _write_cells(
+    repo: DocumentRepository,
+    tasks: TaskQueueRepository,
+    record_node: Document,
+    plan: RecordPlan,
+    *,
+    record,
+    sheet_name: str,
+    cell_frontier,
+    piece_frontier,
+) -> tuple[int, int]:
+    """One ``cell`` node per column of a row too long to embed whole, and its pieces.
+
+    Returns ``(cells, pieces)``. The nodes are GRANDCHILDREN of the sheet and the atom
+    declares ``text@subtree`` for them, which is the same asymmetry the two structure rungs
+    already carry: a chunk under a titled section is a grandchild of the node the rung ran
+    on, and the write mode stays ``children`` because the region reserved is the one this
+    task creates from nothing.
+
+    A container with an EMPTY frontier below it would park the tree forever — born
+    ``in_flight``, nothing queued to settle it, no walk ever reaching it — so an empty one
+    raises here rather than being written and discovered as a stall. It means the ``embed``
+    row's scope stopped naming a usetype this rule writes.
+    """
+    if not cell_frontier.in_flight:
+        raise ValueError(
+            f"row {record.row_index} of {sheet_name!r} does not fit the embedding window and "
+            f"has to become a container, but no task is planned for its {USETYPE_CELL!r} "
+            "children; the container would be created in flight with nothing queued to "
+            "settle it"
+        )
+
+    cells = 0
+    pieces = 0
+    for position, cell in enumerate(plan.cells):
+        # `record` is what a row's typed values are called and this is one of them. The
+        # column name is on the node because the prose alone cannot say which field it is:
+        # a split row has lost the sentence its neighbours gave it.
+        evidence = {
+            "cell": {
+                "column": cell.key,
+                "value": json_value(cell.value),
+                "row_index": record.row_index,
+                "sheet_name": sheet_name,
+                "position": position,
+            }
+        }
+        child = repo.create(
+            title=f"{record_node.title} · {cell.key}",
+            content=cell.content,
+            parent_id=record_node.id,
+            usetype=USETYPE_CELL,
+            produced_by=TASK_EXTRACT_SHEET,
+            evidence=evidence,
+            auto_embed=False,
+            sequential=True,
+            settled=_born(cell_frontier if cell.content is not None else piece_frontier),
+        )
+        cells += 1
+        if cell.content is not None:
+            enqueue_frontier(tasks, child, cell_frontier)
+            continue
+
+        if not piece_frontier.in_flight:
+            raise ValueError(
+                f"column {cell.key!r} of row {record.row_index} does not fit the embedding "
+                f"window and has to become a container, but no task is planned for its "
+                f"{USETYPE_CHUNK!r} children"
+            )
+        for index, piece in enumerate(cell.pieces):
+            grandchild = repo.create(
+                title=f"{child.title} ({index + 1} of {len(cell.pieces)})",
+                content=piece,
+                parent_id=child.id,
+                usetype=USETYPE_CHUNK,
+                produced_by=TASK_EXTRACT_SHEET,
+                auto_embed=False,
+                sequential=True,
+                settled=_born(piece_frontier),
+            )
+            enqueue_frontier(tasks, grandchild, piece_frontier)
+            pieces += 1
+    return cells, pieces
+
+
 def _row_ceiling(evidence: dict, params: dict) -> tuple[int, int]:
     """One node per data row, up to the ceiling that FAILS the task. 8.4 and 6.6.
 
@@ -535,13 +675,29 @@ def _row_ceiling(evidence: dict, params: dict) -> tuple[int, int]:
         f"{EV_SHEET_MEASUREMENTS}@self",
         f"{EV_BLOB}@{LOCUS_ANCESTOR}",
     ),
-    produces=(f"{EV_SHEET_SHAPE}@self", f"{EV_TEXT}@children", f"{EV_RECORD}@children"),
+    # `@subtree` AND NOT ONLY `@children`, for the asymmetry the two structure rungs already
+    # carry: a row too long to embed becomes a container, its cells are grandchildren of the
+    # sheet, and a cell too long to embed puts chunks one deeper again. The write mode stays
+    # `children` — 9.3's escalation to `subtree` is for a re-run that DELETES an unmatched
+    # node, and this run creates a region from nothing.
+    produces=(
+        f"{EV_SHEET_SHAPE}@self",
+        f"{EV_TEXT}@subtree",
+        f"{EV_RECORD}@children",
+        f"{EV_CELL}@subtree",
+    ),
     write_mode=WRITE_CHILDREN,
     cost_class=COST_CPU,
     fanout=Fanout(
         bound=_row_ceiling,
         reads=("sheet.measurements.rows",),
         basis="one node per data row",
+        # THE RECORDS, NOT THE LEAVES, and the two stopped being the same thing when a row
+        # became splittable. `_RUNG_FANOUT` counts chunks for the opposite reason — a rung's
+        # section count varies with the document's shape while its ceiling is a function of
+        # length — and here it is the RECORD count that is exactly `rows - 1` whatever the
+        # columns hold. What varies is how many nodes each record needs, which is a fact
+        # about the cells rather than about the row count this interval is over.
         counts=USETYPE_RECORD,
     ),
     child_key=ChildKey(KEY_POSITION),
@@ -561,11 +717,20 @@ def run_extract_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
     why this task is ordered after that one, and why a node with no ``sheet.measurements``
     raises rather than measuring for itself.
 
-    **A row whose prose does not fit the embedding window still becomes a node.** The JSON
-    record is the point of the node and it is complete either way; what will not complete is
-    that node's ``embed`` task, which raises rather than embedding a truncated prefix
-    (``KNOWN-DEFECTS.md`` D1). The count is in the attempt detail so an operator sees the
-    condition here rather than as N failing tasks with no common cause.
+    **A row whose prose does not fit the embedding window becomes a CONTAINER over its
+    columns**, and its cells carry the text. That is the rule the rest of the tree follows —
+    a ``section`` holds no prose and its chunks do — and ``summarize`` gives the container a
+    document vector over the concatenation at the settling boundary, which is the same text
+    the single node would have held. Before this, the row became one node whose ``embed``
+    raised rather than embedding a truncated prefix (``KNOWN-DEFECTS.md`` D1), and the
+    refusal was correct while the outcome was not: 66 of 4,601 record nodes on the reference
+    corpus have no vector, no ancestor that settled, and a permanently failed task each.
+
+    Splitting by COLUMN is what makes the pieces legible. The keys are measured, so a cell
+    node says which field it is; a blind chunk of the row's prose would put a boundary in
+    the middle of ``Discussion:`` and produce a node that names no column at all. A cell
+    that is itself over the window gets pieces, which is the same rule once more and not a
+    corner case — 41 of those 66 rows hold a single column that does not fit either.
     """
     node, sheet, name = _scoped_sheet(
         session, task, task_type=TASK_EXTRACT_SHEET, purpose="materialises one worksheet's cells"
@@ -616,22 +781,38 @@ def run_extract_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
     repo = DocumentRepository(session)
     tasks = TaskQueueRepository(session)
     service = get_embedding_service()
+    # THREE FRONTIERS AND NOT ONE, because a fan-out plans per (producer, usetype) pair and
+    # this rule writes three kinds of node. `enqueue_frontier` refuses a child stamped with
+    # a pair its frontier was not planned for, which is what makes the three separate
+    # rather than one reused — see `Frontier` for why that check exists.
     frontier = plan_frontier(session, node, produced_by=TASK_EXTRACT_SHEET, usetype=USETYPE_RECORD)
+    cell_frontier = plan_frontier(
+        session, node, produced_by=TASK_EXTRACT_SHEET, usetype=USETYPE_CELL
+    )
+    piece_frontier = plan_frontier(
+        session, node, produced_by=TASK_EXTRACT_SHEET, usetype=USETYPE_CHUNK
+    )
     child_ids: list[int] = []
     over_window = 0
+    cells_written = 0
+    pieces_written = 0
     with_formula = 0
     text_forced = 0
     for record in records:
-        if not service.fits_token_window(record.content):
-            over_window += 1
         for cell in record.cells.values():
             with_formula += 1 if "formula" in cell else 0
             text_forced += 1 if cell.get("text_forced") else 0
+        # 8.4 plus the window, decided in `sheet_records` and not here: this task knows how
+        # to write nodes and the shape of what to write is a pure function of the row and
+        # the two callables below.
+        plan = plan_record(record, fits=service.fits_token_window, chunk=chunk_prose)
+        if plan.content is None:
+            over_window += 1
         child = repo.create(
             # The row NUMBER, not a position in the result. A person going back to the
             # workbook to check needs the number Excel shows them down the left edge.
             title=f"{name} row {record.row_index}",
-            content=record.content,
+            content=plan.content,
             parent_id=node.id,
             usetype=USETYPE_RECORD,
             produced_by=TASK_EXTRACT_SHEET,
@@ -647,9 +828,28 @@ def run_extract_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
             # retrievable until it has run, which is what `in_flight` states.
             auto_embed=False,
             sequential=True,
-            settled=SETTLED_IN_FLIGHT if frontier.in_flight else SETTLED_SETTLED,
+            settled=_born(frontier if plan.content is not None else cell_frontier),
         )
-        enqueue_frontier(tasks, child, frontier)
+        if plan.content is not None:
+            enqueue_frontier(tasks, child, frontier)
+        else:
+            # NO `embed` ON THE CONTAINER, and `run_embed` is why: it refuses a node with no
+            # content, correctly. The vector arrives from `summarize` at the settling
+            # boundary, over the concatenation of the cells below — which is
+            # `store_effective_content`'s document-vector-only path, the same one every
+            # `section` in the corpus takes.
+            written = _write_cells(
+                repo,
+                tasks,
+                child,
+                plan,
+                record=record,
+                sheet_name=name,
+                cell_frontier=cell_frontier,
+                piece_frontier=piece_frontier,
+            )
+            cells_written += written[0]
+            pieces_written += written[1]
         child_ids.append(child.id)
 
     decision.update(
@@ -687,9 +887,17 @@ def run_extract_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
             "cell_notes_read": rows.notes_read,
             "cells_with_formula": with_formula,
             "cells_text_forced": text_forced,
-            # A condition, not a failure, and not this task's to resolve — see the
-            # docstring. Their `embed` tasks are the ones that will raise.
+            # A condition, and now a resolved one: these are the rows that became
+            # containers. The number stayed after the split because it is what an operator
+            # reads to tell a sheet of values from a sheet of documents, and the two counts
+            # below say what it cost — `records_over_token_window` rows produced
+            # `cell_nodes` cells, of which the ones that did not fit either produced
+            # `cell_piece_nodes` chunks.
             "records_over_token_window": over_window,
+            "cell_nodes": cells_written,
+            "cell_piece_nodes": pieces_written,
         },
+        # `child_ids` is the RECORD nodes, which is what `Fanout.counts` names and what the
+        # ceiling is an interval over. The cells and their pieces are below these.
         produced={"node_count": len(child_ids), "child_ids": child_ids},
     )

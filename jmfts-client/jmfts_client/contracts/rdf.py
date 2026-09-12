@@ -12,7 +12,7 @@ media type rather than the adapter growing another special case.
 """
 
 from datetime import datetime
-from typing import Any, NewType, Optional
+from typing import Any, Literal, NewType, Optional
 
 from pydantic import BaseModel, Field
 
@@ -200,3 +200,161 @@ class ShapeBindingResponse(BaseModel):
     scope: dict[str, Any] = Field(default_factory=dict)
     description: Optional[str] = None
     created_at: Optional[datetime] = None
+
+
+class ShapeValidationRequest(BaseModel):
+    """Ask for one binding to be run against the data it is bound to.
+
+    ``docs/SPRINT_0_5_0.md`` Block A step 4. The binding is the whole request: it already
+    names the ontology, the shape and the scope, and a request that re-stated any of them
+    would be free to disagree with the row it names.
+    """
+
+    binding_id: int = Field(
+        description=(
+            "The binding to run. It must belong to the ontology in the path — a binding "
+            "under another vocabulary is a 404 here rather than a run against the wrong "
+            "shape."
+        )
+    )
+    provenance: Literal["any", "asserted", "derived"] = Field(
+        default="any",
+        description=(
+            "Which layer of the triple store the data graph is built from. 'any' is the "
+            "live graph as it stands, which is what a validation run normally asks about; "
+            "'asserted' is `derived_by IS NULL`, which is what a rule pass reads. "
+            "Invalidated triples are never included at any layer."
+        ),
+    )
+
+
+class ShapeValidationRunResponse(BaseModel):
+    """What ``POST /ontologies/{name}/validate`` enqueued — a task and the node it fills in.
+
+    The run has NOT happened when this returns. ``report_document_id`` is a document that
+    exists, is in flight, and carries the request; poll it (``GET /documents/{id}``) and read
+    ``structured_content['validation']`` for the report once its task completes. A run that
+    cannot be completed — this install has no ``pyshacl``, the binding was deleted — leaves
+    that node ``settled='failed'`` with the reason in its attempt log, which is more than a
+    refused request would have left behind.
+    """
+
+    task_id: int = Field(description="The queued `validate:shape` task")
+    report_document_id: int = Field(
+        description="The node the report will be written to. In flight until the task runs."
+    )
+    binding_id: int
+    ontology_name: str
+    shape_iri: str
+    scope_type: str
+    scope_document_count: int = Field(
+        description=(
+            "Documents the binding's scope resolved to, AFTER the caller's access filter. "
+            "This is the set the run is pinned to: the worker holds no principal, so the "
+            "ids are recorded on the task row rather than re-resolved when it runs."
+        )
+    )
+    provenance: str
+    governed: bool = Field(
+        description=(
+            "Whether the report node carries access grants. It carries exactly the grants "
+            "the scope's documents are governed by, so a report over restricted data is "
+            "restricted identically; false means the scope is under no access-control root "
+            "and the report is readable by every token, like the documents it reports on."
+        )
+    )
+    requested_at: datetime
+    status: str = Field(description="The queued task's status — 'pending' when it is created")
+
+
+# ── the write side: a bound shape's sh:rule set ─────────────────────────────
+#
+# Here and not in a module of their own. ``SPRINT_0_5_0.md`` Block B finding 7: step 4 put
+# ``ShapeValidationRequest``/``ShapeValidationRunResponse`` in this file and step 6 created a
+# second module for these two, which are the same pair of shapes for the sibling operation.
+# Two modules for one vocabulary is drift, so ``contracts/ontology.py`` was deleted and these
+# moved here unchanged.
+
+
+class RuleDerivationRequest(BaseModel):
+    """Ask for one binding's ``sh:rule`` set to be run against the data it is bound to.
+
+    The binding is the whole request, as it is for validation: it already names the ontology,
+    the shape and the scope, and a request that re-stated any of them would be free to
+    disagree with the row it names.
+
+    **There is no ``provenance`` field and its absence is the design.**
+    ``ShapeValidationRequest`` has one because reading the derived layer is a reasonable thing
+    to ask for; a rule pass reads the ASSERTED layer and only that. ``SPRINT_0_5_0.md`` Block
+    B: rules do not chain in this sprint, because a rule whose input is another rule's output
+    is a fixpoint over a store that also accepts writes. A field here would be the way to ask
+    for exactly that, so there is not one.
+    """
+
+    binding_id: int = Field(
+        description=(
+            "The binding to run. It must belong to the ontology in the path — a binding "
+            "under another vocabulary is a 404 here rather than a run against the wrong "
+            "shape. Its shape must declare at least one sh:rule; a shape that declares none "
+            "is refused, because 'derived nothing' and 'rules ran and matched nothing' are "
+            "opposite facts that read the same."
+        )
+    )
+
+
+class RuleDerivationRunResponse(BaseModel):
+    """What ``POST /ontologies/{name}/derive`` enqueued — a task, a report node, and a rule id.
+
+    The run has NOT happened when this returns. ``report_document_id`` is a document that
+    exists, is in flight, and carries the request; poll it (``GET /documents/{id}``) and read
+    ``structured_content['derivation']`` once its task completes. A run that cannot be
+    completed — no ``pyshacl`` on the worker, a rule that produced a triple this store cannot
+    hold — leaves that node ``settled='failed'`` with the reason in its attempt log, and
+    leaves the triple store exactly as it was.
+    """
+
+    task_id: int = Field(description="The queued `derive:rule` task")
+    report_document_id: int = Field(
+        description="The node the report will be written to. In flight until the task runs."
+    )
+    binding_id: int
+    ontology_name: str
+    shape_iri: str
+    scope_type: str
+    rule: str = Field(
+        description=(
+            "The identity this run's rows will carry in `triples.derived_by`, and the "
+            "complete description of what this rule produced: `WHERE derived_by = <rule>` is "
+            "the set a re-run deletes and rebuilds. It is a digest of the four fields that "
+            "make a binding unique — vocabulary, shape, scope kind, scope — rather than the "
+            "binding's row id, so a binding deleted and recreated identically re-derives the "
+            "same set instead of stranding it. Returned here because the digest is otherwise "
+            "only readable off the report node."
+        )
+    )
+    scope_document_count: int = Field(
+        description=(
+            "Documents the binding's scope resolved to, AFTER the caller's access filter. "
+            "This is the set the run is pinned to, and it is also the set a derived triple's "
+            "endpoints must both be inside: the worker holds no principal, so the ids are "
+            "recorded on the task row rather than re-resolved when it runs."
+        )
+    )
+    provenance: str = Field(
+        description=(
+            "Always 'asserted'. Reported rather than accepted, so a caller reading a "
+            "response can see which layer the conclusion was drawn from. See the request."
+        )
+    )
+    governed: bool = Field(
+        description=(
+            "Whether the report node carries access grants. It carries exactly the grants "
+            "the scope's documents are governed by; false means the scope is under no "
+            "access-control root and the report is readable by every token, like the "
+            "documents it derives from. The derived TRIPLES are not governed by this: a "
+            "triple's visibility follows its endpoints, which are documents in this same "
+            "scope."
+        )
+    )
+    requested_at: datetime
+    status: str = Field(description="The queued task's status — 'pending' when it is created")

@@ -177,6 +177,69 @@ class Extracted:
     detail: dict = field(default_factory=dict)
 
 
+#: The one character PostgreSQL will not store, in either destination this task writes to.
+#: A ``text`` column rejects it because the backend's string type is NUL-terminated, and a
+#: ``jsonb`` value rejects it because JSON has no representation for ``\u0000`` that
+#: PostgreSQL will accept — ``DETAIL: \u0000 cannot be converted to text``.
+_NUL = "\x00"
+
+
+def _strip_nul(value):
+    """Remove NUL from every string in ``value``, keeping containers' shape.
+
+    Applied to a reader's whole output rather than inside each reader, so a reader added
+    later cannot forget it. Recursive because the character arrives in a PDF's OUTLINE —
+    a nested list of section titles inside ``record`` — as often as in the body text.
+    """
+    if isinstance(value, str):
+        return value.replace(_NUL, "")
+    if isinstance(value, dict):
+        return {k: _strip_nul(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_strip_nul(v) for v in value]
+    return value
+
+
+def _count_nul(value) -> int:
+    """How many NULs :func:`_strip_nul` would remove. Counted so the removal is reported."""
+    if isinstance(value, str):
+        return value.count(_NUL)
+    if isinstance(value, dict):
+        return sum(_count_nul(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return sum(_count_nul(v) for v in value)
+    return 0
+
+
+def _without_nul(extracted: Extracted) -> tuple[Extracted, int]:
+    """``extracted`` with every NUL removed, and how many there were.
+
+    **Stripping rather than raising, and reporting rather than stripping silently.** A NUL
+    in a PDF text layer is a padding artefact of the producing tool, not content: it
+    carries no meaning a reader could want and it is invisible in every rendering of the
+    document. Refusing the file over it abandons a readable document for a character that
+    is not part of it — measured on a real corpus, one 900-page philosophy book lost its
+    text, its chunks and its vectors this way, and took three 22-second retries doing it
+    (``docs/STRESS_CORPUS.md`` 4.1).
+
+    What Fail Early requires here is that the removal is not hidden, so the count goes into
+    the ``extraction`` evidence and the attempt detail. A caller comparing ``characters``
+    against ``bytes_in`` — the pair 11.3 put there — can see exactly what was dropped.
+    """
+    removed = _count_nul(extracted.text) + _count_nul(extracted.record)
+    if not removed:
+        return extracted, 0
+    return (
+        Extracted(
+            text=_strip_nul(extracted.text),
+            source=extracted.source,
+            record=_strip_nul(extracted.record),
+            detail=extracted.detail,
+        ),
+        removed,
+    )
+
+
 def _extract_pdf(data: bytes) -> Extracted:
     """The PDF text layer, as markdown, with the page map and outline it carries.
 
@@ -449,18 +512,17 @@ def run_extract_text(session: Session, task: TaskQueue) -> TaskOutcome:
             "that are no longer there"
         )
 
-    extracted = extractor(data)
+    extracted, nul_removed = _without_nul(extractor(data))
 
     doc.content = extracted.text
-    EvidenceRepository(session).write(
-        doc.id,
-        "extraction",
-        {
-            "source": extracted.source,
-            "characters": len(extracted.text),
-            **extracted.record,
-        },
-    )
+    extraction = {
+        "source": extracted.source,
+        "characters": len(extracted.text),
+        **extracted.record,
+    }
+    if nul_removed:
+        extraction["nul_characters_removed"] = nul_removed
+    EvidenceRepository(session).write(doc.id, "extraction", extraction)
     session.flush()
 
     detail = {
@@ -469,6 +531,8 @@ def run_extract_text(session: Session, task: TaskQueue) -> TaskOutcome:
         "characters": len(extracted.text),
         **extracted.detail,
     }
+    if nul_removed:
+        detail["nul_characters_removed"] = nul_removed
     # The one prober that counts characters is the text one, and it counts them so that
     # this comparison exists. A format whose prober measures something else contributes
     # nothing here, and an absent key is left absent rather than filled with a zero that

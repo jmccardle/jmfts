@@ -8,7 +8,7 @@ so existing ``from jmfts_core.rest.schemas import TripleCreate`` imports keep wo
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from jmfts_client.contracts.document import DocumentResponse
 
@@ -37,8 +37,7 @@ class PredicateResponse(BaseModel):
     description: Optional[str]
     created_at: Optional[datetime]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class TripleCreate(BaseModel):
@@ -85,8 +84,7 @@ class TripleResponse(BaseModel):
     invalidated_by: Optional[int]
     invalidation_reason: Optional[str]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class TripleDetailResponse(BaseModel):
@@ -110,8 +108,7 @@ class TripleDetailResponse(BaseModel):
     invalidated_by: Optional[int]
     invalidation_reason: Optional[str]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class TripleInvalidateRequest(BaseModel):

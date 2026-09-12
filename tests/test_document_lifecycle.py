@@ -15,14 +15,16 @@ INGEST_SPEC.md Part 2. Three things are being guarded here and they fail differe
    point of the parameter is that a caller cannot receive half a tree and mistake it for
    the whole one.
 
-One finding recorded here rather than lost: `SearchRepository.vector_search` orders by
-`(1 - (embed <=> q)) DESC`, and pgvector's HNSW index can only serve
-`ORDER BY embed <=> q` ASC. Verified by EXPLAIN with `enable_seqscan = off`: the score
-form seq-scans and sorts even when the index is otherwise reachable. So
-`idx_documents_embed` was already unused by that query before it became partial — making
-it partial takes nothing away, but the index will stay unused until the ORDER BY is
-rewritten. `test_embed_index_is_partial_on_settled` therefore exercises the canonical
-ANN shape, which is what the index exists to serve.
+One finding recorded here rather than lost, and since RESOLVED:
+`SearchRepository.vector_search` used to order by `(1 - (embed <=> q)) DESC`, and
+pgvector's HNSW index can only serve `ORDER BY embed <=> q` ASC. Verified by EXPLAIN with
+`enable_seqscan = off`: the score form seq-scanned and sorted even when the index was
+otherwise reachable. So `idx_documents_embed` was already unused by that query before it
+became partial — making it partial took nothing away. `SPRINT_0_4_0.md` Block A step 0
+rewrote the ORDER BY to the distance operator and the index is reachable now;
+`tests/test_filtered_recall.py::test_shipped_order_by_reaches_the_index` is what holds it
+there. `test_embed_index_is_partial_on_settled` exercises the canonical ANN shape, which
+is the shape `vector_search` now emits.
 
 DB integration tests on the shared savepoint-rollback fixture (nothing is committed).
 """

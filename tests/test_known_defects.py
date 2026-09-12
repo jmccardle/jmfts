@@ -1,4 +1,4 @@
-"""Regression tests for the four silent-failure defects in docs/KNOWN-DEFECTS.md.
+"""Regression tests for the four silent-failure defects in docs/archive/KNOWN-DEFECTS.md.
 
 Each test below reproduces a defect that shipped: the system lost text (D1, D2, D4)
 or corrupted a statistic (D3) and reported success in every case. They are written

@@ -13,6 +13,14 @@ tree in advance would be stale before it ran.
 **``summarize``** gives a node that holds no text of its own a text embedding, from the
 text of its children.
 
+**``summarize:tree``** takes that summary and gives it a NODE, under the derived-tree root
+(``derived_roots.py``, ``SPRINT_0_5_0.md`` Block C step 11), with ``summarizes`` edges down
+to the members it covers. Same summary, same vector, different tree: ``summarize``'s output
+is a field on a structural node and so is a property of the as-written tree, and 3.1 needs
+a PARALLEL tree whose leaves resolve to the source leaves through edges. It owns nothing —
+the members keep their parent and their access — which is the property Part 1 is about and
+which step 12 restored by deleting ``raptor_summarize``'s reparent.
+
 **PELT is not RAPTOR, and the difference is the whole design.** RAPTOR clusters: a cluster
 is a SET, so a node built from one holds material from wherever in the document it happened
 to be. PELT segments: the children are a SEQUENCE in the order the author wrote them, and a
@@ -35,6 +43,12 @@ twice and answer one query with both. The summary lives in
 the ``effective_content`` evidence row, which the full-text index does not read, and
 the node gets a document vector and no token embeddings — MaxSim over text that is not this
 node's own content would be the same double-count by another route.
+
+That rule is about the STRUCTURAL tree, and ``summarize:tree`` obeys it rather than
+escaping it: the node it creates in the derived tree carries ``content`` only when the
+summary is an LLM paraphrase, which is text that exists nowhere else, and carries none when
+the summary was a concatenation of prose the leaves already hold. Both carry the vector,
+because the vector is what the summary IS for retrieval.
 """
 
 from __future__ import annotations
@@ -44,7 +58,7 @@ from dataclasses import dataclass
 from typing import Optional, Sequence
 
 import numpy as np
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from jmfts_core.atoms import (
@@ -61,19 +75,34 @@ from jmfts_core.atoms import (
 )
 from jmfts_core.config import Settings, get_settings
 from jmfts_client.contracts.attempt import param_fingerprint
+from jmfts_core.derived_roots import (
+    DERIVED_ROOT_USETYPE,
+    SUMMARY_TREE_KIND,
+    get_or_create_derived_root,
+    widening_descendants,
+)
 from jmfts_core.embedder import get_embedder
 from jmfts_core.embedding import get_embedding_service
+from jmfts_core.entity_roots import ENTITIES_ROOT_USETYPE
 from jmfts_core.ingest_options import resolve_options
 from jmfts_core.ingest_tasks import (
     OPTIONS_KEY,
     TASK_STRUCTURE_SEMANTIC,
     TASK_SUMMARIZE,
     TASK_SUMMARIZE_LLM,
+    TASK_SUMMARIZE_TREE,
     TaskOutcome,
     register_task_handler,
 )
 from jmfts_core.llm_client import complete_sync
-from jmfts_core.models.document import SETTLED_IN_FLIGHT, USETYPE_SEGMENT, Document
+from jmfts_core.models.document import (
+    SETTLED_IN_FLIGHT,
+    SUMMARIZES_LINK_TYPE,
+    USETYPE_SEGMENT,
+    USETYPE_SUMMARY,
+    Document,
+    DocumentLink,
+)
 from jmfts_core.models.task_queue import WRITE_SELF, WRITE_SUBTREE, TaskQueue
 from jmfts_core.evidence import ABSENT
 from jmfts_core.repositories.document import DocumentRepository
@@ -110,6 +139,17 @@ METHOD_LLM_SUMMARY = "llm_summary"
 #: text that is not any node's ``content`` and so cannot go through that method.
 EMBED_PREFIX = "search_document: "
 
+#: The usetypes of a tree root that is NOT an ingest tree. A node whose tree is rooted in
+#: one of these is not material somebody uploaded; it is a container a derivation minted,
+#: keyed by access, and holding nodes that have nothing to do with one another beyond being
+#: readable by the same principals. See :func:`in_ingest_tree`.
+#:
+#: BOTH, not just the derived root, because the hazard is the shape and not the tree kind:
+#: ``entity_roots.get_or_create_entities_root`` mints the same thing one release earlier —
+#: ``parent_id=None``, contentless, children keyed only by access — and a summary of the
+#: entities a corpus mentions is the same unasked-for LLM call as a summary of its summaries.
+NON_INGEST_ROOT_USETYPES: frozenset[str] = frozenset({DERIVED_ROOT_USETYPE, ENTITIES_ROOT_USETYPE})
+
 SUMMARIZE_SYSTEM_PROMPT = (
     "You summarize one contiguous span of a document. The passages you are given are "
     "consecutive and in the order the author wrote them, so preserve that order and the "
@@ -138,8 +178,24 @@ class IngestRollupPlanner:
       different number of children. If that is still too many it segments THOSE, one level
       up, over nodes that did not exist when the first pass ran.
 
+    **NOTHING AT ALL FOR A NODE OUTSIDE AN INGEST TREE**, checked first and before any
+    rung. :func:`in_ingest_tree` is the predicate and ``SPRINT_0_5_0.md`` Block C finding 2
+    is why: the walk visits every ancestor of a completed task's scope node, a derived root
+    is an ancestor like any other, and a root's children are unrelated to each other by
+    construction. Without this the first node filed under a shared root would buy an LLM
+    summarize of that root's whole contents — which is why, until it was checked, a derived
+    root could not be a parent for anything a rollup did not create.
+
+    **THREE RUNGS, IN ORDER, ONE PER VISIT.** ``structure:semantic`` while the node is too
+    wide, then ``summarize`` for its ``effective_content``, then ``summarize:tree`` to hang
+    that summary in the derived tree (``SPRINT_0_5_0.md`` Block C step 11). The third is
+    gated on the EVIDENCE rather than on the attempt, unlike the two above it: a
+    ``summarize`` that reported ``skipped`` is attempted and wrote no summary, so a queue
+    row asking to hang one could only ever report ``skipped`` in turn — and a plan that
+    claims work where there is none is the thing 11.2 refuses for ``EXPLAIN``.
+
     **6.1's diff is applied here rather than by wrapping**
-    :class:`~jmfts_core.settling.AttemptDiffPlanner`, because the choice between the two
+    :class:`~jmfts_core.settling.AttemptDiffPlanner`, because the choice between the
     tasks depends on the diff: a node whose segmentation already ran and produced nothing
     must fall through to ``summarize`` rather than be offered the same segmentation again.
     The termination argument is otherwise identical — a completed task appends an attempt
@@ -153,6 +209,15 @@ class IngestRollupPlanner:
     """
 
     def __call__(self, session: Session, node: Document) -> Sequence[TaskSpec]:
+        if not in_ingest_tree(session, node):
+            # NOT AN INGEST TREE, SO THERE IS NO ROLLUP TO PLAN. `SPRINT_0_5_0.md` Block C
+            # finding 2. The walk reaches every ancestor of a completed task's scope node,
+            # and a derived root is an ancestor like any other: its children are whatever
+            # derivations have filed under that access key, so offering it `summarize`
+            # enqueues an LLM call over a container of unrelated derived nodes that nobody
+            # asked for. Declining here is what lets a derived root be a parent at all.
+            return ()
+
         children = child_ids(session, node.id)
         if not children:
             # A leaf has nothing to roll up: its own text is its own content, and its
@@ -171,6 +236,20 @@ class IngestRollupPlanner:
 
         spec = _summarize_spec(children, options)
         if (TASK_SUMMARIZE, param_fingerprint(spec.params)) not in attempted:
+            return (spec,)
+
+        # THE THIRD RUNG, AND IT IS GATED ON THE EVIDENCE RATHER THAN ON THE ATTEMPT.
+        # `summarize` above is offered until its fingerprint has been tried; this one is
+        # offered only once the row that fingerprint was for actually EXISTS, because a
+        # `summarize` that reported `skipped` (no children with text, or no LLM for a node
+        # too wide to concatenate) is attempted and has written nothing to hang in a tree.
+        # Reading the evidence is the same question `run_summarize_tree` will ask, asked
+        # before a task is queued to ask it — a queue row per node whose only outcome could
+        # be `skipped` is a plan that says work exists where there is none.
+        if evidence_value(session, node.id, "effective_content") is None:
+            return ()
+        spec = _summarize_tree_spec(children)
+        if (TASK_SUMMARIZE_TREE, param_fingerprint(spec.params)) not in attempted:
             return (spec,)
         return ()
 
@@ -201,6 +280,64 @@ def _summarize_spec(children: Sequence[int], options: dict) -> TaskSpec:
         write_mode=WRITE_SELF,
         params={"child_count": len(children), "llm_model": options["llm_model"]},
     )
+
+
+def _summarize_tree_spec(children: Sequence[int]) -> TaskSpec:
+    """``self``, and it is the second row in the appliance where that names somewhere else.
+
+    ``extract:facts`` is the first (``ingest_tasks.TASK_ROWS``): a task that writes into a
+    shared region outside this file's subtree, declaring the narrowest reservation it can,
+    because 5.3's three modes describe a region within ONE subtree and there is no mode for
+    "a node under a root keyed by access". Reserving ``subtree`` would not cover the write
+    either — the derived root is not below this node — it would only block every embed under
+    this file while a task that touches none of them ran.
+
+    ``child_count`` alone, and no options key: this task takes no parameters. What decides
+    whether it needs to run again is the member set it links to, which is exactly what
+    ``child_count`` measures (11.4's tension with 6.1's diff, resolved the same way
+    :func:`_summarize_spec` resolves it). The summary TEXT changing is already covered —
+    that is a new ``summarize`` attempt with its own fingerprint, and this one comes after.
+    """
+    return TaskSpec(
+        task_type=TASK_SUMMARIZE_TREE,
+        write_mode=WRITE_SELF,
+        params={"child_count": len(children)},
+    )
+
+
+def in_ingest_tree(session: Session, node: Document) -> bool:
+    """Whether ``node`` belongs to a tree an ingest built. ``SPRINT_0_5_0.md`` Block C, 2.
+
+    **THE TREE'S ROOT DECIDES, AND ``produced_by`` CANNOT.** Finding 3 reads what the two
+    rollup writers stamp — ``structure:semantic`` on a PELT container, ``summarize:tree`` on
+    a derived node — which separates derived NODES from ingest ones. It does not reach the
+    node the finding is about. The hazardous node is the shared ROOT: a summarize offered
+    there covers every derived node filed under one access key, and that root is minted by
+    ``DocumentRepository.create`` with no stamp at all, so its ``produced_by`` is NULL and
+    indistinguishable from an uploaded file node's. The one thing it does carry is its
+    ``usetype`` (:data:`NON_INGEST_ROOT_USETYPES`), which is also what holds it out of
+    retrieval, so the same fact answers both questions.
+
+    Reading the ROOT rather than the node is what makes the answer hold for a node filed
+    under that root later — Block A's report node, a keyword tree's nodes — none of which
+    the planner can recognise from a stamp it has never seen.
+
+    The test is NEGATIVE on purpose: everything is an ingest tree unless its root says
+    otherwise. A positive test — "``produced_by`` names a structure rung" — would decline to
+    roll up a tree somebody built by hand through ``POST /documents``, which the planner
+    rolls up today and which nothing in this finding asks to change.
+    """
+    path = node.path or []
+    if not path:
+        # Its own root. A derived root IS parentless, so this is the case that matters.
+        return node.usetype not in NON_INGEST_ROOT_USETYPES
+    root = session.get(Document, path[0])
+    if root is None:
+        # `path` names an ancestor that is not there. That is a broken tree, not a derived
+        # one, and inventing an answer for it would hide the breakage — the planner's
+        # ordinary checks run and the walk reports what it finds.
+        return True
+    return root.usetype not in NON_INGEST_ROOT_USETYPES
 
 
 def child_ids(session: Session, parent_id: int) -> list[int]:
@@ -854,6 +991,245 @@ def summarize_span(text: str, settings: Settings, model: str) -> str:
         extra_body=extra_body,
     )
     return result.text
+
+
+# ---------------------------------------------------------------------------
+# summarize:tree — the same summary, as a node in a parallel tree
+# ---------------------------------------------------------------------------
+
+#: Where a derived summary node records the source node it stands for, in
+#: ``structured_content``. It is not a link, and that is the distinction: the ``summarizes``
+#: edges point at the MEMBERS this summary covers, while this names the one node in the
+#: source tree whose ``effective_content`` it is. Recovering it from the members would mean
+#: reading a member's ``parent_id``, which is a fact about the source tree that a derivation
+#: must not depend on staying put.
+SOURCE_NODE_KEY = "source_node_id"
+
+
+# `effective_content@self` AND `embedding@self`: this reads the summary row `summarize`
+# wrote and the vector `summarize` computed for it, and both come from that one atom. The
+# pair derives the within-node edge `summarize -> summarize:tree` (2.2), which is the real
+# ordering — `IngestRollupPlanner` will not offer this until the evidence exists.
+#
+# `produces=()`, for `extract:facts`' and `index:bm25`' reason (`fact_tasks.py:73`): what
+# this writes is a NODE UNDER ANOTHER ROOT and its edges, none of which is evidence on a
+# node of this tree, and an atom claiming otherwise would enter the audit's derivation under
+# a key nobody could read back.
+#
+# ---------------------------------------------------------------------------------------
+# A DEBT, TAKEN DELIBERATELY: `SPRINT_0_5_0.md` OPEN QUESTION 6.1, AND ITS RECORDED DEFAULT.
+#
+# `Fact.locus` admits `self`, `children`, `subtree` and `ancestor` — every one a position
+# RELATIVE TO THE NODE IN FRONT OF THE PLANNER. This handler writes a node under the derived
+# root, which is none of them: not this node, not below it, not above it. 6.1 asks whether
+# the vocabulary grows a fifth locus; its recorded default is that the handler declares
+# `self` and step 11 writes the incompleteness down. That default is taken here, and the
+# same debt is written into `docs/INGEST_SPEC.md` 5.3 where a reader meets the locus
+# vocabulary rather than only here where they meet one instance of it.
+#
+# WHAT THE DEBT COSTS, precisely: `EXPLAIN` reports this atom as touching one node, and
+# `derive_edges` derives no edge into whatever later reads the derived tree, because the
+# fact it produces has no name. A fifth locus added without the `SPRINT_JOBS.md` phase that
+# owns `EXPLAIN` would be a vocabulary term nothing reports on, which is the more expensive
+# half of the trade — so the cheaper one is taken and stated rather than taken and hidden.
+# ---------------------------------------------------------------------------------------
+#
+# `cpu`, and it is the only rollup atom that is. Nothing here runs a model: the vector is
+# COPIED from the node `summarize` embedded, over exactly this text, so recomputing it would
+# spend a forward pass to arrive at the same numbers. A badge sized on this being `model`
+# would pin a node-and-two-inserts task to the GPU pool.
+@register_task_handler(
+    TASK_SUMMARIZE_TREE,
+    consumes=(f"{EV_EFFECTIVE_CONTENT}@self", f"{EV_EMBEDDING}@self"),
+    produces=(),
+    write_mode=WRITE_SELF,
+    cost_class=COST_CPU,
+)
+def run_summarize_tree(session: Session, task: TaskQueue) -> TaskOutcome:
+    """Hang this node's summary under the derived root as a node, linked down to its members.
+
+    ``SPRINT_0_5_0.md`` Block C step 11. ``summarize`` has already decided what this node's
+    text is and embedded it; this gives that summary a node of its own in the summary tree,
+    so that 3.1's leaf projection has something to project FROM.
+
+    **It owns nothing.** The members keep their parent, their ``path`` and the access-control
+    root they were ingested under; the only record of the relation is a ``summarizes`` edge,
+    which is many-to-many and which Part 1 is entirely about. That is the property step 12
+    restored for ``raptor_summarize`` and this handler is the first thing built to rely on it.
+
+    **It re-derives rather than accumulates.** A second run over a changed member set finds
+    the node it wrote before — by :data:`SOURCE_NODE_KEY`, not by title — rewrites it, and
+    replaces its outgoing ``summarizes`` edges wholesale. Two summary nodes for one source
+    node would make the projection ambiguous and neither copy wrong.
+
+    **The derived node is flat under the root, and the nesting is in the edges.** A summary
+    of a container cannot be created under the summary of that container's PARENT, because
+    the walk rolls up from the leaves and the parent's summary does not exist yet; building
+    it would mean reparenting the child's summary afterwards, which is the one move this
+    whole block exists to stop. So the derived tree's shape is carried by ``summarizes``
+    edges — one level down into the SOURCE tree per derived node — and composing them is
+    what reaches the leaves.
+    """
+    doc = _scope_node(session, task)
+    members = child_ids(session, doc.id)
+    if not members:
+        return TaskOutcome(
+            status="skipped",
+            detail={"reason": "the node has no children, so there is nothing to summarise"},
+        )
+
+    record = evidence_value(session, doc.id, "effective_content")
+    if not record:
+        # `summarize` reported `skipped` — no child carried text, or the node was too wide
+        # to concatenate with no LLM configured. There is no summary to hang, and inventing
+        # one here would be a second summarizer with none of `summarize`'s fit checks.
+        return TaskOutcome(
+            status="skipped",
+            detail={
+                "reason": (
+                    "this node has no effective_content, so summarize wrote no summary to "
+                    "give a node of its own"
+                ),
+                "children": len(members),
+            },
+        )
+    if doc.embed is None:
+        return TaskOutcome(
+            status="skipped",
+            detail={
+                "reason": (
+                    "this node has effective_content but no document vector, so there is "
+                    "nothing to copy onto the derived node and no way to retrieve it"
+                ),
+                "method": record.get("method"),
+            },
+        )
+
+    # THE ACCESS GATE, AND IT COMES BEFORE THE ROOT IS MINTED. A derived root is keyed by
+    # ONE document's effective access; this summary is of everything below that document.
+    # Where the two disagree in the widening direction, writing the node would publish a
+    # summary of material its readers may not read — SPRINT_0_3_0.md 13.9 by a fourth route,
+    # and `derived_roots.widening_descendants` is the check. Refusing is the whole
+    # protection: there is no narrower root to fall back to, because the key that would be
+    # correct (the intersection of every member's readers) is not any document's key, and
+    # minting a root for it is a design this step does not open.
+    widened = widening_descendants(session, doc.id)
+    if widened:
+        return TaskOutcome(
+            status="skipped",
+            detail={
+                "reason": (
+                    "this node's access is wider than that of documents below it, so a "
+                    "summary node keyed by this node would be readable by principals who "
+                    "may not read what it summarises"
+                ),
+                "restricted_below": widened[:20],
+                "restricted_count": len(widened),
+            },
+        )
+
+    root_id = get_or_create_derived_root(session, doc.id, SUMMARY_TREE_KIND)
+    node = _derived_node_for(session, root_id, doc.id)
+    created = node is None
+    label = doc.title or f"document {doc.id}"
+    # CONTENT ONLY WHEN THE SUMMARY IS NEW TEXT, which is the module docstring's rule
+    # applied one node over. `store_effective_content` stores `text` for an LLM summary and
+    # not for a concatenation, because a concatenation is the children's own prose and
+    # writing it here would enter the same text into the full-text index twice under a node
+    # whose content it is not. The vector below stands for that text either way.
+    content = record.get("text")
+    structured = {
+        SOURCE_NODE_KEY: doc.id,
+        "tree_kind": SUMMARY_TREE_KIND,
+        "method": record.get("method"),
+        "member_ids": list(members),
+        "member_count": len(members),
+    }
+
+    if created:
+        node = DocumentRepository(session).create(
+            title=f"Summary of {label}",
+            content=content,
+            parent_id=root_id,
+            usetype=USETYPE_SUMMARY,
+            structured_content=structured,
+            # The vector is copied below. `auto_embed=True` would run the model over the
+            # summary text a second time — and over NOTHING at all in the concatenated
+            # case, where this node has no content of its own.
+            auto_embed=False,
+            produced_by=TASK_SUMMARIZE_TREE,
+        )
+    else:
+        node.title = f"Summary of {label}"
+        node.content = content
+        node.structured_content = structured
+    node.embed = list(doc.embed)
+    session.flush()
+
+    _rewrite_member_links(session, node.id, members)
+    session.flush()
+
+    return TaskOutcome(
+        detail={
+            "derived_root_id": root_id,
+            "derived_node_id": node.id,
+            "created": created,
+            "tree_kind": SUMMARY_TREE_KIND,
+            "method": record.get("method"),
+            "members": len(members),
+            "has_content": content is not None,
+        }
+    )
+
+
+def _derived_node_for(session: Session, root_id: int, source_node_id: int) -> Optional[Document]:
+    """The summary node already standing for ``source_node_id`` under ``root_id``, if any.
+
+    ``one_or_none``, so two nodes for one source raise rather than resolve to whichever the
+    index returned first. That state is not survivable by picking one: the two carry
+    different member sets, and a projection that reads either is reading half a tree.
+    """
+    return session.execute(
+        select(Document).where(
+            Document.parent_id == root_id,
+            Document.structured_content[SOURCE_NODE_KEY].astext == str(source_node_id),
+        )
+    ).scalar_one_or_none()
+
+
+def _rewrite_member_links(session: Session, node_id: int, members: Sequence[int]) -> None:
+    """Replace this derived node's ``summarizes`` edges with one per member, in order.
+
+    Delete-then-insert, which is Block D step 16's discipline for a derived edge scoped the
+    way this handler can scope it: ``DocumentRepository.rederive_links`` deletes everything
+    a RULE produced, and this rule produces edges for every node in the store, so a rebuild
+    of one node's edges through it would delete every other node's. Scoping the delete to
+    this derived node's own outgoing edges is complete for the same reason — nothing else
+    writes an edge out of a node this handler created.
+
+    ``derived_by`` IS stamped, and this is the first writer of migration 019's column. The
+    edges are a rule's output and a re-run does delete and rebuild them, which is the exact
+    fact the column was added to record.
+
+    ``position`` in the metadata because the members are in document order (:func:`child_ids`)
+    and the module docstring's point about order applies here too: ingestion is the last
+    moment at which it is free, and an edge set is unordered.
+    """
+    session.execute(
+        delete(DocumentLink).where(
+            DocumentLink.source_id == node_id,
+            DocumentLink.link_type == SUMMARIZES_LINK_TYPE,
+        )
+    )
+    repo = DocumentRepository(session)
+    for position, member_id in enumerate(members):
+        link = repo.create_link(
+            source_id=node_id,
+            target_id=member_id,
+            link_type=SUMMARIZES_LINK_TYPE,
+            metadata={"position": position},
+        )
+        link.derived_by = TASK_SUMMARIZE_TREE
 
 
 def _scope_node(session: Session, task: TaskQueue) -> Document:

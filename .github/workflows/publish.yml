@@ -1,5 +1,5 @@
-# Release pipeline. docs/RELEASING.md step 5 — the step that, when this file landed, had
-# never run.
+# Release pipeline. docs/RELEASING.md step 5. It has published once by itself, at 0.3.0
+# (run 33789142352, 2026-09-03: both wheels, 20 s, with attestations).
 #
 # Shape: gate -> build -> publish. The publish job consumes ONLY the artifacts `build`
 # produced; it never sees the source tree and never builds anything, so what reaches PyPI
@@ -13,15 +13,20 @@
 # `github.com/jmccardle/jmfts`. Run from the internal git remote it has no identity to
 # exchange, and no amount of configuration here changes that.
 #
-# THE BOOTSTRAP, before anyone points this at a new name. Trusted Publishing cannot create
-# a project that has never been published. A new project is registered as a *pending*
-# publisher, and PyPI allows exactly one pending row per configuration, so the second name
-# registered against this same (owner, repo, workflow, environment) is refused with "A
-# pending trusted publisher matching this configuration has already been registered for a
-# different project name." Each distribution therefore needs ONE hand upload with an
-# account-scoped token before this file can ever publish it. `jmfts` and `jmfts-client`
-# were both unregistered on 2026-08-21. docs/RELEASING.md step 5 is the long version; read
-# it before adding a second entry to the `dist` matrix below.
+# THE BOOTSTRAP IS DONE FOR THESE TWO NAMES, and the note below is kept because it is
+# waiting for the next name anyone points this file at. Both `jmfts` and `jmfts-client`
+# exist on PyPI and each carries a trusted publisher under the project itself; the earlier
+# wording here said neither name existed, which stopped being true at 0.2.0.
+#
+# Trusted Publishing cannot create a project that has never been published. A new project
+# is registered as a *pending* publisher, and PyPI allows exactly one pending row per
+# configuration, so the second name registered against this same (owner, repo, workflow,
+# environment) is refused with "A pending trusted publisher matching this configuration has
+# already been registered for a different project name." Each distribution therefore needs
+# ONE hand upload with an account-scoped token before this file can ever publish it — and a
+# hand upload does NOT consume the pending row, which is what made 0.2.1 fail with
+# `invalid-pending-publisher`. docs/RELEASING.md step 5 is the long version; read it before
+# adding a second entry to the `dist` matrix below.
 #
 # "Fail Early" (CLAUDE.md): no `continue-on-error`, no `|| true`, no `skip-existing`. A
 # half-finished release must fail loudly, because a PyPI version number cannot be reused
@@ -86,15 +91,19 @@ jobs:
         # they drift. If a future distribution in this tree needs its own cadence, that
         # needs a tag namespace per distribution and a filter here — not a loosened check.
         #
-        # BOOTSTRAPPED, AND NOT YET PUBLISHING. Both names exist on PyPI at 0.2.0, hand
-        # uploaded with an account-scoped token on 2026-08-22. That is what the note above
-        # asked for and it is not sufficient: a hand upload does not consume the *pending*
-        # publisher, which then matches nothing, because a pending row cannot authorise an
-        # upload to a project that already exists. The v0.2.1 tag push therefore built two
-        # clean distributions and failed the token exchange with
-        # `invalid-pending-publisher: valid token, but project already exists`. The fix is
-        # a publisher added under each PROJECT on PyPI and the pending row deleted —
-        # nothing in this file changes. docs/RELEASING.md step 5 has the exact form.
+        # PUBLISHING, since 0.3.0 on 2026-09-03. The two steps between the note above and
+        # that are worth keeping, because the second one is not in anybody's instructions:
+        #
+        #   1. Both names were hand uploaded at 0.2.0 with an account-scoped token, which
+        #      is what creates the projects.
+        #   2. A hand upload does NOT consume the *pending* publisher. It stays pending,
+        #      matching nothing, because a pending row cannot authorise an upload to a
+        #      project that already exists — so the v0.2.1 tag push built two clean
+        #      distributions and then failed the token exchange with
+        #      `invalid-pending-publisher: valid token, but project already exists`.
+        #      The fix was a publisher added under each PROJECT and the pending row
+        #      deleted. Nothing in this file changed. docs/RELEASING.md step 5 is the
+        #      long version.
         dist:
           - name: jmfts
             # Directory holding the pyproject.toml to build. The repository root, for now.

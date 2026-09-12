@@ -16,7 +16,7 @@ keeps ``embed`` opt-in and coerces with ``float(x)``.
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DocumentResponse(BaseModel):
@@ -48,10 +48,25 @@ class DocumentResponse(BaseModel):
     # 'settled'. It is still worth serialising: a direct GET of a node mid-ingestion is
     # the one place a client can tell "not ready" from "this is the answer".
     settled: str = "settled"
+    # Where `content` above came from: 'stored' | 'effective'.
+    #
+    # A container node's `documents.content` is NULL by design — `store_effective_content`
+    # embeds the concatenation of its children and deliberately does not store it, because
+    # a concatenation is derivable from the subtree it came from. The EMBEDDING is stored,
+    # so the node is a first-class retrieval target with nothing to display, and on a real
+    # corpus it is usually the BEST target: 26,870 of 57,492 settled nodes are in this
+    # state, and a container outscored every descendant in its own subtree 53 times out of
+    # 59 (`docs/STRESS_CORPUS.md` 4.7).
+    #
+    # Search therefore fills `content` by projection and says so here. 'effective' means
+    # the text was computed from the subtree at read time and is not a column; a caller
+    # writing it back would be storing the duplication the pipeline declined to store.
+    # Everything else — a document read, a leaf, any node with its own content — is
+    # 'stored', which is the default, so no existing construction of this model changes.
+    content_source: str = "stored"
     embed: Optional[list[float]] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
     @classmethod
     def from_document(cls, doc, *, include_embed: bool = False) -> "DocumentResponse":
@@ -133,6 +148,20 @@ class DocumentCreate(BaseModel):
     # gets a full document vector, it just skips the token vectors it cannot fit
     # (mirrors DocumentRepository.create's embed_tokens). See KNOWN-DEFECTS D1.
     embed_tokens: bool = True
+    # Whether the document is also written to the `default` BM25 inverted index, inline,
+    # the way `auto_embed` writes its vectors inline.
+    #
+    # DEFAULT TRUE, and the default is the fix. `POST /documents` enqueues nothing — the
+    # `index:bm25` task belongs to the queued ingest path — so a document created this way
+    # used to carry vectors and no postings. It was findable by /search/vector and
+    # /search/fulltext (the full-text GIN is a live expression index over title || content,
+    # so it needs no write), and invisible to the bm25 leg of /search/hybrid, whose tuned
+    # weight is 0.14 of the fusion. The README's own worked example does create-then-hybrid
+    # and hit exactly that.
+    #
+    # Pass False when something else will index the document — a bulk load that indexes
+    # once at the end, or a node whose usetype the index excludes anyway.
+    auto_index_bm25: bool = True
     # CR-1 sibling ordering. None (default) inherits ordered-ness from the parent;
     # True auto-assigns the next sibling position; False leaves position NULL.
     sequential: Optional[bool] = None
@@ -202,8 +231,7 @@ class LinkResponse(BaseModel):
     metadata: dict
     created_at: Optional[datetime]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ============================================================================
