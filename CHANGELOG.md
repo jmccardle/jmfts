@@ -10,6 +10,46 @@ Dates are the release commit's date. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses semantic
 versioning with the caveat that it is pre-1.0, so a minor version may break the wire.
 
+## [0.5.1] — 2026-09-12
+
+**Development moves into this repository.** Up to 0.5.0 the public tree was a per-release
+squash — one commit per version, copied out of a private tree by a publish step, with the
+working record left behind. From this release there is ONE history on two remotes, a
+private git host and `github.com/jmccardle/jmfts`, and a commit reaches both as it is made.
+The squash chain below is kept as it stands; nothing already published is rewritten. What
+changes for a reader: the commits are the ones that were actually written, the branches are
+real, and the release history stops being a thing you are told about. A pass over the
+held-back documents is still outstanding, so a source comment may still cite a file this
+tree does not carry — see "A note on documentation" in the README, which is now a shrinking
+list rather than a standing policy.
+
+### Fixed
+
+- **The ANN gate test that failed public CI on 0.5.0 was asserting a cost estimate, not the
+  ORDER BY it was written for.** `tests/test_filtered_recall.py::test_shipped_order_by_reaches_the_index`
+  read the planner's UNFORCED choice of plan, and on its 230-row fixture that choice is a
+  cost comparison whose answer depends on whether `documents` carries statistics — which
+  `jmfts_test` keeps for the whole run, outside the fixture's rollback, at autovacuum's
+  discretion. Measured on pgvector 0.8.6 / PostgreSQL 16.15: with no statistics the shipped
+  statement prices the HNSW scan at 8.04 against 14.72 for a scan and a top-N sort and the
+  index wins; after `ANALYZE documents` it prices 517.75 against 16.60 and the sequential
+  scan wins, correctly — 230 rows fit in twelve pages. `ANALYZE documents` and nothing else
+  reproduces the CI failure exactly, including its `Seq Scan on documents
+  (cost=0.00..33.36 rows=1)`. **There was nothing to bisect**: the suite is green on the
+  development machine at the same commit that is red on the runner. The test now makes its
+  statistics rather than finding them and asserts with `enable_seqscan = off`, which is
+  what the sibling test one function down had done since 0.5.0 and for the reason its
+  docstring already gave. That does not blunt it: in both statistics states the 0.3.0
+  `ORDER BY score DESC` top-N heapsorts a Bitmap Heap Scan at 2675.89 and never names
+  `idx_documents_embed`, while the operator form index-scans. What the test no longer
+  claims is that PostgreSQL will CHOOSE HNSW at this size; asserting that needs thousands
+  of rows, which is a benchmark and not a gate.
+
+**Still open, and unchanged by this release:** the zero-row index scans described under
+0.5.0, and `tests/test_maxsim_recall.py`'s 0.90 threshold with no margin. Both remain
+0.6.0 entry conditions. The statistics mechanism above is a plausible account of the first
+and has not been measured against it.
+
 ## [0.5.0] — 2026-09-12
 
 **This release is 0.5.0 and there is no 0.4.0.** Most of what `docs/SPRINT_0_4_0.md`
@@ -453,7 +493,8 @@ says. Both paragraphs become steps in the 0.6.0 plan, and they are the entry con
 
 First release with packaging metadata and the tests that make a release possible.
 
-[Unreleased]: https://github.com/jmccardle/jmfts/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/jmccardle/jmfts/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/jmccardle/jmfts/releases/tag/v0.5.1
 [0.5.0]: https://github.com/jmccardle/jmfts/releases/tag/v0.5.0
 [0.3.0]: https://github.com/jmccardle/jmfts/releases/tag/v0.3.0
 [0.2.1]: https://github.com/jmccardle/jmfts/releases/tag/v0.2.1

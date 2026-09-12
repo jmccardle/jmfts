@@ -111,7 +111,7 @@ uvicorn jmfts_core.rest.main:app --host 0.0.0.0 --port 8100 --reload
 ```
 
 This tree builds two distributions, and the first line is not optional. `jmfts` declares
-`jmfts-client==0.5.0` with `==`, so the second line alone resolves that exact version
+`jmfts-client==0.5.1` with `==`, so the second line alone resolves that exact version
 from PyPI and shadows the checkout you meant to work in.
 
 ### Reading and driving the API
@@ -281,6 +281,13 @@ a document that will land later.
 Those names are deliberately not written as links. There is nothing in this
 tree for them to point at, and marking them up as paths would promise
 otherwise.
+
+**This list is meant to shrink.** Up to 0.5.0 it could not: the public tree was
+a per-release squash of a private one and holding a document back was the same
+act as publishing the code. From 0.5.1 development happens here, so a document
+joins this repository when it has had a review pass rather than when a release
+runs. A name above that is still here in a later version is one that has not had
+that pass yet.
 
 **`docs/reference/` is the exception, and it is here now.** Around four hundred
 source comments cite a held-back document, so for a reader outside this project

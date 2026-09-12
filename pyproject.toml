@@ -44,7 +44,7 @@ dependencies = [
     # verb that is missing or whose parameters moved — at call time, on the wire, not at
     # install time. `./bump-version.sh` moves this line and both `__version__` literals
     # together, and tests/test_packaging.py fails if they disagree.
-    "jmfts-client==0.5.0",
+    "jmfts-client==0.5.1",
     "fastapi>=0.109.0",
     # Required by the multipart upload route (POST /ingest/file). NOT optional and NOT
     # lazy: FastAPI checks for it while the ROUTE IS BUILT, i.e. at
