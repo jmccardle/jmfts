@@ -79,6 +79,24 @@ pytestmark = pytest.mark.skipif(not DB_READY, reason="test database not provisio
 #: token rows.
 MINIMUM_RECALL = 0.90
 
+#: What the assertions below actually compare against, which is not :data:`MINIMUM_RECALL`.
+#:
+#: A full-suite run on 2026-09-12 failed here on ``assert 0.8999999999999999 >= 0.9``. That
+#: value is ONE ULP below 0.9, and the mean cannot land near it by measurement: each
+#: ``recall@10`` is a multiple of 1/10 over :data:`QUERIES` = 24 queries, so every achievable
+#: exact mean is a multiple of 1/240 and the nearest one below 0.9 is
+#: ``21.5/24 = 0.8958333333333334``. The measurement was therefore exactly 0.90 and
+#: :attr:`Measured.gated_mean` lost it to accumulation order — ``sum()`` adds left to right,
+#: and over 200,000 shuffles of a 24-value multiset whose exact mean is 0.9 the result ranges
+#: from ``0.8999999999999996`` to ``0.9000000000000004``, straddling the comparison. The
+#: order is the order the queries came back in, which nothing fixes.
+#:
+#: So this is the bottom of that range with a further 1e-15 under it, about 13 ULP below 0.9.
+#: It does not weaken the threshold: a single query losing a single neighbour reads
+#: 0.8958333333333334, which is 0.0042 below this floor — four hundred times the tolerance,
+#: and still red. The only readings it admits that 0.90 refused are the ones that ARE 0.90.
+RECALL_FLOOR = 0.8999999999999996 - 1e-15
+
 #: Chunks to seed. Two constraints, from opposite directions. Below about 2,000 token rows
 #: the planner prefers a sort and reads no index at all, and a recall number off a
 #: sequential scan measures nothing — `ann_plan_reaches_the_index` is the guard, and 945
@@ -240,10 +258,15 @@ def test_a_shortfall_here_is_never_explained_by_the_read_gate(measured):
     durable is the attribution: while the gated arm falls short, the ungated arm falls short
     too, so the gate is never the account of it. When the shortfall is gone there is nothing
     left to attribute and this passes with nothing to say.
+
+    Both arms are read against :data:`RECALL_FLOOR` rather than :data:`MINIMUM_RECALL`,
+    because "falls short" has to mean the same thing on the control as on the arm it is a
+    control for. A floor on one and a bare threshold on the other would make this fire on a
+    pair of arms that both measured exactly 0.90.
     """
-    if measured.gated_mean >= MINIMUM_RECALL:
+    if measured.gated_mean >= RECALL_FLOOR:
         return
-    assert measured.open_mean < MINIMUM_RECALL, (
+    assert measured.open_mean < RECALL_FLOOR, (
         f"the gated arm reads {measured.gated_mean:.4f} and falls short, but the UNGATED arm "
         f"reads {measured.open_mean:.4f} and clears the threshold. The read gate would then "
         "be the account of the shortfall, and this file's conclusion — that the loss is the "
@@ -262,8 +285,13 @@ def test_maxsim_returns_the_documents_it_ranked(measured):
     appliance issues none: this is the configuration a caller gets. `maxsim_search`'s own
     `SET LOCAL hnsw.iterative_scan` is left standing for the same reason. Ground truth is
     the same call on the same rows with every index path denied.
+
+    The comparison is against :data:`RECALL_FLOOR`, which is :data:`MINIMUM_RECALL` less a
+    tolerance smaller than the gap between any two achievable means. That constant records
+    why. The threshold this file asserts is still 0.90 and the failure message still names
+    it; what moved is only the ability of `sum()/len()` to decide a tie against itself.
     """
-    assert measured.gated_mean >= MINIMUM_RECALL, (
+    assert measured.gated_mean >= RECALL_FLOOR, (
         f"maxsim_search returned {measured.gated_mean:.4f} of the documents an exact scan "
         f"ranks in its top {LIMIT}, against a threshold of {MINIMUM_RECALL}." + _diagnosis(measured)
     )
