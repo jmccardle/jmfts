@@ -24,6 +24,31 @@ from jmfts_core.repositories.search import SearchRepository
 # transaction + create_savepoint), so endpoint commits can't leak.
 
 
+def _near(query, k):
+    """A vector distinct from ``query`` and from every other ``k``, at a fixed distance.
+
+    The tests below query with a vector and then check WHICH documents came back. They used
+    to store that same vector in the documents. That is not what made
+    ``tests/test_usetype_filter.py`` flaky — these tests each run ONCE per run, so nothing
+    here piles rolled-back copies of a vector onto the point a later round searches, which
+    is the condition that file's :func:`_document_vector` records and measures. It is the
+    same shape, though, and it is only the absence of repetition that keeps it safe: a
+    positive assertion like "the chunk must appear" rests on an HNSW scan finding a row
+    stored at the exact query point, which is the case that degrades first.
+
+    So this removes the dependency rather than fixing an observed failure. The offset is
+    taken orthogonal to ``query`` and the result normalised, so every ``k`` lands the same
+    cosine distance away and no document outranks another on content.
+    """
+    base = np.asarray(query, dtype=np.float64)
+    base = base / np.linalg.norm(base)
+    off = np.random.default_rng(9_000 + k).standard_normal(base.shape[0])
+    off -= base * float(off @ base)
+    off /= np.linalg.norm(off)
+    vec = base + 0.1 * off
+    return (vec / np.linalg.norm(vec)).tolist()
+
+
 def _create_doc(session, title=None, content=None, parent_id=None, usetype=None):
     """Create a document directly via ORM, bypassing embedding.
 
@@ -559,7 +584,7 @@ class TestEntityPollution:
             parent_id=root.id,
             usetype="raw/chunk",
         )
-        chunk.embed = fake_embed
+        chunk.embed = _near(fake_embed, 1)
         entity = _create_doc(
             db_session,
             title="Python",
@@ -567,7 +592,7 @@ class TestEntityPollution:
             parent_id=chunk.id,
             usetype="entity",
         )
-        entity.embed = fake_embed
+        entity.embed = _near(fake_embed, 2)
         db_session.flush()
 
         repo = SearchRepository(db_session)
@@ -620,7 +645,7 @@ class TestEntityPollution:
             parent_id=root.id,
             usetype="entity",
         )
-        entity.embed = fake_embed
+        entity.embed = _near(fake_embed, 1)
         db_session.flush()
 
         repo = SearchRepository(db_session)
@@ -637,7 +662,7 @@ class TestEntityPollution:
         fake_embed = np.random.default_rng(77).normal(size=768).tolist()
 
         doc = _create_doc(db_session, title="Untyped doc", content="Some content", usetype=None)
-        doc.embed = fake_embed
+        doc.embed = _near(fake_embed, 1)
         db_session.flush()
 
         repo = SearchRepository(db_session)
@@ -661,7 +686,7 @@ class TestEntityPollution:
             parent_id=root.id,
             usetype="entity",
         )
-        entity.embed = fake_embed
+        entity.embed = _near(fake_embed, 1)
         db_session.flush()
 
         repo = SearchRepository(db_session)
@@ -687,7 +712,7 @@ class TestEntityPollution:
             parent_id=root.id,
             usetype="raw/chunk",
         )
-        chunk.embed = fake_embed
+        chunk.embed = _near(fake_embed, 1)
         entity = _create_doc(
             db_session,
             title="Flask",
@@ -695,7 +720,7 @@ class TestEntityPollution:
             parent_id=root.id,
             usetype="entity",
         )
-        entity.embed = fake_embed
+        entity.embed = _near(fake_embed, 2)
         db_session.flush()
 
         repo = SearchRepository(db_session)

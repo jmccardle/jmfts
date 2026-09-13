@@ -22,6 +22,7 @@ and something else in the fourth is the same class of defect as the one above, s
 gets the same fixture and the same expected set.
 """
 
+import itertools
 from unittest.mock import patch
 
 import numpy as np
@@ -70,18 +71,91 @@ FIXTURE: dict[str, str | None] = {
 SAID = {"daily", "twentysix", "note"}
 
 
+#: Which neighbourhood :func:`_seed` last placed the fixture in. Counted rather than fixed,
+#: for the reason :func:`_document_vector` records: a vector this file has already written
+#: and rolled back is the one vector it must not write again.
+_ROUND = itertools.count()
+
+#: The current neighbourhood's centre, set by :func:`_seed` and read by :func:`_query_vector`.
+_BASE: list[float] | None = None
+
+
+def _new_base() -> list[float]:
+    """A fresh dense unit vector, one per :func:`_seed` call, stable across runs.
+
+    Dense because a real embedder produces no zero coordinates. Seeded from a counter rather
+    than from entropy so that a failure reproduces: round *n* of a run is round *n* of the
+    next one, whatever the direction happens to be. Nothing here asserts on the direction —
+    only on which documents came back — so the direction is free to move.
+    """
+    rng = np.random.default_rng(20260912 + next(_ROUND))
+    vec = rng.standard_normal(DIM).astype(np.float32)
+    return (vec / np.linalg.norm(vec)).tolist()
+
+
 def _query_vector() -> list[float]:
-    vec = [0.0] * DIM
-    vec[0] = 1.0
-    return vec
+    """The centre of the neighbourhood the current fixture was seeded in.
+
+    A copy, so a test that mutates what it gets back cannot move the next query.
+    """
+    global _BASE
+    if _BASE is None:
+        _BASE = _new_base()
+    return list(_BASE)
+
+
+#: How far each document sits off the query direction. Big enough that no two documents are
+#: near-duplicates of one another — pairwise cosine distance is about 0.010, against the
+#: 0.005 that separates each of them from the query — and small enough that all seven remain
+#: the query's nearest neighbours by a wide margin.
+OFF_AXIS = 0.1
+
+
+def _document_vector(name: str) -> list[float]:
+    """A DISTINCT vector for ``name``, the same cosine distance from the query as the rest.
+
+    The offset is taken ORTHOGONAL to the query direction and then the result is normalised,
+    so every document's cosine similarity to :func:`_query_vector` is ``1/sqrt(1 +
+    OFF_AXIS**2)`` exactly, whatever ``name`` is. The fixture therefore keeps the property
+    the tests below rely on — no method can rank one document above another on content —
+    without giving two rows the same bytes.
+
+    **Why the vectors move between calls**, which is what changed on 2026-09-12. A rolled
+    back row leaves its node in the HNSW graph, so a file that seeds the same point in test
+    after test searches a graph holding dead copies of the very vector it is looking for,
+    and such a search returns a SUBSET of the live rows that match. Measured standalone on
+    ``pgvector/pgvector:pg16``, PostgreSQL 16.15 with pgvector 0.8.6, over 200 rounds of
+    "seed seven rows, ask for them back, roll back": 59 rounds short at pgvector's default
+    scan, 24 at ``relaxed_order``, 2 at the ``strict_order`` that
+    ``repositories/search.py:52`` sets — most of them returning ONE row of seven. Four tests
+    in this file failed intermittently in CI for that reason, and they were measuring HNSW
+    recall while claiming to measure a usetype filter.
+
+    Distinct vectors at ONE point did not fix it — 40 rounds of 200 still came up short,
+    because the dead copies pile up at each document's OWN point rather than at a shared
+    one. Moving the neighbourhood is what fixes it, and it is also what a real corpus does:
+    no two ingests store the same vector. This is not a workaround for the defect, which is
+    real and outlives the fixture; it is this file declining to measure it.
+    """
+    base = np.asarray(_query_vector(), dtype=np.float64)
+    rng = np.random.default_rng(1000 + list(FIXTURE).index(name))
+    off = rng.standard_normal(DIM)
+    off -= base * float(off @ base)
+    off /= np.linalg.norm(off)
+    vec = base + OFF_AXIS * off
+    return (vec / np.linalg.norm(vec)).astype(np.float32).tolist()
 
 
 def _seed(session) -> dict[str, int]:
     """One document per :data:`FIXTURE` entry, all equally good answers to every method.
 
-    Every document gets the SAME embedding and the same body text, so no method can rank
-    one above another on content. Whatever comes back is what the filter admitted.
+    Every document carries the same body text and a vector the same distance from the query
+    as every other document's, so no method can rank one above another on content. Whatever
+    comes back is what the filter admitted. The vectors are distinct rather than identical
+    for the reason :func:`_document_vector` records.
     """
+    global _BASE
+    _BASE = _new_base()
     repo = DocumentRepository(session)
     ids: dict[str, int] = {}
     for name, usetype in FIXTURE.items():
@@ -91,7 +165,7 @@ def _seed(session) -> dict[str, int]:
             usetype=usetype,
             auto_embed=False,
         )
-        doc.embed = _query_vector()
+        doc.embed = _document_vector(name)
         ids[name] = doc.id
     session.flush()
     return ids
