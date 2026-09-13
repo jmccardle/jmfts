@@ -219,10 +219,24 @@ requires_db = pytest.mark.skipif(not DB_READY, reason="test database not provisi
 #: runs in BOTH trees, which is what the old premise lacked: nothing anywhere failed when
 #: adding a path to ``PUBLISHED`` invalidated it.
 #:
-#: ``ROADMAP.md`` is top-level, so publishing another ``docs/`` subdirectory cannot reach
-#: it, and it is internal by a decision recorded in ``CLAUDE.md``: ``CHANGELOG.md`` is the
-#: published account of what shipped, and ``ROADMAP.md`` is the internal one.
-INTERNAL_TREE_MARKER = "ROADMAP.md"
+#: It was ``ROADMAP.md`` from 0.5.0 until 0.5.1, on the ground that publishing another
+#: ``docs/`` subdirectory could not reach a top-level file. That ground held and the
+#: decision under it did not: ``ROADMAP.md`` is published now, so the marker moved rather
+#: than being invalidated a second time. The mechanism worked — the marker is a claim about
+#: ``PUBLISHED`` and there is a test that holds it against ``PUBLISHED`` in both trees.
+#:
+#: ``docs/OFFICE_SPEC.md`` is the marker now, and it is the narrower and more honest
+#: choice: it is not merely absent from the public tree, it is what three of the skipped
+#: tests actually READ. ``tests/corpus/test_vocabulary.py`` parses Part 2's pattern tables,
+#: so if that document is ever published those tests SHOULD start running, and this marker
+#: is what makes them. The old marker had no such relationship to anything it skipped.
+#:
+#: The risk this trades into is the one the 0.5.0 failure came from — a ``docs/`` path can
+#: be reached by publishing a ``docs/`` subdirectory — and it is bounded by the same test,
+#: which compares the marker against every entry in ``PUBLISHED`` by prefix. Publishing
+#: ``docs/`` wholesale is what this file would need to survive next, and that is a decision
+#: somebody makes on purpose rather than a side effect.
+INTERNAL_TREE_MARKER = "docs/OFFICE_SPEC.md"
 
 #: True in the development tree, False in a public checkout.
 IS_INTERNAL_TREE = (_REPO_ROOT / INTERNAL_TREE_MARKER).is_file()
@@ -231,8 +245,9 @@ IS_INTERNAL_TREE = (_REPO_ROOT / INTERNAL_TREE_MARKER).is_file()
 #:
 #: ``tests/`` IS published, so every test in this suite runs again in the public
 #: repository, against a tree that is missing the working record in ``docs/`` (all of it
-#: except the generated ``docs/reference/`` pages), ``ROADMAP.md``, ``benchmarks/`` and
-#: whatever ``NOT_PUBLISHED`` carves out. A test that reads one of those does not fail
+#: except the generated ``docs/reference/`` pages and the current sprint plan),
+#: ``benchmarks/`` and whatever ``NOT_PUBLISHED`` carves out. A test that reads one of
+#: those does not fail
 #: there because anything is wrong; it fails because it was asked a question that tree
 #: cannot answer.
 #:

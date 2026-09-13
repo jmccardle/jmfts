@@ -274,9 +274,16 @@ naming any of INGEST_SPEC.md, SPRINT_JOBS.md, OFFICE_SPEC.md, SPRINT_0_3_0.md,
 SPRINT_0_4_0.md, SPRINT_0_5_0.md, SPRINT_0_4_0_DRAFT.md, CORPUS.md, RELEASING.md,
 KNOWN-DEFECTS.md, MEASURE_SHACL_SCOPE.md, MEASURE_TYPED_WALK.md,
 MEASURE_BM25_BOUNDARY.md, ANN_INDEX_HEALTH.md, STRESS_CORPUS.md,
-ROADMAP.md, ROADMAP_HISTORY.md, AGENTIC_KNOWLEDGEBASE.md, RERANKER_CRITIQUE.md,
+ROADMAP_HISTORY.md, AGENTIC_KNOWLEDGEBASE.md, RERANKER_CRITIQUE.md,
 API_UNIFICATION_CONTRACT_NOTES.md or research/INTERMEDIATE_FORMATS.md points at
 a document that will land later.
+
+**`ROADMAP.md` left that list on 2026-09-13 and is the first name to do so.** It
+is here, at the top level: what is open, what is deferred and what gates each,
+and the Experiment Log — including the negative results, which are the reason
+several things are *not* in the tree. `docs/SPRINT_0_6_0.md` is the current
+sprint plan and is here for the same reason. The plans for releases already cut
+are not.
 
 Those names are deliberately not written as links. There is nothing in this
 tree for them to point at, and marking them up as paths would promise

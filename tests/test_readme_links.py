@@ -44,6 +44,15 @@ README = (REPO / "README.md").read_text(encoding="utf-8")
 #: ``.githooks/`` and ``bump-version.sh`` are published because the public tree is what a
 #: contributor clones. A gate they cannot run, and a release step they would have to do by
 #: hand, are both worse than the two small files.
+#:
+#: **This constant describes rather than drives, from 0.5.1 on.** It was the copy list for a
+#: release step that built the public tree out of an internal one, and that step no longer
+#: runs: development happens in the public repository. It is kept because it is still the
+#: definition of "what the world sees" that four tests in this file and
+#: ``conftest.INTERNAL_TREE_MARKER`` are written against, and because the held-back half of
+#: ``docs/`` is still held back. Adding a path here remains a decision about what the world
+#: sees; what changed is that the decision now takes effect by committing the file rather
+#: than by a copy.
 PUBLISHED = (
     ".dockerignore",
     ".env.example",
@@ -56,6 +65,13 @@ PUBLISHED = (
     "Dockerfile.worker",
     "LICENSE",
     "README.md",
+    # Published 2026-09-13, and it took `conftest.INTERNAL_TREE_MARKER` with it — the marker
+    # WAS this file. `CHANGELOG.md` is still the account of what shipped and this is still
+    # the account of what has not; what changed is that the second one is no longer a reason
+    # to keep a reader out. The dated status narrative and the archive index did not come
+    # with it, because `CHANGELOG.md` carries the first and the second points at a file that
+    # is still internal.
+    "ROADMAP.md",
     "bump-version.sh",
     "deploy/",
     "docker-compose.yml",
@@ -66,6 +82,14 @@ PUBLISHED = (
     # the way it is and stays internal; these say WHAT it accepts, which is what an
     # integrator needs and what the held-back citations currently deny them.
     "docs/reference/",
+    # The CURRENT sprint plan, and only the current one. `ROADMAP.md` above says what is
+    # open and this says what is being done about it in this release; a reader who can see
+    # the first and not the second can see that a decision was made and not what it was.
+    # The plans for releases already cut stay internal until they have had the review pass
+    # the README's note describes — so this file cites `docs/SPRINT_0_4_0.md` and
+    # `docs/SPRINT_0_5_0.md` the way every other citation to a held-back document works,
+    # and says so where it does it.
+    "docs/SPRINT_0_6_0.md",
     "jmfts-client/",
     "jmfts_batch/",
     "jmfts_core/",

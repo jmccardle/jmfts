@@ -339,12 +339,20 @@ pytest tests/corpus -q             # no database, no optional dependency
 
 ## Documentation
 
-`docs/` is the working record and stays in this tree; the public repository carries
-`README.md`, `CLAUDE.md`, `CHANGELOG.md` and the generated `docs/reference/` pages. The
-subset that ships is `tests/test_readme_links.py::PUBLISHED`, and `docs/RELEASING.md` cites
-that constant rather than repeating it.
+`docs/` is the working record. Most of it is still held back; what this repository carries is
+`README.md`, `CLAUDE.md`, `CHANGELOG.md`, `ROADMAP.md`, the current sprint plan
+(`docs/SPRINT_0_6_0.md`) and the generated `docs/reference/` pages. The subset is
+`tests/test_readme_links.py::PUBLISHED`, and `docs/RELEASING.md` cites that constant rather
+than repeating it.
 
-Over four hundred source comments cite a `docs/` file by part and section. Count them
+**`PUBLISHED` describes rather than drives, from 0.5.1 on.** It was the copy list for a
+release step that built a public tree out of an internal one, and that step no longer runs —
+development happens here. It is still the definition four tests and
+`conftest.INTERNAL_TREE_MARKER` are written against, so adding a path is still a decision
+about what the world sees; what changed is that the decision takes effect by committing the
+file.
+
+Around seven hundred source comments cite a `docs/` file by part and section. Count them
 rather than trusting the number below, which is a reading and not a rule:
 
 ```bash
@@ -353,21 +361,25 @@ git grep -hoE "(research/)?[A-Z][A-Z0-9_-]*\.md" -- \
   sort | uniq -c | sort -rn
 ```
 
-Read 2026-09-10: `SPRINT_JOBS.md` 158, `INGEST_SPEC.md` 149, `SPRINT_0_5_0.md` 80,
-`OFFICE_SPEC.md` 78, `SPRINT_0_3_0.md` 69, `SPRINT_0_4_0.md` 43, `STRESS_CORPUS.md` 17,
-`ANN_INDEX_HEALTH.md` 14, `CORPUS.md` 12,
-`RELEASING.md` 11, `ROADMAP.md` 9, `MEASURE_SHACL_SCOPE.md` 7, `KNOWN-DEFECTS.md` 7 (D1–D4
+Read 2026-09-13: `SPRINT_JOBS.md` 158, `INGEST_SPEC.md` 149, `SPRINT_0_5_0.md` 87,
+`OFFICE_SPEC.md` 80, `SPRINT_0_3_0.md` 70, `SPRINT_0_4_0.md` 44, `STRESS_CORPUS.md` 28,
+`ANN_INDEX_HEALTH.md` 26, `CORPUS.md` 12,
+`RELEASING.md` 11, `ROADMAP.md` 12 (**published 2026-09-13**, so these twelve now resolve),
+`MEASURE_SHACL_SCOPE.md` 7, `KNOWN-DEFECTS.md` 7 (D1–D4
 anchors, all resolved; the file moved to `docs/archive/` on 2026-09-04 and the six
 citations that carried a path were updated with it — the bare `KNOWN-DEFECTS D1` form
 names an anchor, not a path, and was left alone),
-`AGENTIC_KNOWLEDGEBASE.md` 4, `archive/ROADMAP_HISTORY.md` 2, `RERANKER_CRITIQUE.md` 1,
-`research/INTERMEDIATE_FORMATS.md` 1, `MEASURE_TYPED_WALK.md` 1,
-`MEASURE_BM25_BOUNDARY.md` 1, `archive/SPRINT_0_4_0_DRAFT.md` 1. The command also reports
+`AGENTIC_KNOWLEDGEBASE.md` 4, `MEASURE_TYPED_WALK.md` 5, `archive/ROADMAP_HISTORY.md` 2,
+`RERANKER_CRITIQUE.md` 1,
+`research/INTERMEDIATE_FORMATS.md` 1,
+`MEASURE_BM25_BOUNDARY.md` 1, `archive/SPRINT_0_4_0_DRAFT.md` 1, `SPRINT_0_6_0.md` 1. The
+command also reports
 `README.md`, `CLAUDE.md`, `CHANGELOG.md` and `INVENTORY-2026-04-05.md`; the first three
 ship, and the fourth is a corpus filename in `scripts/ingest_missing_steelman.py` rather
 than a `docs/` citation. It also reports `INDEXING.md`, `INGEST.md` and `RETRIEVAL.md`,
-which are the generated `docs/reference/` pages and ship. In the public tree every
-held-back document is absent by design. **Do not treat
+which are the generated `docs/reference/` pages and ship. A held-back document is absent
+from this tree by design; there is no second tree it is present in any more, only a
+directory on the author's machine. **Do not treat
 the citations as broken links to fix, and do not delete them** — they are the anchors the
 documents will be republished against.
 
@@ -400,19 +412,21 @@ cites it; if something starts to, it joins.
 
 | Question | File |
 |---|---|
+| What is 0.6.0 | `docs/SPRINT_0_6_0.md`, **published** |
+| What is open, deferred, or gated — and the Experiment Log | `ROADMAP.md`, **published** |
 | What is 0.4.0 | `docs/SPRINT_0_4_0.md` |
 | What is 0.5.0 | `docs/SPRINT_0_5_0.md` |
 | What was cut, and what verified a scope decision | `docs/ROADMAP_PLANS_AFTER_0_3_0.md` |
 | What is beyond 0.5.0 | the same file, tiers 3 through 6 |
-| What shipped | `ROADMAP.md`, and `docs/archive/ROADMAP_HISTORY.md` behind it |
-| What shipped, for somebody outside this tree | `CHANGELOG.md`, which is published |
+| What shipped | `CHANGELOG.md`, and `docs/archive/ROADMAP_HISTORY.md` behind it |
 | What the appliance accepts, indexes and retrieves | `docs/reference/`, generated and published |
 
 **An open defect is a numbered step in the current sprint plan, and the entry condition
 is a failing test.** Not an argument that something could go wrong, and not a measurement
 of how often it does. There is no standing defect file: `docs/archive/KNOWN-DEFECTS.md`
-holds D1–D7, all resolved, and is history. `docs/SPRINT_0_4_0.md` Part 0 states the rule
-and works two live cases through it.
+holds D1–D7, all resolved, and is history. `docs/SPRINT_0_6_0.md` Part 0 states the rule and
+works three live cases through it, and it is published — so the rule is now readable from
+outside the project rather than only cited.
 
 `docs/archive/SPRINT_0_4_0_DRAFT.md` and `docs/archive/SPRINT_0_5_0_DRAFT.md` are
 2026-08-24 drafts of those release numbers that plan different sprints. Their step
