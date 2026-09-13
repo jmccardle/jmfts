@@ -55,10 +55,58 @@ list rather than a standing policy.
   longer claims is that PostgreSQL will CHOOSE HNSW at this size; asserting that needs
   thousands of rows, which is a benchmark and not a gate.
 
+- **The intermittent ANN failures under 0.5.0's "Known, and shipped anyway" were the test
+  fixtures, not the appliance.** Both files stored ONE vector in every document and then
+  queried with that same vector. Each test rolls its transaction back, and a rolled-back row
+  leaves its node in the HNSW graph until `VACUUM` runs — removing a node means repairing
+  its neighbours' adjacency lists, so pgvector defers it. Repeating the fixture piles dead
+  nodes onto the exact point the next query enters at, and the scan walks them instead of
+  the live rows. Reproduced standalone in about forty lines of SQL against
+  `pgvector/pgvector:pg16` (PostgreSQL 16.15, pgvector 0.8.6), with no application code:
+  seven rows carrying one vector, inserted, queried, rolled back, 200 times.
+
+  | 200 rounds, same partial HNSW index | rounds returning fewer than 7 live rows |
+  |---|---|
+  | one shared vector, `hnsw.iterative_scan = off` | 59 |
+  | one shared vector, `relaxed_order` | 24 |
+  | one shared vector, `strict_order` | 2 |
+  | seven DISTINCT vectors at the same cosine distance | 0 |
+
+  A sequential scan returned seven every time. **Rollback is not the ingredient**: committed
+  `DELETE`s reproduce it at the same rate or higher (80 rounds short against 52 at `off`),
+  so this is dead-node density rather than a transactional edge case. The realistic shape —
+  one document re-ingested 800 times, 1550 dead nodes, committed, never vacuumed — found its
+  live row on every attempt in both scan modes. `tests/test_usetype_filter.py` now seeds a
+  fresh random neighbourhood per fixture and gives each document its own vector on it, and
+  `tests/test_search_regression.py` does the same for the seven documents it stored the
+  query vector in. Measured over 200 rolled-back rounds in one database: 67 rounds short with
+  the old shared vector, 40 with distinct vectors at fixed points, **0** with the moving
+  neighbourhood. Three full-suite runs afterwards: `2480 passed, 40 skipped` twice, and a
+  third that failed only the two tests below. **This is not a defect against `jmfts_core`**,
+  so it is not a 0.6.0 step; it is a documented pgvector limitation that the fixtures were
+  walking into.
+
+- **`tests/test_maxsim_recall.py` could fail on a measurement that met its threshold.** The
+  third run above read `assert 0.8999999999999999 >= 0.9`. That value is one ULP below 0.9,
+  and the mean cannot land near it by measurement: each `recall@10` is a multiple of 1/10
+  over 24 queries, so every achievable exact mean is a multiple of 1/240 and the nearest one
+  below 0.9 is `21.5/24 = 0.8958333333333334`. The measurement was exactly 0.90 and
+  `sum(values) / len(values)` lost it to accumulation order — over 200,000 shuffles of a
+  24-value multiset whose exact mean is 0.9, that expression ranges from `0.8999999999999996`
+  to `0.9000000000000004`, straddling the comparison, and the order is the order the queries
+  came back in. The tests now compare against `RECALL_FLOOR`, which is the bottom of that
+  range less 1e-15 — about 13 ULP under 0.9. **The threshold is still 0.90**: one query
+  losing one neighbour reads 0.8958333333333334, which is 0.0042 below the floor and still
+  red, four hundred times the tolerance. Twelve consecutive runs of the file read 0.9042 to
+  0.9333 (217/240 to 224/240), none of them on the tie, so the twelve are evidence about the
+  margin on this tree rather than about the repair.
+
 **Still open, and unchanged by this release:** the zero-row index scans described under
-0.5.0, and `tests/test_maxsim_recall.py`'s 0.90 threshold with no margin. Both remain
-0.6.0 entry conditions. The statistics mechanism above is a plausible account of the first
-and has not been measured against it.
+0.5.0, and the *margin* on `tests/test_maxsim_recall.py`'s 0.90 threshold, which is a
+different question from the tie fixed above and is not fixed. Public CI read `21.5/24` on
+0.5.0 — one document short, genuinely short — and the twelve runs here bottom out at
+`217/240`, two documents above that. Both remain 0.6.0 entry conditions. The statistics
+mechanism above is a plausible account of the first and has not been measured against it.
 
 ## [0.5.0] — 2026-09-12
 
