@@ -26,8 +26,26 @@ internal file at its own date and has not been re-checked.
 | | |
 |---|---|
 | Released | **0.5.1**, 2026-09-13. `master` is the tag; `jmfts` and `jmfts-client` are both on PyPI |
-| Next | **0.6.0** — `docs/SPRINT_0_6_0.md` |
+| Next | **0.6.0** — `docs/SPRINT_0_6_0.md`. Headline: a **web front end**. Seven blocks, thirty-four steps |
 | Version rule | The two distributions release in lockstep: one number, two wheels, one tag |
+| Changing at 0.6.0 | A **third** distribution, `jmfts-web`, joins the lockstep. `jmfts[web]` depends on it |
+
+**0.6.0's headline is eyes and hands on the appliance**, added to that plan on 2026-09-13: a
+page that takes a dropped file, searches it, and shows the answer boxed on the source
+document's own page. Everything else in the sprint is placed by whether that path runs
+through it — the two access gates because every view is principal-scoped, the sheet header
+work because a region view displays it, `index:bm25` over workbook records because searching
+an uploaded spreadsheet is the first thing anybody will try. `docs/SPRINT_0_6_0.md` Part 5 is
+the schedule at worktree granularity, with the interface contracts named and the merge gates
+written down.
+
+**Two long-standing questions were answered to make it schedulable**, both on 2026-09-13, and
+both in that plan rather than here: which end of an edge a write gate checks (write on the
+source, read on the target — 4.1), and whether office renditions are affordable. The second
+retires `docs/OFFICE_SPEC.md` Part 12 question 1 on a measurement that was already in
+`docs/STRESS_CORPUS.md` 2.5: original bytes are 144 MB of a 2988 MB database, 4.8%, against
+`token_embeddings` at 1672 MB. "Renditions roughly double blob storage" is true and measures
+the wrong denominator.
 
 There is no 0.4.0. Most of what `docs/SPRINT_0_4_0.md` planned shipped alongside the 0.5.0
 work rather than in a release of its own; `CHANGELOG.md`'s 0.5.0 entry says so. The steps

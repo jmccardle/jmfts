@@ -1,6 +1,13 @@
-# Sprint 0.6.0: the gates that do not close, and the answers that never come
+# Sprint 0.6.0: eyes and hands on the appliance
 
 Written 2026-09-13, against `master` at `4349f59`, which is `v0.5.1`.
+
+**The headline is a web front end, and it was added to this plan on 2026-09-13 after the
+other six blocks were written.** The document is kept in the order it was written rather than
+reorganised around the new block, because the six blocks are the argument for why the seventh
+is worth building: an appliance whose access gates do not close and whose retrieval paths
+answer with nothing is an appliance that nobody has looked at directly. Part 2's opening
+paragraph is the schedule; Part 5 is how it runs.
 
 **This is the first sprint plan written in the public repository.** Development moved here at
 0.5.1, so this document is not a copy of an internal one and there is no internal version of
@@ -15,10 +22,13 @@ to end and every item neither finished is collected here: 0.4.0's Block C, defer
 fired for; and the numbered gaps in `ROADMAP.md` that acquired no owner. Nothing was dropped
 for being inconvenient — what is not a step is in Part 3 or Part 4 with the reason.
 
-**Theme: what this appliance does not stop, and what it does not return.** Two access gates
-are open and a principal can act through both. Three retrieval paths answer with nothing and
-say nothing about why. The two halves are the same shape — a check that is absent, and an
-absence that looks like an answer — and Fail Early is the rule both violate.
+**Theme: what this appliance does not stop, what it does not return, and that nobody can see
+either.** Two access gates are open and a principal can act through both. Three retrieval
+paths answer with nothing and say nothing about why. Both halves are the same shape — a check
+that is absent, and an absence that looks like an answer — and Fail Early is the rule both
+violate. Block F is the third half and the reason the first two are listed together: every
+defect in this plan was found by reading the source, because reading the source is the only
+way anybody has ever looked at this appliance.
 
 ---
 
@@ -42,7 +52,7 @@ differently:
 * **Block A's two gates are steps.** Each is a missing check at a named line, and the test
   that fails is one a reader can write from the row without a measurement: a principal acts
   on a document it may not act on, and the call succeeds.
-* **Block B's step 4 is a step.** `docs/STRESS_CORPUS.md` 4.4 measured zero `index:bm25` tasks
+* **Block B's step 7 is a step.** `docs/STRESS_CORPUS.md` 4.4 measured zero `index:bm25` tasks
   across a 21-workbook subtree, and a fixture that ingests one workbook and searches BM25 for
   a string in it fails today.
 * **`ROADMAP.md` gaps 7, 10 and 11 are NOT steps.** Each is a decision with a measurement
@@ -86,22 +96,36 @@ in `CLAUDE.md` precisely because the number moves; Block E is what the number ar
 
 ## Part 2 — The scope
 
-**Five blocks, fifteen steps.** The blocks are a schedule and the order is argued here.
+**Seven blocks, thirty-four steps.** The blocks are a schedule and the order is argued here.
 
-* **A runs first** because it is the only block where the appliance permits an action rather
-  than merely failing to perform one. Everything else in this sprint is something that does
-  not happen; Block A is something that does.
-* **E runs second**, out of size order, because it is what makes the rest of this document
-  readable to anybody who did not write it. A plan whose steps cite two specifications a
-  reader cannot open is a plan that can only be executed by its author.
-* **B, then C, then D.** B is defects, C is a deferred feature with measurements already
-  paid for, and D is a chain whose later links are not in this sprint at all.
+**Block F is the headline and the rest ride along with it.** 0.6.0 ships a web front end: drag
+a file in, search it, click a result, see the page and the rectangle the answer came from.
+That is the beeline, and everything below is placed by whether the beeline runs through it.
 
-**This sprint moves the client wheel zero times and adds no migration, as scoped.** No step
-below changes a contract class in `jmfts-client/jmfts_client/contracts/`, and no step below
-adds DDL. Both halves are claims about the steps as written; a step that turns out to need
-either is a step that has to come back here and say so, because `docs/SPRINT_0_4_0.md` Part 2
-made the same claim twice and was wrong both times.
+* **F runs first and runs throughout.** Its opening steps are contracts, which are small and
+  which nothing else may fork before. Part 5 is the schedule at worktree granularity.
+* **A rides along with F's first parallel slot** because every view is principal-scoped. A
+  document-detail page renders a "create link" control, and step 1 is what makes that control
+  honest rather than a button that succeeds when it should not. Step 3's audit is the same
+  list the front end needs in order to know which verbs are safe to put on a page.
+* **C rides along** because header detection is what the spreadsheet-region renderer displays.
+  A region view over a sheet whose header row was guessed wrong shows the wrong thing, and
+  shows it to somebody looking straight at it.
+* **B step 7 rides along** because a search page over a workbook returns nothing today, and
+  searching an uploaded spreadsheet is the first thing anyone will try.
+* **D rides along in the second parallel slot.** `render:pdf` is a new task type that needs a
+  badge, which is the fleet-routing case phase 5 is about; step 14's cost fold is also what
+  the upload view's `EXPLAIN` panel would display.
+* **E and B step 8 are pre-tag work.** Neither is on the beeline. Both are real.
+* **G is the cut line.** Office parity widens the citation feature from PDF to `.docx` and
+  `.xlsx`. If 0.6.0 runs long, G moves to 0.7.0 and the release still delivers its headline.
+
+**This sprint moves the client wheel, adds a migration, and adds a third distribution.** That
+is a correction to this document rather than a change of mind: the sentence here previously
+claimed zero contract changes and no DDL, scoped against the fifteen steps that existed before
+Block F. Block F changes `jmfts-client/jmfts_client/contracts/view.py` and `search.py`, adds
+`RENDERERS` values behind a migration, and adds `jmfts-web`. The claim was true when written
+and Part 2 said a step needing either "has to come back here and say so"; this is that.
 
 ### Block A — the two access gates that do not close
 
@@ -114,13 +138,45 @@ CONFIRMED OPEN there against two separate re-checks, 2026-08-28 and 2026-09-13.
 | 2 | Gate the four graph-analytics verbs on the principal | A principal with no grant calls `GET /graph/centrality` and reads back ids and titles of documents it cannot read | medium |
 | 3 | A standing audit: every `@expose`d method either takes a principal or is on a list that says why not | The audit does not exist, so the next ungated verb is added the same way these two were | small |
 
-**Step 1 is a write gate and the question is which document it checks.** An edge has two
-ends. Requiring write on the source alone is what the URL already implies and would close
-nothing; requiring write on both ends is the narrowest rule and would refuse a legitimate
-"cite this public document from mine". **Absent a decision, require write on the source and
-READ on the target**, which refuses the leak — attaching an edge to a document you cannot see
-— without refusing citation. Part 4 question 4.1 carries the argument and the cost of the
-other answers.
+**Step 1 is a write gate and the question of which document it checks was answered on
+2026-09-13: write on the source, READ on the target.** Part 4 question 4.1 carries the
+argument and the cost of the two answers not taken.
+
+**What is there now, read 2026-09-13.** `DocumentService.create_link`
+(`services/document_service.py:1287`–`:1310`) performs no access check of any kind. Its whole
+validation is `if request.source_id != document_id: raise ValueError(...)`, and then
+`DocumentRepository.create_link` (`repositories/document.py:1119`–`:1137`) constructs a
+`DocumentLink`, adds it and flushes. Neither calls `can_read`, `can_write` or `require_write`.
+`get_links`, the method directly below it (`:1320`–`:1334`), does call `can_read`, and its
+comment records that `repo.get_links` "additionally hides edges pointing to unreadable other
+endpoints". Reads are gated and writes are not, in adjacent methods of one class.
+
+**`delete_link` has the same hole and joins this step.** `services/document_service.py:1355`
+calls `repo.delete_link(link_id, incident_to=document_id)` and raises `LookupError` only when
+nothing matched. The entry condition in the table names `POST` because that is where the gap
+was found; the step closes both verbs.
+
+**The machinery is already written and this step calls it.** `jmfts_core/access.py` has
+`can_read` (`:153`), `can_write` (`:165`, "may modify `doc` / add children under it / reparent
+it"), `require_write` (`:313`) and `require_add_child` (`:331`). The last is the closest
+analogue and sets the house style: read failure is spelled as "does not exist" so the gate
+leaks no existence, write failure is `AccessDeniedError` → 403.
+
+**Ungoverned stays open and that is not a gap.** `can_write` returns True when no ACR governs
+the node (`access.py:172`, "ungoverned → open"). Access control in JMFTS is opt-in; a gate
+that closed by default would be a different product.
+
+**The residue this step also decides: who may delete an asserted edge.** `DocumentLink.derived_by`
+(migration 019, cited at `repositories/document.py:1143`) distinguishes an edge a rule produced
+from one a principal asserted. Write on the asserting end where there is one; write on either
+end where `derived_by IS NULL` and nothing recorded who asserted it.
+
+**Step 1 also lands `ViewResponse.can_write`, and Block F is why.** No response reports the
+caller's own access level today (`ran` 2026-09-13: grepped `contracts/view.py` and
+`contracts/document.py` for `can_write`, `writable`, `permission` — no match). A document
+detail page therefore cannot decide whether to render a link-creation control without firing
+the call and reading a 403 back. The field is computed from the same `can_write` the gate
+calls, so the page and the gate cannot disagree.
 
 **Step 2's cost is not the check, it is where the check goes.** `get_neighbors` is gated
 because `walk_neighbors` hides unreadable nodes *during* the walk, which is a filter inside
@@ -276,6 +332,201 @@ in `jmfts_core/atoms.py` and in the handlers' own declarations, so the phase tha
 `EXPLAIN` inherits a written statement of what it is not reporting. Step 14 should state what
 it does not report rather than quietly report a number that is wrong by three tasks.
 
+### Block F — the web front end
+
+**The beeline: drag a PDF in, search it, click a result, see the page with the answer boxed on
+it.** Sixteen steps in four phases. The phases are a dependency ordering, not a size ordering;
+Part 5 turns them into worktrees and merge gates.
+
+**A count, so the shape of the problem is not guessed at.** The appliance mounts 115
+operations across 15 tags (`ran` 2026-09-13: imported `jmfts_core.rest.main:app` and walked
+`app.routes`; 119 rows including `/docs`, `/redoc`, `/openapi.json` and the OAuth2 redirect).
+One view per operation is 115 views. One view per tag is 15, and half of those are CRUD
+tables. **Neither is the unit.** A capability page composes several tags into one workflow,
+and there are twelve of them plus nine renderers and six shared components.
+
+#### Phase F0 — the contracts
+
+Nothing forks before these land. They are small, they are almost all declaration, and every
+later step is written against them.
+
+| Step | What | Contract | Size |
+|---|---|---|---|
+| 16 | `ExposeSpec` grows a response media type; `rest/wiring.py` honours it | IC-1 | small |
+| 17 | Contract shapes for the three byte routes: path, params, media type | IC-2 | small |
+| 18 | `ViewResponse.can_write`; a search result carries its `source_anchor` | IC-3, IC-4 | small |
+| 19 | The `jmfts-web` distribution: layout, build, `[web]` extra, mount, release plumbing | IC-5 | medium |
+
+**Step 16 is the one thing everything else waits on.** `ExposeSpec` carries `method`, `path`,
+`response_model`, `errors`, `tags`, `summary` and `status_code` (`registry.py:109`–`:118`) and
+has no way to say a response is not JSON. `rest/wiring.py:200` passes `response_model` and
+nothing else. The tree has hit this once already and declined it: `GET /rdf/turtle` returns
+Turtle inside JSON, and `services/rdf_service.py:19` gives the reason, which was a good reason
+for that route and is not a reason for a PNG.
+
+**Step 18's second half removes a round trip from the beeline.** A search result whose
+`source_anchor` is absent forces the front end to call `GET /documents/{id}/evidence` per hit
+before it can offer "show me where". The anchor shapes already exist and already reach the
+API: `{"kind": "pdf", "page": 3, "bbox": [x0, y0, x1, y1]}` in PDF points
+(`citation_tasks.py:6`, `:9`), `{"kind": "cells", "sheet": ..., "ref": "B4:H120"}`
+(`services/document_service.py:141`), and `source_span` as a character range
+(`atoms.py:191`). `source_anchor.unresolved` is its own evidence row, "present exactly when
+`anchor` is not" (`evidence.py:453`), so a front end can tell "no highlight" from "the
+highlight could not be recovered, and here is the reason" without inventing either.
+
+**Step 19's distribution is a third wheel and the alternative was a flag that guards
+nothing.** Static files inside `jmfts_core/web/` ship with the appliance whether or not an
+extra names them, so `jmfts[web]` would be decoration. `jmfts-web` holds the bundle,
+`jmfts[web]` depends on it, and the mount is conditional on the import succeeding.
+`Dockerfile.worker` builds a worker that never serves a page and should not carry one.
+Cost, stated: a third version in `bump-version.sh`, a step in `docs/RELEASING.md`, a third
+case in `.github/workflows/publish.yml`. Part 4 question 4.8.
+
+#### Phase F1 — bytes out, and the transport in
+
+| Step | What | Contract | Size |
+|---|---|---|---|
+| 20 | `GET /documents/{id}/blob` — the original bytes, for re-hosting and download | IC-2 | small |
+| 21 | `GET /documents/{id}/image` — one rendered page | IC-2 | medium |
+| 22 | `GET /documents/{id}/region` — a rectangle, from an anchor or from explicit bounds | IC-2 | medium |
+| 23 | The generated TypeScript client, and the call event every view emits | IC-6 | medium |
+
+**Steps 20 to 22 are `docs/OFFICE_SPEC.md` Part 11 step 3, which that document scheduled
+before any office format is read and which has not been built.** Its phasing table reads
+"steps 1 to 3 deliver the headline feature end to end — a search result that can show you the
+page and the rectangle it came from — using formats JMFTS already ingests, with no new
+dependency of any tier". Steps 1 and 2 of that table are shipped: `ADVISORY_TASK_TYPES =
+frozenset({"citation"})` (`models/task_queue.py:136`) and the `citation` handler
+(`citation_tasks.py`, `TASK_CITATION`). Step 3 is not: neither path is in the route table.
+
+**These three need no new dependency.** `pymupdf>=1.24` is at `pyproject.toml:88`, inside base
+`dependencies` (line 32), not an extra. The bytes are already stored — `BlobRepository` keeps
+them as Postgres large objects (`repositories/blob.py:1`) and `read_bytes` has exactly three
+callers today, all task handlers (`citation_tasks.py:221`, `conversation_tasks.py:81`,
+`ingest_tasks.py:2522`). Nothing under `jmfts_core/rest/` reads a blob.
+
+**Step 22 serves a spreadsheet region as cells, not as an image.** `_cells_bounds`
+(`services/document_service.py:154`) already resolves a rectangle three ways in the spec's
+order — what the caller named, the node's own anchor, the measured used range — and
+`GET /documents/{id}/cells` already serves it. For a sheet, JSON cells are the better answer
+than a picture of cells, and this step is a renderer decision rather than a second route.
+
+**Step 23 is the step that makes "thinly wraps the API" checkable rather than claimed.** Every
+view calls one generated TypeScript client, generated from `/openapi.json` the way
+`jmfts-client/jmfts_client/_verbs.py` is generated from the route table
+(`scripts/generate_client.py`, with `tests/test_client_codegen.py` refusing a stale one). The
+client emits one event per call — operation id, method, resolved path, path params, query,
+body, status, response, elapsed ms. Three properties follow, and the third is the one that was
+asked for:
+
+1. **Replay.** An event is a call plus its arguments, so it is re-sendable with edited
+   arguments and the response renders through the right visualisation instead of as a blob.
+   That is `/docs`' "Try it out" with the result half fixed.
+2. **Verifiable thinness.** A view that shows something the log has no call for computed it
+   client-side. That is readable from the log rather than arguable from the source.
+3. **Copy-out.** An operation id maps to a `_verbs.py` method name, so an event prints as
+   `curl` with the token elided, as a `RemoteJmftsClient` call, and as `fetch`. Worked
+   examples stop being a thing anybody writes by hand.
+
+The generator runs against the 115 operations that exist. It picks up steps 20 to 22 when they
+merge, which is why this step does not wait on them.
+
+#### Phase F2 — the shell, and the two interfaces the views plug into
+
+Sequential and small. It exists because three views written in three worktrees conflict in one
+router file, and the fix is a registry rather than a merge policy.
+
+| Step | What | Contract | Size |
+|---|---|---|---|
+| 24 | The view registry, the shell, navigation, token entry | IC-7 | medium |
+| 25 | The renderer interface and the highlight-overlay interface | IC-8, IC-9 | small |
+
+**Step 24 mirrors `registry.py` on the client side.** One module per view, each registering
+itself; the manifest is append-only. `@expose` is the precedent and the reason is the same one
+`registry.py:1` gives — there is no hand-written second definition to drift, and here there is
+additionally no shared file for two parallel worktrees to fight over.
+
+**Step 25's renderer interface is a dispatch table over server state, which is the strongest
+thing in the tree for this.** `RENDERERS = ("markdown", "code", "json-table", "transcript",
+"plain")` (`models/usetype_presentation.py:14`), with `CHILD_HANDLINGS` and `LINK_HANDLINGS`
+beside it; `UsetypePresentation` rows are per-usetype and CRUD-able over
+`/usetype-presentations/`; and `GET /view/{document_id}` returns a `ViewPresentation` with the
+content (`services/view_service.py:1`). So the document viewer dispatches on a value the
+database hands it, and adding a renderer is a tuple edit plus a migration that every client
+picks up — not a branch in JavaScript that only this front end has.
+
+**The overlay is one component and not three.** It takes a `source_anchor` and a rendered
+surface and draws the box. `pdf-page`, `image` and `sheet-region` all use it. Writing it three
+times is how the three end up disagreeing about which corner the origin is in.
+
+#### Phase F3 — the views
+
+Five worktrees, no shared file, because of step 24.
+
+| Step | What | Composes | Size |
+|---|---|---|---|
+| 26 | The upload view: drag and drop, `EXPLAIN`, the settling frontier | `/ingest`, `/ingest/file`, `/ingest/analyze`, `/ingest/explain`, `/ingest/pipelines`, `/ingest/file/{id}/frontier` | medium |
+| 27 | The search view: the seven methods side by side, contexts, synthesis | all `/search/*`, `/search-contexts/*` | medium |
+| 28 | The tree browser and the document detail view | `/documents/*`, `/view/*` | large |
+| 29 | The renderers: `pdf-page`, `image`, `sheet-region`, `office`, and the five that exist | `/documents/{id}/image`, `/region`, `/cells`, `/blob` | large |
+| 30 | The call-log view | step 23's event stream | small |
+
+**Step 27's side-by-side is the demonstration, not a debug affordance.** The same query run
+through `vector`, `bm25`, `hybrid` and `maxsim` in four columns is the shortest explanation of
+what this appliance is that anybody has written, and it is four calls the log shows.
+
+**Step 29's `office` renderer falls back to extracted markdown when no rendition exists, and
+says so on the page.** `jmfts_core/office/extract.py` converts `docx` and `pptx` to markdown
+already. A page that silently shows markdown where it showed a rendered page for the document
+next to it is the failure this step is written to avoid; the renderer states which of the two
+it is showing.
+
+#### Phase F4 — the beeline closes
+
+| Step | What | Size |
+|---|---|---|
+| 31 | A search result carries its anchor, the detail view renders the page, the overlay draws the box | medium |
+
+**This is one step because it is integration and it is where the contracts get tested against
+each other.** Its entry condition is a demonstration rather than a failing test: upload a PDF,
+search it, click a hit, and see the page with the rectangle on it. Nothing before this step
+proves the four contracts agree, and nothing after it is worth doing if they do not.
+
+### Block G — office parity, and the cut line
+
+**Widens Block F's citation feature from PDF to `.docx`, `.xlsx` and the legacy binaries.**
+`docs/OFFICE_SPEC.md` Part 11 steps 7, 8 and 9, unchanged.
+
+| Step | What | OFFICE_SPEC | Size |
+|---|---|---|---|
+| 32 | `render:pdf` and `convert:ooxml`; the badged LibreOffice worker image | Part 11 step 7 | medium |
+| 33 | `citation` for office: recovery against the rendition | Part 11 step 8 | medium |
+| 34 | Source anchors for office extraction | Part 11 step 9 | medium |
+
+**Verified not started, 2026-09-13, by reading the tree.** No `render:pdf` or `convert:ooxml`
+task type exists (`ran`: grepped every `TASK_*` constant in `ingest_tasks.py` and both string
+literals). `pyproject.toml:276` says "No code imports this yet" of the `convert` extra, and
+names Part 11 step 7 as where it lands. `office/extract.py` writes no anchor.
+
+**The design is already written down and this block executes it.** `pyproject.toml:268`:
+"render any document to PDF once, at ingest, so that serving a citation image is `pymupdf`
+over a stored rendition and needs NO tier-3 dependency on the query path." That is what makes
+step 33 cheap — it is the `citation` handler that already exists, pointed at a rendition.
+
+**`OFFICE_SPEC.md` Part 12 question 1 is answered here rather than carried.** That question
+proposed renditions off by default because they "roughly double blob storage for office
+documents". The claim is arithmetically true and measures the wrong denominator.
+`docs/STRESS_CORPUS.md` 2.5, 877 files at commit `1440535`: 151 MB of source became 2988 MB of
+database, of which the original bytes are **144 MB across 852 blobs — 4.8%**. `token_embeddings`
+alone is 1672 MB, 56% of the total, half of that the ANN index. Upper bound if every stored
+byte were an office document and every rendition matched its original: 2988 → 3132 MB, +4.8%.
+A rendition is also **derived** and regenerable by re-running `render:pdf`, which the original
+is not — so the policy is cache eviction, not retention. **Renditions on, always, evictable by
+a sweeper, regenerated on read.**
+
+**This block is the cut line.** If 0.6.0 runs long, G moves to 0.7.0. Block F delivers the
+headline for PDF, which is the format the stress corpus is mostly made of, and G widens it.
+
 ---
 
 ## Part 3 — Not in this sprint
@@ -298,9 +549,15 @@ missed.
 
 ## Part 4 — Open questions
 
-Each states what the answer changes and what happens absent an answer.
+Each states what the answer changes and what happens absent an answer. **Four were answered on
+2026-09-13 and are kept here with their answers rather than deleted**, because a question that
+was live is part of the record of why the step is shaped the way it is: 4.1, 4.8, 4.9, and
+`OFFICE_SPEC.md` Part 12 question 1, which Block G answers in place.
 
-### 4.1 Which end of an edge does a write gate check
+### 4.1 Which end of an edge does a write gate check — ANSWERED 2026-09-13
+
+**Write on the source, read on the target.** The argument below is what was weighed; Block A
+step 1 carries what the code does about it.
 
 Step 1. An edge has a source and a target, and gating on the source alone closes nothing that
 the URL does not already imply.
@@ -314,9 +571,16 @@ What the answer changes: whether `DocumentLink` can express "this document of mi
 document of yours" across an access boundary, which is a product question about what the graph
 is for.
 
-**Absent an answer, write on source and read on target**, because it is the one that makes the
+**Answered: write on source and read on target**, because it is the one that makes the
 existing READ gate on edges (stage 4 of subtree RBAC) coherent: hiding an edge from a reader
 while letting that same reader create it is the inconsistency, not the permission.
+
+**Write on source only was rejected on a concrete leak, not on principle.** A principal may
+then create an edge to a document it cannot read at all, and that row reaches
+`/graph/neighbors`, `/graph/centrality` and `/graph/spines` — edge injection into a graph the
+injecting principal cannot see. The disclosure half in the other direction is already closed:
+`repo.get_links` hides edges whose far endpoint the reader cannot read
+(`services/document_service.py:1330`), so a target's readers do not learn the source exists.
 
 ### 4.2 Do the analytics verbs filter the graph or filter the result
 
@@ -420,3 +684,150 @@ Carried here whole so they are not lost between plans. None is in Part 2.
   `search_exclude_usetypes` is documented as required rather than default. **Absent an answer,
   the second**, because it is what ships today and the exclusion being load-bearing is a
   documentation defect rather than a storage one.
+
+### 4.8 Does the front end ship as a third distribution — ANSWERED 2026-09-13
+
+**Yes: `jmfts-web`, with `jmfts[web]` depending on it.** Step 19.
+
+An extra guards dependencies. Static files inside `jmfts_core/web/` ship with the appliance
+whether or not an extra names them, so `jmfts[web]` over a bundle in the main wheel would be a
+flag that guards nothing — which is the kind of thing this document exists to refuse.
+
+What the answer changes: whether a headless worker carries a UI bundle it will never serve.
+`Dockerfile.worker` is a real deployment, not a hypothetical, and `Dockerfile.worker:107`
+records that an un-badged worker claims everything.
+
+Cost, paid knowingly: a third version in `bump-version.sh` (which sets three copies today), a
+step in `docs/RELEASING.md`, and a third case in `.github/workflows/publish.yml`. This tree
+already builds two distributions from one source, so a third is a new entry rather than a new
+concept.
+
+### 4.9 Which LibreOffice does the badged image pin — ANSWERED 2026-09-13
+
+**26.8.0.** `OFFICE_SPEC.md` Part 12 question 3 asked this and proposed "a pinned container
+image" without a version, on the grounds that pagination differences between versions are what
+make a stored rendition stable. Block G step 32 needs the number.
+
+Two branches are live (`ran` 2026-09-13, endoflife.date):
+
+| Branch | Latest | Released | Support ends |
+|---|---|---|---|
+| Fresh — 26.8 | 26.8.0 | 2026-08-26 | 2027-06-13 |
+| Still — 26.2 | 26.2.5 | 2026-02-04 | 2026-11-30 |
+
+**Fresh, despite Still being the conservative branch.** The reason to prefer Still is fewer
+regressions in a deployment that takes updates, and this image takes none inside a release. The
+deciding factor is the support window: 26.2 reaches end of life on 2026-11-30, plausibly before
+0.6.0 tags, so pinning it means shipping a component with no security updates on its first day.
+
+**The version is recorded on the rendition** — a `renderer_version` key in its evidence row —
+and an upgrade re-renders on read rather than invalidating in bulk. That is the rest of Part 12
+question 3, answered with it.
+
+---
+
+## Part 5 — The workflow
+
+**Not a procedure to follow top to bottom.** It is a dependency graph with merge gates, written
+so that parallel work has something to be parallel against. Four rules hold it together:
+
+1. **A contract merges before anything forks against it.** Every interface below is a numbered
+   task in Part 2 whose deliverable is the shape, not the implementation.
+2. **A worktree owns files, not features.** Two worktrees that edit one file are a merge
+   conflict scheduled in advance; where that is unavoidable the plan says so and orders them.
+3. **At every gate, everything open merges.** Not just the branches the next phase needs. A
+   branch held across two gates is a branch whose conflicts compound.
+4. **Sequential phases are when the tree gets clean.** F0, F2 and F4 are narrow by
+   construction, so they are where every outstanding worktree lands and conflicts get resolved
+   at the first opportunity rather than the last.
+
+The integration branch is `feature/web`. It merges to `master` at each gate, per the standing
+practice that `master` is a working branch and version tags are what guarantee stability.
+
+### 5.1 The interface contracts
+
+Each is the deliverable of a Part 2 step, and each is pinned by a test so that "the contract
+changed" is a red suite rather than a conversation.
+
+| | Contract | Step | Shape | Pinned by |
+|---|---|---|---|---|
+| IC-1 | Response media type | 16 | `ExposeSpec.media_type: Optional[str]`; `wiring.py` sets `response_class` from it | a route declaring `image/png` returns non-JSON |
+| IC-2 | The three byte routes | 17 | `GET /documents/{id}/blob`; `/image?page=N&dpi=D`; `/region?page=N&bbox=x0,y0,x1,y1` or `?anchor=true` | `test_api_parity` bijection; the generated client carries them |
+| IC-3 | Caller access on a view | 18 | `ViewResponse.can_write: bool`, from `access.can_write` | a read-only principal reads `false` |
+| IC-4 | Anchor on a search hit | 18 | `source_anchor: Optional[dict]` and `source_anchor_unresolved: Optional[dict]`, verbatim from the evidence rows | a hit on an anchored chunk carries the box |
+| IC-5 | The mount | 19 | `jmfts-web` exports a package directory; the appliance mounts it when the import succeeds and runs without it when it does not | base install starts with no `jmfts-web` present |
+| IC-6 | The call event | 23 | `{op_id, method, path, path_params, query, body, status, response, ms}` | the generator emits one event per operation |
+| IC-7 | A view registration | 24 | `{id, title, path, component, tags}`, one module per view, append-only manifest | two views added in two worktrees merge without conflict |
+| IC-8 | A renderer | 25 | `(content, presentation, document) → element`, keyed by `RENDERERS` | every value in `RENDERERS` has exactly one renderer |
+| IC-9 | The highlight overlay | 25 | `(source_anchor, surface) → box`, one component for `pdf-page`, `image` and `sheet-region` | one anchor renders identically on all three |
+
+**IC-2 and IC-4 are the two that carry the beeline**, and they are written in different steps
+on purpose: the route can exist before a search hit knows to point at it, and a hit that
+carries an anchor is useful in the log before there is a page to draw it on.
+
+### 5.2 The gates
+
+```
+master
+  │
+  ├─ M0 ── F0: contracts and scaffolding ──────────────────── SEQUENTIAL
+  │        ├─ wt/contracts   steps 16, 17, 18   registry, wiring, contracts, regen _verbs
+  │        └─ wt/dist        step 19            jmfts-web, pyproject, bump, RELEASING, publish
+  │        (two worktrees, disjoint file sets, both merge at M0)
+  │
+  ├─ M1 ── F1 + the first ride-alongs ─────────────────────── SEVEN WORKTREES
+  │        ├─ wt/bytes       steps 20, 21, 22   document_service, new jmfts_core/rendering.py
+  │        ├─ wt/tsclient    step 23            scripts/, jmfts-web/src/client/
+  │        ├─ wt/access      steps 1, 2, 3      access.py, document_service, graph_service
+  │        ├─ wt/sheets      steps 9–13         sheet_records, office/sheets, sheet_tasks
+  │        ├─ wt/bm25        step 7             ingest_tasks rows, repositories/search
+  │        └─ (wt/dist and wt/contracts are closed; they merged at M0)
+  │
+  ├─ M2 ── F2: the shell ──────────────────────────────────── SEQUENTIAL
+  │        └─ wt/shell       steps 24, 25       jmfts-web only
+  │        EVERYTHING OPEN MERGES HERE. This is the first opportunity and the rule is
+  │        rule 3: wt/access, wt/sheets and wt/bm25 land now even if they are done early.
+  │
+  ├─ M3 ── F3 + the second ride-alongs ────────────────────── SEVEN WORKTREES
+  │        ├─ wt/view-upload   step 26
+  │        ├─ wt/view-search   step 27
+  │        ├─ wt/view-tree     step 28
+  │        ├─ wt/renderers     step 29
+  │        ├─ wt/view-log      step 30
+  │        ├─ wt/jobs          steps 14, 15     SPRINT_JOBS phases 5 and 4-residue
+  │        └─ wt/docs          steps 4, 5, 6    the republication review pass
+  │
+  ├─ M4 ── F4: the beeline closes ─────────────────────────── SEQUENTIAL
+  │        └─ wt/beeline       step 31
+  │        EVERYTHING OPEN MERGES HERE, same rule.
+  │
+  ├─ M5 ── G: office parity ───────────────────────────────── THREE WORKTREES
+  │        ├─ wt/render-pdf    step 32
+  │        ├─ wt/cite-office   step 33  (forks after wt/render-pdf merges)
+  │        └─ wt/anchor-office step 34
+  │
+  └─ M6 ── pre-tag: step 8, polish, CHANGELOG, bump, tag v0.6.0
+```
+
+### 5.3 The conflicts this schedule is shaped around
+
+| Where | Who collides | How it is handled |
+|---|---|---|
+| `_verbs.py` | every step that adds a route | Regenerated, never edited. One worktree (`wt/contracts`) regenerates at M0; `wt/bytes` regenerates once at M1. Two worktrees regenerating in parallel is a guaranteed conflict in a 1500-line generated file |
+| `services/document_service.py` | `wt/bytes` (steps 20–22) and `wt/access` (step 1) | Different regions of a 1400-line file — `wt/bytes` appends a Links-adjacent section, `wt/access` edits `create_link`/`delete_link` in place. Usually a clean merge; `wt/access` merges first at M1 because its change is smaller and its tests are cheaper to re-run |
+| The client router | every view step | Removed as a conflict by IC-7. This is the whole reason F2 is a sequential phase rather than a file three worktrees share |
+| `pyproject.toml` | `wt/dist` and anything adding a dependency | `wt/dist` owns it through M0 and nothing else in F0 touches it. After M0 the only step that adds a dependency is 32, in G |
+| `docs/SPRINT_0_6_0.md` | any worktree correcting its own step | Corrections land at a gate, in the merge commit, not inside a feature worktree. This document is published, so a half-corrected step is visible to everybody |
+
+### 5.4 What runs the suite, and when
+
+**The full suite runs at every gate and not inside a worktree.** `JMFTS_CI_PG_PORT=<port>
+./scripts/run_tests_docker.sh` reads `2480 passed, 40 skipped in 440.04s` on `master` at
+`db30087` (`ran` 2026-09-13), and that is the baseline a gate compares against. Inside a
+worktree, run the files the change touches. `JMFTS_CI_PG_PORT` moves both the port and the
+container name, so parallel worktrees can each hold a database without colliding.
+
+**`black --line-length 100 --check jmfts_core jmfts-client tests` and
+`ruff check jmfts_core jmfts-client tests` run before every merge**, because `.githooks/pre-commit`
+and `.github/workflows/ci.yml` run the same three paths and the three cannot be allowed to
+disagree. `jmfts-web/` is outside that gate and carries its own.
