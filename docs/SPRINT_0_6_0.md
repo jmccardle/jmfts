@@ -12,9 +12,11 @@ paragraph is the schedule; Part 5 is how it runs.
 **This is the first sprint plan written in the public repository.** Development moved here at
 0.5.1, so this document is not a copy of an internal one and there is no internal version of
 it to diverge from. It cites `docs/SPRINT_0_4_0.md` and `docs/SPRINT_0_5_0.md`, which are
-**not** published — a reader outside the project cannot open them. That is the same held-back
-citation the README's "A note on documentation" describes, and Block E is the step that ends
-it.
+**not** published and, as of 2026-09-13, **never will be** — question 4.5 is answered and the
+answer is to hold them. A reader outside the project cannot open them and should not wait for
+them; what is still open out of both plans is a numbered step in this one, which is the point
+of collecting it here. Block E publishes the specifications and the measurement records, which
+is a different set and a larger one.
 
 **Where the scope came from.** `docs/SPRINT_0_4_0.md` and `docs/SPRINT_0_5_0.md` were read end
 to end and every item neither finished is collected here: 0.4.0's Block C, deferred whole;
@@ -221,10 +223,20 @@ claim about the tree that has gone false. It is not a rewrite and not a tidy-up.
 are the working record and they are allowed to read like one — the value in `INGEST_SPEC.md`
 is that a comment can cite 5.3 and mean it.
 
-**Step 6 is a decision and it is deliberately separate.** A shipped sprint plan is a record of
-what was decided and why, including the things that were wrong when written and corrected in
-place. That is the most useful kind of document to publish and the most uncomfortable one.
-Part 4 question 4.5.
+**Step 6 was a decision, it was taken on 2026-09-13, and the answer is no.** The sprint plans
+and `docs/archive/` stay internal. The reasoning is not that publishing them is uncomfortable:
+it is that this plan already went past them. Everything still open out of `docs/SPRINT_0_4_0.md`
+and `docs/SPRINT_0_5_0.md` is a numbered step here, which is what Part 1 verified and what the
+"Where the scope came from" paragraph at the top of this document describes. A reader who could
+open those two would find the same work, planned earlier and less well.
+
+**The consequence, stated rather than discovered later: 201 citations stay dangling
+permanently**, and the README's held-back list keeps three names it will never lose. That is a
+real cost and it is now a decided one. `CLAUDE.md`'s rule still holds — **do not treat those
+citations as broken links to fix, and do not delete them** — but the reason changes from "the
+document is not published yet" to "the document is not published". Step 6 therefore becomes a
+documentation step rather than a review pass: say so in the README's note and in `CLAUDE.md`,
+once, so the next person does not re-open the question.
 
 ### Block B — retrieval that answers with nothing
 
@@ -635,7 +647,10 @@ can today.
 CI image to get a distribution rather than a reading, which is the one thing nobody has done.
 **A retry is not an answer** and neither is a threshold moved to fit the last failure.
 
-### 4.5 What happens to the sprint plans and the archive
+### 4.5 What happens to the sprint plans and the archive — ANSWERED 2026-09-13
+
+**They stay internal. Publish the specifications and the measurement records; do not publish
+the sprint plans or `docs/archive/`.** The argument below is what was weighed.
 
 Step 6. 201 citations from shipped files name `SPRINT_0_3_0.md`, `SPRINT_0_4_0.md` or
 `SPRINT_0_5_0.md`, and this document adds more.
@@ -648,9 +663,17 @@ was deferred.
 What the answer changes: whether the 695 citations become links or stay as names, and whether
 this repository is the working record or a publication of it.
 
-**Absent an answer, publish the specifications and the measurements (steps 4 and 5) and hold
-the sprint plans**, because the first two are about the appliance and the third is about how
-the work was run. That is the smaller decision and it is reversible in one direction only.
+**Answered: publish the specifications and the measurements (steps 4 and 5) and hold the
+sprint plans**, because the first two are about the appliance and the third is about how the
+work was run. The deciding argument was not the one above about discomfort. It is that 0.6.0
+is already past both plans: what is unfinished in them is a numbered step in this document, so
+publishing them would hand a reader an earlier, worse copy of a plan they can already read.
+`docs/SPRINT_0_4_0.md` Block C's 39,100-sheet measurement is the one real loss, and it is
+quoted in Block C above — the numbers survive in a published document even though the argument
+around them does not.
+
+**This decision is one-way and that was known when it was taken.** Publishing later is always
+available; unpublishing is not.
 
 ### 4.6 Is a seeded preset worth a migration
 
