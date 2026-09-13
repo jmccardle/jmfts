@@ -23,10 +23,11 @@ which is why steps 2 and 3 are PREREQUISITES of step 1 rather than peers of it.
 * `test_the_construction_is_sound` — the fixture, unchanged. Nothing below proves anything
   if the readable rows do not sort last.
 * `test_shipped_order_by_reaches_the_index` (step 1) — the shipped ORDER BY CAN reach
-  `idx_documents_embed`, asserted with `enable_seqscan = off`. Red before the ORDER BY was
-  corrected, green after. Until 2026-09-12 it read the planner's UNFORCED choice instead,
-  which on a 230-row fixture is a coin flip that this tree wins and public CI loses; its
-  docstring carries the two prices and the reading that settled it.
+  `idx_documents_embed`, asserted with every SORTING route disabled and with the 0.3.0
+  ORDER BY as a control arm. Red before the ORDER BY was corrected, green after. Until
+  2026-09-12 it read the planner's UNFORCED choice instead, which on a 230-row fixture is
+  decided by what earlier tests left in `jmfts_test`; its docstring carries the three
+  priced states, and the first repair that CI refuted.
 * `test_the_native_order_by_does_not_truncate_under_the_read_gate` (step 2) — the same
   scan that returned an EMPTY page now returns a full one. It was
   `test_the_native_order_by_truncates_under_the_read_gate`, which asserted the opposite
@@ -70,6 +71,27 @@ SEED = 20260904
 #: The index `vector_search` is supposed to be using. Partial on `settled = 'settled'`
 #: (`sql/schema.sql:478`-`:480`), which is why the repository carries that predicate.
 EMBED_INDEX = "idx_documents_embed"
+
+#: What `test_shipped_order_by_reaches_the_index` turns off, and why all three. Each one
+#: names a way to produce distance order by SORTING; with the three disabled, the only
+#: remaining way is an index that yields `embed <=> q` order natively, which is the thing
+#: step 1 asks about. `enable_seqscan` alone was tried first and was not enough — see that
+#: test's docstring for the prices that refuted it.
+FORCED_OFF = ("enable_seqscan", "enable_bitmapscan", "enable_sort")
+
+#: The 0.3.0 ORDER BY, kept as a CONTROL ARM rather than as history. `vector_search` built
+#: `(1 - embed <=> q).label("score")` and ordered by `score DESC`; pgvector's HNSW index
+#: answers `ORDER BY col <=> q` ascending and nothing else, so this shape cannot reach
+#: `idx_documents_embed` however cheap the planner is told the index is. That is what makes
+#: it a calibration: a forcing under which THIS reaches the index is a forcing that has
+#: stopped measuring the ORDER BY.
+LEGACY_ORDER_BY = """
+SELECT documents.id, 1 - (documents.embed <=> :q) AS score
+FROM documents
+WHERE documents.embed IS NOT NULL AND documents.settled = 'settled'
+ORDER BY score DESC
+LIMIT 10
+"""
 
 
 def _unit(values):
@@ -204,55 +226,81 @@ def test_shipped_order_by_reaches_the_index(db_session):
     asserts something reads it. It is the whole content of the correction — the SELECT list
     still returns `1 - distance`, so nothing a caller can see changed except the plan.
 
-    **`enable_seqscan = off` was missing here until 2026-09-12, and that was the defect.**
-    Step 2's docstring below already states the reason and this test did not take it:
-    without it the assertion rides a cost comparison, and at 230 rows the scan-and-sort is
-    genuinely the cheaper plan. Measured on this fixture that day, pgvector 0.8.6 on
-    Postgres 16.15, the shipped statement prices
+    **Until 2026-09-12 this read the planner's UNFORCED choice, and that was the defect.**
+    On a 230-row fixture the choice is a cost comparison, and which way it goes is decided
+    by state `jmfts_test` carries for the whole run: `pg_class` is not rolled back with the
+    fixture, so whether `documents` has statistics at all, and how many dead rows earlier
+    tests left in it and in `idx_documents_embed`, are settled by autovacuum's timer and by
+    position in the run. Three states, all measured on this fixture on 2026-09-12,
+    pgvector 0.8.6 on PostgreSQL 16.15, prices for the shipped statement:
 
-    ======================  ===========  ==========  ==========
-    statistics              HNSW scan    seq + sort  planner picks
-    ======================  ===========  ==========  ==========
-    none (fresh `documents`)       8.04       14.72  HNSW
-    after `ANALYZE documents`    517.75       16.60  seq + sort
-    ======================  ===========  ==========  ==========
+    ==========================  ==========  =================  ==============
+    state                       HNSW scan   cheapest sorting   unforced pick
+    ==========================  ==========  =================  ==============
+    no statistics                     8.04         14.72 seq   HNSW
+    `ANALYZE`, no residue           517.75         16.60 seq   seq + sort
+    `ANALYZE`, 3000 dead rows      6675.13      609.52 bitmap  bitmap + sort
+    ==========================  ==========  =================  ==============
 
-    Which of those two states the test database is in is decided by autovacuum's timer and
-    by how many rows an earlier test left in `documents`, because `jmfts_test` is one
-    database for the whole run and `pg_class` is not rolled back with the fixture. So the
-    assertion was a coin flip. It comes up heads on this machine and came up tails on the
-    first public CI run of 0.5.0 and again on master afterwards, with the `Seq Scan on
-    documents (cost=0.00..33.36 rows=1)` the failure message printed.
+    Only the first row reaches the index, and it is the state a fresh database is in — so
+    the assertion passed on a development machine running one file and failed in CI, which
+    runs the whole suite into one database. The third row is CI's, reproduced here by
+    rolling back 3000 inserts before seeding: it printed
+    `Bitmap Heap Scan on documents (cost=565.28..626.27 rows=31 width=620)` on the runner
+    against `552.53..609.52 rows=31 width=620` here.
 
-    **What is asserted with the sequential scan disabled is REACHABILITY, and that is what
-    step 1 was.** `ORDER BY score DESC` cannot reach the index at any price: measured in
-    the same session and in BOTH statistics states, the label form top-N heapsorts a
-    Bitmap Heap Scan at 2675.89 and never names the index, while the operator form
-    index-scans. Turning the sequential scan off removes the cost comparison and leaves
-    the shape of the ORDER BY, which is the thing 0.3.0 had wrong.
+    **The first repair was wrong and the runner refuted it.** `enable_seqscan = off` alone,
+    which is what step 2 below does, moves only the first column of that table: in the third
+    state the planner still had a bitmap scan at 609.52 against the HNSW scan's 6675.13.
+    A gate may not be one plan type ahead of the planner.
 
-    **What it no longer says: that Postgres WILL choose HNSW here.** It will not once the
-    planner has real statistics, and it is right not to — 230 rows fit in twelve pages.
-    Asserting the choice needs a fixture big enough for the index to win on cost, which at
-    the prices above is thousands of rows and minutes of seeding; that is a benchmark
-    (`scripts/filtered_recall.py`) and not a gate.
+    **So the forcing is stated as the claim instead.** With sequential scans, bitmap scans
+    and sorts all disabled, every route that produces this ordering by SORTING carries
+    PostgreSQL's disable penalty, and the only remaining way to answer is an index that
+    yields `embed <=> q` order natively. Whether one exists for this statement is precisely
+    what step 1 asks. Measured in all three states: forced this way the shipped statement
+    index-scans in every one.
+
+    **The control arm is in the test, not in this docstring.** `LEGACY_ORDER_BY` is the
+    0.3.0 shape, and the same forcing must fail to reach the index with it — otherwise the
+    forcing has stopped discriminating and the positive assertion below means nothing. It
+    is a hand-written statement, which step 2's docstring gives a reason to avoid; the
+    reason does not apply to this one, because it is a fixed historical artifact rather
+    than a second copy of something shipped, and it is supposed to stop matching the code.
+
+    **What this does NOT say: that PostgreSQL will CHOOSE HNSW here.** It will not, in two
+    of the three states, and it is right not to — 230 rows fit in twelve pages. Asserting
+    the choice needs a fixture where the index wins on cost, which at the prices above is
+    thousands of rows and minutes of seeding. That is `scripts/filtered_recall.py`'s job.
     """
     outsider, _ = _seed(db_session)
-    # And the statistics are made rather than found, for the same reason. `ANALYZE` here
-    # sees the fixture's own rows and writes `pg_class` inside the fixture's transaction,
-    # so it rolls back with everything else — the row of the table above this test runs in
-    # is now the second one, on every machine, instead of whichever one autovacuum last
-    # left behind.
+    # The statistics are made rather than found, for the same reason. `ANALYZE` here sees
+    # the fixture's own rows and writes `pg_class` inside the fixture's transaction, so it
+    # rolls back with everything else and every machine plans against the same numbers.
     db_session.execute(text("ANALYZE documents"))
-    db_session.execute(text("SET LOCAL enable_seqscan = off"))
+    for guc in FORCED_OFF:
+        db_session.execute(text(f"SET LOCAL {guc} = off"))
     try:
         plan = _capture_plan(db_session, lambda: _search_as(db_session, outsider))
+        control = "\n".join(
+            row[0]
+            for row in db_session.execute(
+                text("EXPLAIN " + LEGACY_ORDER_BY), {"q": str(_query())}
+            ).fetchall()
+        )
     finally:
-        db_session.execute(text("SET LOCAL enable_seqscan = on"))
+        for guc in FORCED_OFF:
+            db_session.execute(text(f"SET LOCAL {guc} = on"))
+
+    assert EMBED_INDEX not in control, (
+        f"the control arm reached {EMBED_INDEX}, so this forcing no longer tells the 0.3.0 "
+        f"ORDER BY from the shipped one and the assertion below proves nothing:\n"
+        f"{control[:2000]}"
+    )
     assert EMBED_INDEX in plan, (
-        f"{EMBED_INDEX} is absent from the plan with the sequential scan DISABLED, so the "
-        f"shipped ORDER BY cannot reach the index at any price — which is the 0.3.0 defect "
-        f"back, not a cost estimate that moved:\n{plan[:2000]}"
+        f"{EMBED_INDEX} is absent from the plan with sorting and every sorting scan "
+        f"DISABLED, so no index can answer the shipped ORDER BY natively — which is the "
+        f"0.3.0 defect back, not a cost estimate that moved:\n{plan[:2000]}"
     )
 
 

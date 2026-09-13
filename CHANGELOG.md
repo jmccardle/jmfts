@@ -30,20 +30,30 @@ list rather than a standing policy.
   read the planner's UNFORCED choice of plan, and on its 230-row fixture that choice is a
   cost comparison whose answer depends on whether `documents` carries statistics — which
   `jmfts_test` keeps for the whole run, outside the fixture's rollback, at autovacuum's
-  discretion. Measured on pgvector 0.8.6 / PostgreSQL 16.15: with no statistics the shipped
-  statement prices the HNSW scan at 8.04 against 14.72 for a scan and a top-N sort and the
-  index wins; after `ANALYZE documents` it prices 517.75 against 16.60 and the sequential
-  scan wins, correctly — 230 rows fit in twelve pages. `ANALYZE documents` and nothing else
-  reproduces the CI failure exactly, including its `Seq Scan on documents
-  (cost=0.00..33.36 rows=1)`. **There was nothing to bisect**: the suite is green on the
-  development machine at the same commit that is red on the runner. The test now makes its
-  statistics rather than finding them and asserts with `enable_seqscan = off`, which is
-  what the sibling test one function down had done since 0.5.0 and for the reason its
-  docstring already gave. That does not blunt it: in both statistics states the 0.3.0
-  `ORDER BY score DESC` top-N heapsorts a Bitmap Heap Scan at 2675.89 and never names
-  `idx_documents_embed`, while the operator form index-scans. What the test no longer
-  claims is that PostgreSQL will CHOOSE HNSW at this size; asserting that needs thousands
-  of rows, which is a benchmark and not a gate.
+  discretion. Measured on pgvector 0.8.6 / PostgreSQL 16.15, prices for the shipped
+  statement in the three states the suite can put the database in:
+
+  | state | HNSW scan | cheapest sorting plan | unforced pick |
+  |---|---|---|---|
+  | no statistics | 8.04 | 14.72 seq | HNSW |
+  | `ANALYZE`, no residue | 517.75 | 16.60 seq | seq + sort |
+  | `ANALYZE`, 3000 dead rows | 6675.13 | 609.52 bitmap | bitmap + sort |
+
+  Only the first reaches the index, and it is the state a fresh database is in — which is
+  why this passed on a development machine running one file and failed on a runner running
+  the whole suite into one database. **There was nothing to bisect**: the suite is green
+  here at the same commit that is red there. **The first repair was wrong and CI refuted
+  it**, which is recorded rather than quietly replaced: `enable_seqscan = off` moves only
+  the first row of that table, and the runner came back with `Bitmap Heap Scan on documents
+  (cost=565.28..626.27 rows=31 width=620)`. The test now makes its statistics rather than
+  finding them, and disables sequential scans, bitmap scans and sorts together — every
+  route that produces distance order by SORTING — so that the only way left to answer is an
+  index that yields `embed <=> q` order natively, which is what step 1 asks. The 0.3.0
+  `ORDER BY score DESC` is kept in the test as a control arm and must NOT reach the index
+  under the same forcing, so a forcing that stopped discriminating fails loudly instead of
+  passing. Re-gated in all three states, plus a fourth at 12000 dead rows. What the test no
+  longer claims is that PostgreSQL will CHOOSE HNSW at this size; asserting that needs
+  thousands of rows, which is a benchmark and not a gate.
 
 **Still open, and unchanged by this release:** the zero-row index scans described under
 0.5.0, and `tests/test_maxsim_recall.py`'s 0.90 threshold with no margin. Both remain
