@@ -26,7 +26,7 @@ internal file at its own date and has not been re-checked.
 | | |
 |---|---|
 | Released | **0.5.1**, 2026-09-13. `master` is the tag; `jmfts` and `jmfts-client` are both on PyPI |
-| Next | **0.6.0** — `docs/SPRINT_0_6_0.md`. Headline: a **web front end**. Seven blocks, thirty-four steps |
+| Next | **0.6.0** — `docs/SPRINT_0_6_0.md`. Headline: a **web front end**. Seven blocks, thirty-five steps |
 | Version rule | The two distributions release in lockstep: one number, two wheels, one tag |
 | Changing at 0.6.0 | A **third** distribution, `jmfts-web`, joins the lockstep. `jmfts[web]` depends on it |
 
@@ -116,8 +116,13 @@ drained a queue at once.
    returned nothing. It is a decision rather than a build, and which answer is right depends
    on delete frequency and on whether a miss is a nuisance or a correctness failure.
 
-8. **A spreadsheet's content never reaches BM25 or full-text search. STILL OPEN, re-read
-   2026-09-13.** Measured by `docs/STRESS_CORPUS.md` 4.4: zero `index:bm25` tasks exist
+8. **A spreadsheet's content never reaches BM25 or full-text search. CLOSED `efb2401`,
+   2026-09-13**, by 0.6.0 Block B step 7, which plans `index:bm25` at the settling boundary
+   so a workbook's `record` nodes reach the index. The status line said STILL OPEN until
+   0.6.0's M3 gate; the correction paragraph at the end of this entry already described the
+   fix that shipped, which is why only this line was wrong. What follows is the measurement
+   as it stood, kept because it is what the fix was written against.
+   Measured by `docs/STRESS_CORPUS.md` 4.4: zero `index:bm25` tasks exist
    anywhere in a 21-workbook subtree, while thousands of `record` nodes under it carry real
    text. Two independent exclusions in one `TaskRow` (`jmfts_core/ingest_tasks.py:1173`):
    `after_any` names the three prose structure rungs and not `structure:sheets`, and
@@ -178,15 +183,22 @@ drained a queue at once.
 ## Subtree RBAC — remaining follow-ups
 
 RBAC shipped 2026-07-23 in four canary-safe stages, and stage 4 closed the READ leak on
-edges. These are still open; the first two were re-read against this tree on 2026-09-13.
+edges. The first two below were re-read against this tree on 2026-09-13, found open, and
+CLOSED the same day by 0.6.0 Block A steps 1 and 2 — `ae966de` and `0f48ac5`, both landing
+at that sprint's M1 gate with `tests/test_access_edge_writes.py` (12 tests) and
+`tests/test_access_graph_analytics.py` (6 tests). This section read CONFIRMED OPEN until
+0.6.0's M3 gate. Each finding is kept verbatim below, because the test that now holds the
+gate shut was written against the description and not against the fix.
 
-- **Edge WRITE gating. CONFIRMED OPEN.** `DocumentRepository.create_link`
+- **Edge WRITE gating. CLOSED `ae966de`.** The finding, as read on 2026-09-13:
+  `DocumentRepository.create_link`
   (`jmfts_core/repositories/document.py:1119`) constructs and flushes a `DocumentLink` with
   no principal check, and `DocumentService.create_link`
   (`jmfts_core/services/document_service.py:1287`) checks only that `request.source_id`
   matches the id in the URL. A principal can attach an edge incident to a document it cannot
   write.
-- **Graph-analytics verbs. CONFIRMED OPEN.** `get_centrality` (`:137`),
+- **Graph-analytics verbs. CLOSED `0f48ac5`.** The finding, as read on 2026-09-13:
+  `get_centrality` (`:137`),
   `get_subtree_authority` (`:179`), `get_spines` (`:234`) and `get_communities` (`:381`) in
   `jmfts_core/services/graph_service.py` build a graph from `scope`, `parent_id` and
   `exclude_usetypes` with no principal, then return document ids and titles. They enumerate
