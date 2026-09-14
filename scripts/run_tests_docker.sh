@@ -29,10 +29,42 @@ HOST_PORT="${JMFTS_CI_PG_PORT:-5434}"
 # agents, do. One variable now moves both the port and the name, so concurrent runs need
 # only `JMFTS_CI_PG_PORT` to be distinct.
 CONTAINER="jmfts-ci-pg-${HOST_PORT}"
-PY="${PYTHON:-./.venv/bin/python}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+
+# THE INTERPRETER, and a git worktree does not have one of its own.
+#
+# The comment above says two runs in parallel is "what several worktrees, or several agents,
+# do" — and then this line defaulted to `./.venv/bin/python`, which a worktree has never had.
+# `git worktree add` checks out tracked files; `.venv/` is gitignored and stays in the main
+# checkout. So every agent working the way that comment describes met "no such file or
+# directory" and had to be told to pass PYTHON= by hand. Found 2026-09-13 by an agent doing
+# exactly that.
+#
+# `--git-common-dir` is the main repository's `.git`, from anywhere in any linked worktree;
+# its parent is the main checkout. Resolved rather than assumed, because a worktree can be
+# anywhere and `../..` is not a rule.
+#
+# NO FALLBACK TO A BARE `python`. An interpreter that is not this project's venv is an
+# interpreter without the project installed, and the suite would fail on an import with a
+# message about a missing package rather than about a missing environment. Fail Early is not
+# hiding the problem; guessing an interpreter would be.
+if [ -n "${PYTHON:-}" ]; then
+    PY="$PYTHON"
+elif [ -x "./.venv/bin/python" ]; then
+    PY="./.venv/bin/python"
+elif MAIN_GIT_DIR="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" &&
+     [ -x "$(dirname "$MAIN_GIT_DIR")/.venv/bin/python" ]; then
+    PY="$(dirname "$MAIN_GIT_DIR")/.venv/bin/python"
+    echo ">> no venv in this worktree; using the main checkout's at $PY"
+else
+    echo "run_tests_docker.sh: no interpreter." >&2
+    echo "  looked at: \$PYTHON, ./.venv/bin/python, and the main checkout's .venv" >&2
+    echo "  Create one with 'python -m venv .venv && .venv/bin/pip install -e .[dev]'," >&2
+    echo "  or point PYTHON= at an interpreter that has this project installed." >&2
+    exit 1
+fi
 
 # `-v` matters. The pgvector image declares VOLUME /var/lib/postgresql/data, so every
 # `docker run` here creates an anonymous volume, and `docker rm` without `-v` removes the
