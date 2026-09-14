@@ -87,6 +87,38 @@ class Settings(BaseSettings):
     # answer, so this is sized for that first request rather than for the steady state.
     runner_timeout: float = 300.0  # env JMFTS_RUNNER_TIMEOUT
 
+    # TIER 3. Where this process sends a document when it needs a PDF of it, or a legacy
+    # binary re-expressed as OOXML (`render:pdf` and `convert:ooxml`,
+    # jmfts_core/render_tasks.py). An http(s) URL naming a unoserver: `http://host:2003`.
+    #
+    # It follows `runner_url` above deliberately — OFFICE_SPEC.md Part 1 says tier 3 "follows
+    # the JMFTS_RUNNER_URL shape instead: a task type, a worker badge, and an optional URL
+    # that makes it another process's problem" — and the consequence is the same one: with
+    # this set, ANY worker can convert, because converting becomes a network call rather than
+    # a 500 MB system package. The badge in jmfts_core/task_routing.py is for the other
+    # deployment, where LibreOffice is in the image beside the worker.
+    #
+    # BLANK IS THE OFF SWITCH and it is the default, like `runner_key`: a `render:pdf` on an
+    # appliance with no converter fails PERMANENTLY with a message naming this setting and
+    # the image that serves one (jmfts_core/convert.py). It never degrades quietly, and
+    # because `render:pdf` is advisory the document it was for stays searchable.
+    #
+    # NO TIMEOUT SETTING BESIDE IT, and that is a decision about WHERE the bound lives
+    # rather than an omission. unoserver's client takes no timeout; unoserver's SERVER takes
+    # `--conversion-timeout`, and the converter is what can tell that a conversion has
+    # stopped making progress. Dockerfile.libreoffice sets it, and what arrives here is then
+    # a connection error, which classifies RETRYABLE.
+    convert_url: str = ""  # env JMFTS_CONVERT_URL
+
+    # WHICH LibreOffice is behind that URL, as the deployment declares it — SPRINT_0_6_0.md
+    # 4.9 pins 26.8.0 and records the version on each rendition, so that an upgrade re-renders
+    # on read rather than invalidating in bulk. It is a SETTING and not a measurement because
+    # unoserver's `info()` reports its own version and the filter lists, and nothing in its
+    # surface names the office suite underneath. `Dockerfile.libreoffice` sets it beside the
+    # apt pin it is a statement about; blank means nobody measured, and the rendition then
+    # carries no version rather than a made-up one.
+    convert_version: str = ""  # env JMFTS_CONVERT_VERSION
+
     # CORS allow-list (CR-4). Empty (the default) = server-to-server only: no
     # browser Origin is permitted, which is the expected case (the τ client is
     # httpx and ignores CORS). Never "*" alongside allow_credentials. Set
