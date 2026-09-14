@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 _OID_SOURCES: tuple[tuple[str, str], ...] = (
     ("document_blobs", "lob_oid"),
     # OFFICE_SPEC.md Part 6's renditions and Part 1's legacy conversions, added with
-    # migration 024. Both are DERIVED and regenerable, which changes what an orphan of one
+    # migration 023. Both are DERIVED and regenerable, which changes what an orphan of one
     # costs and changes nothing about whether this list has to name it: an OID this sweep
     # cannot see is an OID it destroys.
     ("document_renditions", "lob_oid"),
