@@ -365,15 +365,52 @@ and rejected on ordering rather than on rate, why the window is 8192 and not 512
 contested-population table that argues for emitting both shapes, and why the absolute
 percentages are optimistic while the relative gains are not.
 
+**All six figures reproduced to the tenth on 2026-09-13**, over the same 30,448 FUSE and
+8,652 git sheets, by `python -m scripts.header_rules --report`. The rejection evidence
+reproduces too: the prefix rule fires at 85.2% and names 5.2 columns against 11.0.
+
+**One new reading corrects an argument this block was making, and it is recorded rather than
+quietly dropped.** The 38.9% ordering divergence with 1.1 columns against 7.6 — cited above
+as the reason the numeric pass is a SECOND pass rather than interleaved — is a measurement of
+the **prefix** rule, not of the rule that shipped. Replaying both orderings of the shipped
+rule: an interleaved any-type pass picks an earlier row than two passes on 97 FUSE and 23 git
+sheets, **0.3% either way**, naming the same number of columns there.
+
+The two passes stay, and the reason is now argued instead of measured: the failure the two
+orderings differ on is the expensive one — wrong records rather than no records — and 0.3%
+of 39,100 sheets is still 120 sheets silently keyed on the wrong row. `_header_scan`'s
+docstring says this in the code and names the corpus that would settle it: real Excel-saved
+workbooks, which Part 3's procurement item is for and which these two corpora are mostly not.
+**A number that turns out to be about a different rule is worth more written down than
+deleted**, because the next person to reach for it will otherwise reach for it again.
+
 **This block's entry condition is a fire rate and not a failing test, which is why it left
 0.4.0 and why it is fourth here.** Nothing is broken at 23.9% — the shipped rule does exactly
 what `INGEST_SPEC.md` 8.3 says it does. One reading has arrived since the deferral that points
 the same way from the appliance side: on a real 21-workbook ingest, 18 of 33 worksheets
 produced zero `record` nodes (`docs/STRESS_CORPUS.md` 4.4b).
 
-**Open question 4.3 of `docs/SPRINT_0_4_0.md` comes back with this block** — what rows 1 to
-N−1 are, when the header is at row N. It is asked by step 9 and spent by step 13, and it stays
-inside the block that pays for it.
+**Open question 4.3 of `docs/SPRINT_0_4_0.md` came back with this block and was ANSWERED
+2026-09-13** — what rows 1 to N−1 are, when the header is at row N. It was asked by step 9 and
+spent by step 13, inside the block that paid for it. Three readings were available and two
+were taken:
+
+* **They are a measurement.** `office.sheets.BannerRow`, carried on
+  `sheet.measurements.header_row_banner`. Discarding them stopped being available the moment
+  the scan existed: a header at row 4 means rows 1–3 were READ, and a measurement that is
+  read and dropped is a fact the appliance had and threw away.
+* **The profile node states them in prose** — "Above the data, row 1 reads: Q3 Regional
+  Sales." — so the words a person typed across the top of a sheet are embedded and
+  retrievable. For a header-less sheet the profile is the only text produced at all.
+* **A merged banner names the columns it spans**, which is step 13's column label
+  (`NAME_SOURCE_BANNER`), read tier-1 from `<mergeCells>`. A merge across the WHOLE used
+  width is a title and labels nothing.
+
+Banner rows are out of the rendered table's body — a markdown table has one header row, which
+is a rendering decision and not a decision about the rows — and out of `body_rows`, so
+`fill_ratio` and `is_unique` are taken over the data. `header_labels` accepts only a
+header-sourced name, because a banner names a GROUP and three record keys that are one string
+are one key holding the last value.
 
 ### Block D — the job-system chain, the first two links
 
