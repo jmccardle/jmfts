@@ -850,6 +850,7 @@ master
 | Where | Who collides | How it is handled |
 |---|---|---|
 | `_verbs.py` | every step that adds a route | Regenerated, never edited. One worktree (`wt/contracts`) regenerates at M0; `wt/bytes` regenerates once at M1. Two worktrees regenerating in parallel is a guaranteed conflict in a 1500-line generated file |
+| `jmfts-web/.../client/verbs.d.ts` | the same steps, from 2026-09-13 | **A branch that adds a route now regenerates TWO clients.** Step 23 landed a TypeScript client generated from the same surface, and `verbs.d.ts` is the largest generated file in the tree. The `_verbs.py` rule above extends to it unchanged: one worktree regenerates per gate |
 | `services/document_service.py` | `wt/bytes` (steps 20–22) and `wt/access` (step 1) | Different regions of a 1400-line file — `wt/bytes` appends a Links-adjacent section, `wt/access` edits `create_link`/`delete_link` in place. Usually a clean merge; `wt/access` merges first at M1 because its change is smaller and its tests are cheaper to re-run |
 | The client router | every view step | Removed as a conflict by IC-7. This is the whole reason F2 is a sequential phase rather than a file three worktrees share |
 | `pyproject.toml` | `wt/dist` and anything adding a dependency | `wt/dist` owns it through M0 and nothing else in F0 touches it. After M0 the only step that adds a dependency is 32, in G |
@@ -868,7 +869,30 @@ container name, so parallel worktrees can each hold a database without colliding
 and `.github/workflows/ci.yml` run the same three paths and the three cannot be allowed to
 disagree. `jmfts-web/` is outside that gate and carries its own.
 
-### 4.10 `docs/RELEASING.md` describes a release that no longer happens
+### 4.10 `docs/RELEASING.md` describes a release that no longer happens — ANSWERED 2026-09-13
+
+**Publish it under Block E step 4, and split it in two.** The rules that outlive any one
+release live in a `release` skill; the commands, the version locations, the distribution list
+and the remote names stay in `docs/RELEASING.md`. That split is the τ monorepo's
+(`agent-harness-py`), it is the reason its runbook survived the same pivot, and the skill was
+ported to this repository on 2026-09-13 — it carries the two-remote shape, the three
+distributions, the pending-publisher trap, and a statement that until the runbook is fixed the
+skill is the more current document and its step 3 does not happen.
+
+Two things the port found, neither of which is this sprint's to fix and both of which are now
+written down where a release will meet them:
+
+* **The leakage scan had an unwalked surface.** `tests/test_no_host_addresses.py::SHIPPED` did
+  not list `ROADMAP.md`, `CHANGELOG.md`, `docs/` or `jmfts-web/` — all four published, the
+  first on 2026-09-13, and it had carried a private path and a host reference that were cut by
+  hand on the way out. Nothing would have caught a third. Widened the same day; the scan still
+  reads clean.
+* **A test queries the repository it runs in.** `_tracked` shells out to `git ls-files` and
+  says so in its own docstring. There is no `git archive`-based gate here yet, so it has not
+  bitten; τ paid for that rule and this repository has the debt without the bill.
+
+The argument that is being retired: "process, not specification" kept the runbook internal, and
+it stopped being true when the process moved into the repository the work happens in.
 
 Found while doing step 19, on 2026-09-13, and it is not that step's to fix.
 

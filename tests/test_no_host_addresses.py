@@ -47,6 +47,24 @@ SHIPPED = (
     "pyproject.toml",
     "README.md",
     "CLAUDE.md",
+    # The prose that ships beside the code, added 2026-09-13. Every one of these was
+    # published after this list was written, and the list did not move with them — which is
+    # the failure mode a leakage scan has: not a bad pattern, an unwalked surface.
+    #
+    # `ROADMAP.md` is the pointed case. It was internal until 2026-09-13 and it carried a
+    # private path (`~/Development/turboquant_experiments`) and a "midlife only" host
+    # reference, both cut BY HAND on the way out. Nothing would have caught a third.
+    # `docs/` is here because `docs/reference/` is generated and `docs/SPRINT_0_6_0.md` is
+    # the current sprint plan; both ship, and a sprint plan is written while looking at a
+    # real machine. `jmfts-web/` is the third distribution.
+    #
+    # Publication happens at PUSH time, not at release time, so by the time a release runs
+    # anything this would find has been public for weeks. That is precisely why the surface
+    # list is the thing to keep current rather than the scan schedule.
+    "CHANGELOG.md",
+    "ROADMAP.md",
+    "docs/",
+    "jmfts-web/",
     ".env.example",
     "Dockerfile",
     "Dockerfile.worker",

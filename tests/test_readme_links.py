@@ -91,6 +91,17 @@ PUBLISHED = (
     # and says so where it does it.
     "docs/SPRINT_0_6_0.md",
     "jmfts-client/",
+    # The THIRD distribution, added 2026-09-13 with `docs/SPRINT_0_6_0.md` Block F step 19.
+    # Published for the reason `jmfts-client/` is: it is a distribution living in this tree,
+    # with its own `pyproject.toml` and its own version, and `jmfts[web]` pins it with `==`.
+    # A public repository carrying the extra without the thing it pins would not install.
+    #
+    # It was missed when step 19 ran — that step added the directory, the extra, the version
+    # in `bump-version.sh` and the matrix entry in `publish.yml`, and not this constant. The
+    # miss is exactly the one the `PUBLISHED` docstring warns about: the list is the
+    # definition four tests are written against, so a distribution absent from it is
+    # internal by that definition no matter how many other files name it.
+    "jmfts-web/",
     "jmfts_batch/",
     "jmfts_core/",
     "plugin/",
