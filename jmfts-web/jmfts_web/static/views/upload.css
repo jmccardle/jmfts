@@ -1,0 +1,202 @@
+/* The ingest view's own stylesheet.
+ *
+ * docs/SPRINT_0_6_0.md Block F step 26. Linked by `views/upload.js` itself and not by
+ * `index.html`, because `shell/shell.css` states the rule and gives the reason: a second
+ * `<link>` in that document would put five F3 worktrees back in one shared file, which is
+ * exactly the conflict IC-7 exists to remove.
+ *
+ * Every colour here is one of the shell's variables. A view that invented its own palette
+ * would be a page that stops matching the rest of the front end the first time the shell's
+ * changes, and the dark-mode block is in one place for the same reason.
+ *
+ * Loads nothing from anywhere but this origin — no font host, no CDN, no absolute url() —
+ * which `test_nothing_in_the_bundle_loads_from_the_network` holds the whole bundle to.
+ */
+
+.view-upload .upload-panel {
+  margin: 0 0 8px;
+}
+
+.view-upload .upload-sub {
+  margin: 0 0 10px;
+}
+
+/* ------------------------------------------------------------------------- the drop zone */
+
+.upload-drop {
+  border: 2px dashed var(--line);
+  border-radius: 8px;
+  padding: 22px 16px;
+  text-align: center;
+  background: var(--soft);
+}
+
+/* The drag-over state. Set by assigning className rather than by classList.toggle, because
+ * the harness the suite runs this bundle against models `classList.add` and nothing else. */
+.upload-drop.over {
+  border-color: var(--accent);
+  border-style: solid;
+}
+
+.upload-drop.busy {
+  opacity: 0.6;
+}
+
+.upload-drop p {
+  margin: 0 0 10px;
+}
+
+/* ----------------------------------------------------------------------------- the forms */
+
+.upload-controls {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin: 12px 0 0;
+}
+
+.upload-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 0 1 auto;
+}
+
+.upload-field > span {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+
+.upload-field.upload-wide {
+  flex: 1 1 100%;
+}
+
+.upload-field.upload-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+.view-upload input[type="text"],
+.view-upload input:not([type]),
+.view-upload select,
+.view-upload textarea {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+.view-upload textarea {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  min-height: 3.4rem;
+  width: 100%;
+  resize: vertical;
+}
+
+.upload-options {
+  min-width: 22rem;
+}
+
+.upload-go {
+  margin: 14px 0 0;
+}
+
+.upload-problem {
+  margin: 10px 0 0;
+}
+
+/* --------------------------------------------------------------------- facts and notices */
+
+.upload-facts th {
+  width: 14rem;
+}
+
+.upload-notice {
+  margin: 12px 0 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--soft);
+  border-radius: 0 4px 4px 0;
+}
+
+.upload-notice.bad {
+  border-left-color: var(--bad);
+}
+
+/* ------------------------------------------------------------------------------ the plan */
+
+.upload-basis {
+  margin: 14px 0 6px;
+}
+
+.upload-basis-partial {
+  color: var(--bad);
+}
+
+.upload-summary {
+  margin: 6px 0 10px;
+}
+
+.upload-plan-table td,
+.upload-plan-table th {
+  font-size: 0.92em;
+}
+
+/* One colour per outcome, and they are NOT a green/red pair: `skipped`, `not_applicable`
+ * and `impossible` are answers rather than failures, so only the undecided row is marked.
+ * A plan that painted five of its six outcomes as warnings would teach a reader to ignore
+ * the one that matters. */
+.pill.outcome-enqueued {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.pill.outcome-conditional {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+.outcome-row-not_applicable td,
+.outcome-row-impossible td,
+.outcome-row-skipped td {
+  color: var(--dim);
+}
+
+/* ------------------------------------------------------------------------- the frontier */
+
+.upload-status {
+  margin: 4px 0 12px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--soft);
+}
+
+.upload-status .note {
+  margin: 4px 0 0;
+  color: var(--dim);
+  font-size: 0.9em;
+}
+
+/* `accepted` and `in_flight` are deliberately the SAME weight as each other and lighter
+ * than `settled`: the page's whole job here is that nobody reads an in-flight tree as a
+ * finished one, and a bright badge on "accepted" is how that happens. */
+.upload-status-settled {
+  border-color: var(--accent);
+}
+
+.upload-status-failed,
+.upload-status-stalled {
+  border-color: var(--bad);
+}
+
+.upload-status-failed strong,
+.upload-status-stalled strong {
+  color: var(--bad);
+}
