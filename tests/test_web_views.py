@@ -7,11 +7,17 @@ each is pinned here by the property Part 5.1's table names for it rather than by
   asserted: two branches of a scratch repository each append a view to the real manifest and
   the merge is run. The same merge is run again without the ``.gitattributes`` line, where it
   must conflict, because a clean merge that nothing forced is a clean merge by luck.
-* the defect that opened this lane: the capability table read three field names that
-  ``CapabilitiesResponse`` does not carry, and all three rendered as the word "none" because
-  ``pills(items)`` could not tell a field that is absent from a field that is empty. The
-  fixture below is BUILT FROM THE CONTRACT — a real ``CapabilitiesResponse``, dumped to JSON —
-  so a field renamed in ``jmfts-client`` fails here rather than on somebody's screen.
+* **IC-8** — "every value in ``RENDERERS`` has exactly one renderer". The tuple is read out of
+  ``jmfts_core.models.usetype_presentation``; restating it in JavaScript would make this a
+  comparison of two copies of a list rather than a check of one.
+* **IC-9** — "one anchor renders identically on all three surfaces". Three surfaces of three
+  kinds, one anchor, one box, asserted equal.
+
+And the defect that opened this lane: the capability table read three field names that
+``CapabilitiesResponse`` does not carry, and all three rendered as the word "none" because
+``pills(items)`` could not tell a field that is absent from a field that is empty. The
+fixture below is BUILT FROM THE CONTRACT — a real ``CapabilitiesResponse``, dumped to JSON —
+so a field renamed in ``jmfts-client`` fails here rather than on somebody's screen.
 
 These need no database and no browser. Where ``node`` is on PATH they execute the bundle's ES
 modules against a stubbed DOM, which is the same arrangement
@@ -42,6 +48,7 @@ from jmfts_client.contracts.meta import (
     LlmCapability,
     RetrievalCapability,
 )
+from jmfts_core.models.usetype_presentation import RENDERERS
 
 REPO = Path(__file__).resolve().parents[1]
 STATIC = REPO / "jmfts-web" / "jmfts_web" / "static"
@@ -777,3 +784,321 @@ def test_the_capability_view_reads_only_fields_the_contract_carries():
     )
     bypass = re.findall(r"\bcap\.[a-z_]+", code)
     assert not bypass, f"the view reaches into the response directly: {bypass}"
+
+
+# ---------------------------------------------------------------------------- IC-8: renderers
+
+
+def test_every_value_in_the_renderers_tuple_has_exactly_one_renderer():
+    """IC-8's pin, with the tuple read out of Python rather than restated in JavaScript.
+
+    ``RENDERERS`` lives at ``jmfts_core/models/usetype_presentation.py:14`` and a copy of it in
+    the bundle would make this a comparison between two lists rather than a check of one. Both
+    directions matter: a value with no renderer is a document that cannot be shown, and a
+    renderer for a value the tuple does not carry is dead code with a plausible name.
+    """
+    source = (STATIC / "render" / "renderers.js").read_text(encoding="utf-8")
+    registered = re.findall(r'^registerRenderer\("([a-z-]+)", \{', source, re.M)
+    assert sorted(registered) == sorted(RENDERERS), (
+        f"registered: {sorted(registered)}, RENDERERS: {sorted(RENDERERS)}. Adding a renderer "
+        "is a tuple edit plus a migration plus one registration here."
+    )
+    assert len(set(registered)) == len(registered), "a renderer is registered twice"
+
+
+RENDERER_HARNESS = textwrap.dedent("""
+    import { install, serialize } from "./dom.mjs";
+    install();
+    const { render, rendererNames, rendererFor, UnknownRendererError, RenderError } =
+      await import("%(static)s/render/renderers.js");
+
+    const presentation = (renderer, config = {}) => ({
+      renderer, child_handling: "collapsed", link_handling: "footnotes", renderer_config: config,
+    });
+    const doc = { id: 7, title: "t", usetype: "document" };
+
+    const out = { names: rendererNames(), showing: {}, rendered: {}, refusals: {} };
+    for (const name of rendererNames()) out.showing[name] = rendererFor(name).showing;
+
+    out.rendered.plain = serialize(render("a\\nb", presentation("plain"), doc));
+    out.rendered.code = serialize(render("x=1", presentation("code", { language: "py" }), doc));
+    out.rendered.markdown = serialize(render("# H", presentation("markdown"), doc));
+    out.rendered.table = serialize(render(
+      JSON.stringify([{ a: 1, b: null }, { a: 2, c: 3 }]), presentation("json-table"), doc));
+
+    const refuse = (label, fn) => {
+      try { fn(); out.refusals[label] = null; }
+      catch (error) { out.refusals[label] = [error.name, error.message]; }
+    };
+    refuse("unknown renderer", () => render("x", presentation("mermaid"), doc));
+    refuse("json-table on prose", () => render("not json", presentation("json-table"), doc));
+    console.log(JSON.stringify(out));
+    """)
+
+
+@needs_node
+def test_a_renderer_that_is_not_finished_says_so_on_the_page(tmp_path):
+    """Step 25 ships the interface; step 29 ships the renderers, and the gap is visible.
+
+    Three of the five are complete because what they claim to do is all there is to do.
+    ``markdown`` and ``transcript`` are not, and rather than let them look finished they
+    declare ``showing`` and ``render()`` puts that sentence on the page. The notice is not the
+    renderer's to remove: a step-29 author sets ``showing: null`` and it goes, so finishing a
+    renderer and forgetting to take the notice down is not a state that exists.
+    """
+    result = _node(tmp_path, RENDERER_HARNESS)
+
+    assert sorted(result["names"]) == sorted(RENDERERS)
+    complete = {name for name, showing in result["showing"].items() if showing is None}
+    assert complete == {"plain", "code", "json-table"}
+
+    for name in ("markdown", "transcript"):
+        assert "step 29" in result["showing"][name], (
+            f"the {name} renderer must say what it is actually showing and where the real one "
+            "is scheduled"
+        )
+
+    markdown = result["rendered"]["markdown"]
+    assert markdown["class"] == "render-partial"
+    assert markdown["children"][0]["class"] == "render-notice"
+    assert "SOURCE" in markdown["children"][0]["text"]
+    assert markdown["children"][1]["text"] == "# H"
+
+    # The complete three are not wrapped, because there is nothing to warn about.
+    assert result["rendered"]["plain"]["class"] == "render-plain"
+    assert result["rendered"]["plain"]["text"] == "a\nb"
+    code = result["rendered"]["code"]
+    assert code["class"] == "render-code"
+    assert code["children"][0]["class"] == "language-py"
+
+    table = result["rendered"]["table"]
+    assert table["class"] == "render-json-table"
+    header = [c["text"] for c in table["children"][0]["children"]]
+    assert header == ["a", "b", "c"]
+    # A column this row does not carry and a column whose value is null are different facts.
+    first = table["children"][1]["children"]
+    assert [c["text"] for c in first] == ["1", "null", "—"]
+    assert first[2]["class"] == "dim"
+
+    assert result["refusals"]["unknown renderer"][0] == "UnknownRendererError"
+    assert "mermaid" in result["refusals"]["unknown renderer"][1]
+    assert result["refusals"]["json-table on prose"][0] == "RenderError"
+
+
+# ------------------------------------------------------------------ IC-9: the highlight overlay
+
+#: The three anchor kinds, verbatim from the shapes the sprint plan cites and the models in
+#: ``jmfts-client/jmfts_client/contracts/anchor.py`` parse.
+PDF_ANCHOR = {"kind": "pdf", "page": 3, "bbox": [72.0, 118.4, 540.0, 262.9]}
+CELLS_ANCHOR = {"kind": "cells", "sheet": "Q3 Pipeline", "ref": "B4:H120"}
+SPAN_ANCHOR = {"kind": "span", "char_start": 100, "char_end": 240}
+
+OVERLAY_HARNESS = textwrap.dedent("""
+    import { install } from "./dom.mjs";
+    install();
+    const { highlight, canPlace, HIGHLIGHT_STATUS, OverlayError, UnknownAnchorKind } =
+      await import("%(static)s/render/overlay.js");
+
+    const ANCHORS = %(anchors)s;
+    const geometry = {
+      source: { width: 612, height: 792 },
+      pixels: { width: 1224, height: 1584 },
+      originCorner: "top-left",
+      page: 3,
+    };
+
+    const out = { same: {}, results: {}, refusals: {}, canPlace: {} };
+
+    // IC-9's pin: one anchor, three surfaces of three kinds, one box.
+    for (const kind of ["pdf-page", "image", "sheet-region"]) {
+      out.same[kind] = highlight({ anchor: ANCHORS.pdf, unresolved: null }, { kind, ...geometry });
+    }
+
+    const on = (extra) => ({ kind: "pdf-page", ...geometry, ...extra });
+    out.results.box = out.same["pdf-page"];
+    out.results.flipped = highlight(
+      { anchor: ANCHORS.pdf, unresolved: null }, on({ originCorner: "bottom-left" }));
+    out.results.elsewhere = highlight({ anchor: ANCHORS.pdf, unresolved: null }, on({ page: 9 }));
+    out.results.continued = highlight(
+      { anchor: { ...ANCHORS.pdf, continues: [4, 5] }, unresolved: null }, on({ page: 4 }));
+    out.results.spread = highlight(
+      { anchor: { ...ANCHORS.pdf, continues: [4] }, unresolved: null }, on({}));
+    out.results.none = highlight({ anchor: null, unresolved: null }, on({}));
+    out.results.unresolved = highlight(
+      { anchor: null, unresolved: { code: "no_source_span", reason: "the chunk predates it" } },
+      on({}));
+
+    // A cells anchor over a sheet region, whose surface resolves its own A1 grammar. The rect
+    // it returns is the SAME source rectangle the pdf anchor names, so the two must agree.
+    const sheet = {
+      kind: "sheet-region", ...geometry, sheet: "Q3 Pipeline",
+      cellRect: (ref) => (ref === "B4:H120" ? [72.0, 118.4, 540.0, 262.9] : null),
+    };
+    out.results.cells = highlight({ anchor: ANCHORS.cells, unresolved: null }, sheet);
+    out.results.otherSheet = highlight(
+      { anchor: { ...ANCHORS.cells, sheet: "Q4" }, unresolved: null }, sheet);
+    out.results.offRegion = highlight(
+      { anchor: { ...ANCHORS.cells, ref: "AA900" }, unresolved: null }, sheet);
+
+    const refuse = (label, fn) => {
+      try { fn(); out.refusals[label] = null; }
+      catch (error) {
+        out.refusals[label] = [
+          error instanceof UnknownAnchorKind ? "UnknownAnchorKind"
+            : error instanceof OverlayError ? "OverlayError" : error.name,
+          error.message,
+        ];
+      }
+    };
+    refuse("span on a page", () => highlight({ anchor: ANCHORS.span, unresolved: null }, on({})));
+    refuse("unknown kind", () =>
+      highlight({ anchor: { kind: "waveform" }, unresolved: null }, on({})));
+    refuse("both rows", () =>
+      highlight({ anchor: ANCHORS.pdf, unresolved: { code: "c", reason: "r" } }, on({})));
+    refuse("only one key", () => highlight({ anchor: null }, on({})));
+    refuse("no origin corner", () => highlight(
+      { anchor: ANCHORS.pdf, unresolved: null },
+      { kind: "image", source: geometry.source, pixels: geometry.pixels, page: 3 }));
+    refuse("no page declared", () => highlight(
+      { anchor: ANCHORS.pdf, unresolved: null },
+      { kind: "image", source: geometry.source, pixels: geometry.pixels,
+        originCorner: "top-left" }));
+    refuse("cells with no grid", () =>
+      highlight({ anchor: ANCHORS.cells, unresolved: null }, on({})));
+
+    out.canPlace.pdf = canPlace(ANCHORS.pdf, on({}));
+    out.canPlace.span = canPlace(ANCHORS.span, on({}));
+    out.canPlace.cells = canPlace(ANCHORS.cells, sheet);
+    out.status = HIGHLIGHT_STATUS;
+    console.log(JSON.stringify(out));
+    """)
+
+
+@pytest.fixture(scope="module")
+def overlay(tmp_path_factory):
+    if NODE is None:
+        pytest.skip("no JavaScript runtime on PATH")
+    anchors = json.dumps({"pdf": PDF_ANCHOR, "cells": CELLS_ANCHOR, "span": SPAN_ANCHOR})
+    return _node(
+        tmp_path_factory.mktemp("overlay"),
+        OVERLAY_HARNESS.replace("%(anchors)s", anchors),
+    )
+
+
+def test_one_anchor_renders_identically_on_all_three_surfaces(overlay):
+    """IC-9's pin, and the reason the overlay is one component rather than three.
+
+    The sprint plan's argument is that "writing it three times is how the three end up
+    disagreeing about which corner the origin is in". So the three surfaces here differ ONLY in
+    their ``kind`` — same source extent, same pixel size, same declared origin — and the box
+    must be the same box. It is the same box because ``toPixels`` never reads ``kind``; the day
+    it does, this goes red.
+    """
+    boxes = overlay["same"]
+    assert set(boxes) == {"pdf-page", "image", "sheet-region"}
+    assert len({json.dumps(box, sort_keys=True) for box in boxes.values()}) == 1, boxes
+    assert boxes["pdf-page"]["status"] == "box"
+
+
+def test_the_box_is_the_source_rectangle_scaled_and_the_origin_is_declared(overlay):
+    """The geometry itself, at 2x, and the flip a bottom-left surface needs.
+
+    Points, not pixels, are what the anchor stores — the anchor contract is explicit that a
+    stored pixel value would bake one viewer's zoom into the record — so the scale is the
+    surface's and this is where it is applied.
+    """
+    # ``approx`` because these are the products of binary floating point, not because the
+    # numbers are uncertain: 262.9 - 118.4 is 144.49999999999997 and doubling it keeps the tail.
+    box = overlay["results"]["box"]["box"]
+    assert box == pytest.approx({"left": 144.0, "top": 236.8, "width": 936.0, "height": 289.0})
+
+    # Same rectangle, a surface whose origin is the other corner: the box is the same size and
+    # the same distance from the OTHER edge. 792 - 262.9 = 529.1 points, doubled.
+    flipped = overlay["results"]["flipped"]["box"]
+    assert flipped["left"] == box["left"]
+    assert flipped["width"] == box["width"]
+    assert flipped["height"] == box["height"]
+    assert flipped["top"] == pytest.approx(1058.2)
+
+
+def test_a_passage_on_another_page_is_not_a_box_drawn_on_this_one(overlay):
+    """Three answers where a viewer might expect one, and they are different answers.
+
+    A rectangle from page 3 drawn on page 9 is confidently wrong, which is worse than absent
+    and indistinguishable from right. ``continues`` is the case the anchor contract added the
+    field for: the box covers only the page the passage BEGINS on, so a page it merely runs
+    onto gets "continued" and never the starting page's rectangle.
+    """
+    assert overlay["results"]["elsewhere"] == {"status": "elsewhere", "page": 3}
+    assert overlay["results"]["continued"] == {"status": "continued", "page": 4, "from": 3}
+    assert overlay["results"]["spread"]["status"] == "box"
+    assert overlay["results"]["spread"]["continues"] == [4]
+    assert overlay["results"]["box"]["continues"] is None, "absent, not empty"
+
+
+def test_no_highlight_and_an_unrecoverable_highlight_are_different_answers(overlay):
+    """The Fail Early rule applied to a surface, and the failure this sprint is written against.
+
+    ``source_anchor.unresolved`` is its own evidence row, "present exactly when ``anchor`` is
+    not" (``jmfts_core/evidence.py:453``). Collapsing the two into a blank surface is how the
+    second one stays invisible, so the result is TAGGED and a caller cannot handle one without
+    having seen the other. The reason is carried through verbatim: it is a sentence written for
+    a human at ``citation_tasks.py:284``, and rewriting it here would replace an explanation
+    with a shrug.
+    """
+    assert overlay["results"]["none"] == {"status": "none"}
+    assert overlay["results"]["unresolved"] == {
+        "status": "unresolved",
+        "code": "no_source_span",
+        "reason": "the chunk predates it",
+    }
+    assert overlay["refusals"]["both rows"][0] == "OverlayError"
+    assert "453" in overlay["refusals"]["both rows"][1]
+    assert overlay["refusals"]["only one key"][0] == "OverlayError"
+
+
+def test_a_cells_anchor_lands_where_the_same_rectangle_does(overlay):
+    """The sheet surface owns the A1 grammar; the overlay owns the transform.
+
+    ``CellsAnchor``'s docstring refuses a second A1 parser in the client, and a third in
+    JavaScript would be worse again — so the surface resolves the ref against the grid it was
+    built from and hands back its own source coordinates. What must then be true is that those
+    coordinates go through the SAME transform, which is what this asserts: the same rectangle,
+    reached two ways, is the same box.
+    """
+    assert overlay["results"]["cells"]["box"] == overlay["results"]["box"]["box"]
+    assert overlay["results"]["otherSheet"] == {
+        "status": "elsewhere",
+        "sheet": "Q4",
+        "showing": "Q3 Pipeline",
+    }
+    assert overlay["results"]["offRegion"]["status"] == "elsewhere"
+    assert overlay["results"]["offRegion"]["ref"] == "AA900"
+
+
+def test_the_overlay_refuses_what_it_cannot_honestly_draw(overlay):
+    """Five refusals, and each is a silently-wrong box that does not get drawn.
+
+    A span anchor is a VALID anchor that has no geometry, and saying so points the caller at
+    the text renderer instead of leaving them to conclude the highlight is broken. An unknown
+    kind means this front end is older than the appliance — the same answer
+    ``UnknownAnchorKind`` gives in the Python contract, for the same reason. A surface with no
+    declared origin corner is a coin flip on every box's vertical position.
+    """
+    refusals = overlay["refusals"]
+    assert refusals["span on a page"][0] == "OverlayError"
+    assert "anchor.py" in refusals["span on a page"][1]
+    assert refusals["unknown kind"][0] == "UnknownAnchorKind"
+    assert "waveform" in refusals["unknown kind"][1]
+    assert "originCorner" in refusals["no origin corner"][1]
+    assert "page" in refusals["no page declared"][1]
+    assert "cellRect" in refusals["cells with no grid"][1]
+
+    assert overlay["canPlace"] == {"pdf": True, "span": False, "cells": True}
+    assert overlay["status"] == {
+        "BOX": "box",
+        "CONTINUED": "continued",
+        "ELSEWHERE": "elsewhere",
+        "NONE": "none",
+        "UNRESOLVED": "unresolved",
+    }
