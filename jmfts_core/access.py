@@ -30,7 +30,7 @@ from sqlalchemy import func, not_, or_, select
 from sqlalchemy.orm import Session
 
 from jmfts_core.database import get_session
-from jmfts_core.models.document import Document
+from jmfts_core.models.document import Document, DocumentLink
 from jmfts_core.models.principal import AccessGrant, ApiToken, Principal
 from jmfts_core.principal_context import CurrentPrincipal, get_current_principal
 
@@ -342,6 +342,103 @@ def require_add_child(
         raise ValueError(f"Parent document {parent.id} does not exist")
     if not can_write(session, parent, principal):
         raise AccessDeniedError(parent.id, "add a child to")
+
+
+# --- Edge write gates: WRITE on the source, READ on the target ---------------------
+#
+# `SPRINT_0_6_0.md` Block A step 1, and Part 4 question 4.1 is the argument. Three
+# candidates were weighed. WRITE ON BOTH ENDS is the narrowest and refuses a legitimate
+# citation of a document you may read and not modify. WRITE ON SOURCE ONLY closes nothing
+# the URL does not already imply, and it was rejected on a concrete leak rather than on
+# principle: a principal may then create an edge to a document it cannot read at all, and
+# that row reaches `/graph/neighbors`, `/graph/centrality` and `/graph/spines` — edge
+# injection into a graph the injecting principal cannot see. WRITE ON SOURCE, READ ON
+# TARGET is the one that makes the READ gate on edges coherent, because
+# `DocumentRepository.get_links` already hides an edge whose far endpoint the reader
+# cannot read (`repositories/document.py:1246`), and hiding an edge from a reader while
+# letting that same reader create it is the inconsistency.
+
+
+def require_edge_write(
+    session: Session,
+    source_id: int,
+    target_id: int,
+    principal: Optional[CurrentPrincipal] = None,
+) -> None:
+    """Enforce CREATING an edge ``source → target``: write on source, read on target.
+
+    Failure spellings follow :func:`require_add_child`, which is the house style: a
+    document the principal cannot READ is spelled as missing (``LookupError`` → 404) so
+    the gate leaks no existence, and a readable-but-unwritable SOURCE is
+    ``AccessDeniedError`` → 403.
+
+    **The source is settled completely before the target is looked at.** Otherwise a
+    principal with no write anywhere could use this verb as an existence oracle for target
+    ids, reading 404-vs-403 off a call that was never going to succeed.
+
+    Ungoverned stays open, and that is not a gap: ``can_write`` returns True when no ACR
+    governs the node (:172), so a deployment with no grants anywhere never gets past
+    ``_bypass`` and this function costs it nothing. Access control here is opt-in.
+
+    Takes ids rather than ``Document`` rows so that the bypass path — owner, unbound
+    in-process callers, and every deployment with no grants — does not pay for two loads
+    it will not read. That matters: ``summarization.py`` mints one bridge edge per pair.
+    """
+    if principal is None:
+        principal = get_current_principal()
+    if _bypass(principal):
+        return
+    source = session.get(Document, source_id)
+    if source is None or not can_read(session, source, principal):
+        raise LookupError(f"Document {source_id} not found")
+    if not can_write(session, source, principal):
+        raise AccessDeniedError(source_id, "create a link from")
+    target = session.get(Document, target_id)
+    if target is None or not can_read(session, target, principal):
+        raise LookupError(f"Document {target_id} not found")
+
+
+def require_edge_delete(
+    session: Session, link: DocumentLink, principal: Optional[CurrentPrincipal] = None
+) -> None:
+    """Enforce DELETING ``link``. Which end is checked depends on who asserted it.
+
+    ``DocumentLink.derived_by`` (migration 019, and see
+    ``DocumentRepository.rederive_links``) is what distinguishes a rule-derived edge from
+    one a principal asserted, and it is the only record of authorship an edge carries.
+
+    * ``derived_by IS NOT NULL`` — a rule derived this edge FROM its source, so the source
+      is the asserting end and write on the source is what it takes. Write on the target
+      is deliberately not enough: the rule would put the row back on its next run, so
+      accepting a delete there would be a verb that reports success and changes nothing.
+    * ``derived_by IS NULL`` — nothing recorded who asserted it, so write on EITHER end
+      is enough. Guessing that the source asserted it would refuse a curator with write on
+      the target and no way to tell whether the guess was right.
+
+    Existence-hiding as everywhere else: a principal that can read neither endpoint is
+    told the link does not exist rather than that it may not touch it.
+    """
+    if principal is None:
+        principal = get_current_principal()
+    if _bypass(principal):
+        return
+    source = session.get(Document, link.source_id)
+    target = session.get(Document, link.target_id)
+    if source is None or target is None:
+        # A link whose endpoint row is gone is not a link this function can reason about;
+        # the FK says it cannot happen, and if it does, "not found" is the honest answer.
+        raise LookupError(f"Link {link.id} not found")
+    if link.derived_by is not None:
+        require_write(session, source, "delete a derived link from", principal)
+        return
+    if can_write(session, source, principal) or can_write(session, target, principal):
+        return
+    if can_read(session, source, principal) or can_read(session, target, principal):
+        # The source names the denial because an edge is written source-first everywhere
+        # else in this module; the caller may have asked through either end, and the
+        # message is about the EDGE rather than about which end it was reached by.
+        raise AccessDeniedError(link.source_id, "delete a link on")
+    raise LookupError(f"Link {link.id} not found")
 
 
 # --- Identity: token → principal resolution + owner-only management guard ----------

@@ -40,6 +40,8 @@ from jmfts_core.access import (
     readable_filter,
     readable_id_subset,
     require_add_child,
+    require_edge_delete,
+    require_edge_write,
     require_write,
 )
 from jmfts_client.contracts.attempt import TERMINAL_STATUSES, AttemptRecord
@@ -1124,7 +1126,18 @@ class DocumentRepository:
         score: float = 1.0,
         metadata: Optional[dict] = None,
     ) -> DocumentLink:
-        """Create a link between two documents"""
+        """Create a link between two documents.
+
+        Subtree RBAC: WRITE on the source, READ on the target
+        (``SPRINT_0_6_0.md`` Block A step 1; the argument is Part 4 question 4.1 and it
+        lives at :func:`~jmfts_core.access.require_edge_write`). The gate is HERE and not
+        only in ``DocumentService.create_link``, because this method has five other
+        callers — ``summarization.py`` ×3, ``rollup_tasks.py`` and
+        ``ingest_service._place_existing_file`` — and a gate only the service holds is a
+        gate any new caller walks around. Worker callers bind no principal and bypass it
+        for free.
+        """
+        require_edge_write(self.session, source_id, target_id)
         link = DocumentLink(
             source_id=source_id,
             target_id=target_id,
@@ -1261,18 +1274,26 @@ class DocumentRepository:
     def delete_link(self, link_id: int, *, incident_to: Optional[int] = None) -> Optional[str]:
         """Delete a link by id; return the deleted link's ``link_type``.
 
-        The link graph is otherwise append-only — this is the retract leg. Deletion is
-        unconditional (RAPTOR ``bridge`` edges included); the caller owns that policy.
-        ``incident_to`` scopes the delete to a link touching that document (source or
-        target), so ``DELETE /documents/{id}/links/{link_id}`` can't reach an unrelated
-        edge. Returns ``None`` if no such link exists (or it isn't incident to the given
-        document), which the service maps to 404.
+        The link graph is otherwise append-only — this is the retract leg. No LINK TYPE is
+        privileged (RAPTOR ``bridge`` edges are deletable like any other); the caller owns
+        that policy. ``incident_to`` scopes the delete to a link touching that document
+        (source or target), so ``DELETE /documents/{id}/links/{link_id}`` can't reach an
+        unrelated edge. Returns ``None`` if no such link exists (or it isn't incident to
+        the given document), which the service maps to 404.
+
+        Subtree RBAC: :func:`~jmfts_core.access.require_edge_delete` decides which END must
+        be writable, and ``derived_by`` is what it reads to decide. ``SPRINT_0_6_0.md``
+        Block A step 1 — its entry condition names ``POST`` because that is where the gap
+        was found, and the step closes both verbs. The sentence above used to read
+        "deletion is unconditional", which was true of the type and, until this step, of
+        the principal too.
         """
         link = self.session.get(DocumentLink, link_id)
         if link is None:
             return None
         if incident_to is not None and incident_to not in (link.source_id, link.target_id):
             return None
+        require_edge_delete(self.session, link)
         link_type = link.link_type
         self.session.delete(link)
         self.session.flush()

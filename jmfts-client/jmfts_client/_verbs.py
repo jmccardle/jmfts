@@ -358,6 +358,7 @@ class _GeneratedVerbs(_VerbTransport):
         ``POST /documents/{document_id}/links`` — DocumentService.create_link
 
         Raises on 400 (server: ValueError).
+        Raises on 404 (server: LookupError).
         """
         return self._call(
             "POST",

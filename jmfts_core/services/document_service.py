@@ -31,7 +31,7 @@ from typing import Optional
 import numpy as np
 from sqlalchemy.orm import Session
 
-from jmfts_core.access import can_read, filter_readable
+from jmfts_core.access import can_read, filter_readable, require_edge_write
 from jmfts_core.chunking import ChunkStrategy, chunk_text
 from jmfts_client.contracts.document import (
     CellNoteResponse,
@@ -1280,16 +1280,33 @@ class DocumentService:
         "POST",
         "/documents/{document_id}/links",
         response_model=LinkResponse,
-        errors={ValueError: 400},
+        errors={ValueError: 400, LookupError: 404},
         tags=["documents"],
         summary="Create a link from this document to another",
     )
     def create_link(self, document_id: int, request: LinkCreate) -> LinkResponse:
-        """Create a link from this document to another"""
+        """Create a link from this document to another.
+
+        Subtree RBAC: WRITE on the source, READ on the target — ``SPRINT_0_6_0.md`` Block A
+        step 1, answering Part 4 question 4.1. Until that step this method performed no
+        access check of any kind: its whole validation was the ``source_id`` mismatch
+        below, while ``get_links`` directly underneath it called ``can_read``. Reads were
+        gated and writes were not, in adjacent methods of one class.
+
+        The gate is also inside ``repo.create_link``, which is where every OTHER writer of
+        an edge goes through it. Both, because this one wants the 404 spelled against the
+        document in the URL before ``source_id`` is even compared — an unreadable
+        ``document_id`` must look missing here exactly as it does in ``get_links``, not
+        like a 400 about a field the caller got right.
+        """
+        repo = DocumentRepository(self.session)
+        source = repo.get(document_id)
+        if source is None or not can_read(self.session, source):
+            raise LookupError(f"Document {document_id} not found")
         if request.source_id != document_id:
             raise ValueError("source_id must match document_id in URL")
+        require_edge_write(self.session, request.source_id, request.target_id)
 
-        repo = DocumentRepository(self.session)
         link = repo.create_link(
             source_id=request.source_id,
             target_id=request.target_id,
@@ -1358,8 +1375,17 @@ class DocumentService:
         The retract leg for the append-only link graph. Deletes any link type (RAPTOR
         ``bridge`` edges included) as long as it touches ``document_id``; the deleted
         ``link_type`` is echoed back so a caller can tell what it removed.
+
+        Subtree RBAC, ``SPRINT_0_6_0.md`` Block A step 1: an unreadable ``document_id`` is
+        indistinguishable from missing here (the same 404 ``get_links`` gives), and which
+        END of the link must be writable is ``require_edge_delete``'s decision, applied
+        inside ``repo.delete_link``. Before this step neither check existed — the method
+        raised ``LookupError`` only when nothing matched.
         """
         repo = DocumentRepository(self.session)
+        doc = repo.get(document_id)
+        if doc is None or not can_read(self.session, doc):
+            raise LookupError(f"Document {document_id} not found")
         link_type = repo.delete_link(link_id, incident_to=document_id)
         if link_type is None:
             raise LookupError(f"Link {link_id} not found on document {document_id}")
