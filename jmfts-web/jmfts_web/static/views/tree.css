@@ -1,0 +1,55 @@
+/* The tree browser's own styling. Loaded by `views/tree.js` and by nothing else.
+ *
+ * docs/SPRINT_0_6_0.md Block F step 28. `shell/shell.css:4` states the rule this file exists
+ * under: "A view that needs styling of its own adds it from its own module rather than a
+ * second <link> here — index.html is a file five F3 worktrees would otherwise all edit, which
+ * is the conflict IC-7 exists to remove." So the <link> is appended by the view's component,
+ * from a URL resolved against the module's own, and nothing outside this directory names it.
+ *
+ * The class vocabulary it builds on — `pill`, `dim`, `bad`, `mono`, `tiny` — is the shell's.
+ * What is here is only what a tree needs and a table did not.
+ */
+
+.view-tree .tree-node {
+  margin: 0;
+}
+.view-tree .tree-children {
+  margin-left: 18px;
+  border-left: 1px solid var(--line);
+  padding-left: 10px;
+}
+.view-tree .tree-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  padding: 3px 0;
+}
+.view-tree .tree-row .tree-title {
+  font-weight: 600;
+  text-decoration: none;
+}
+.view-tree .tree-row .tree-title.untitled {
+  font-weight: 400;
+  color: var(--dim);
+  font-style: italic;
+}
+.view-tree .tree-preview {
+  color: var(--dim);
+  font-size: 0.9em;
+  margin: 0 0 2px 26px;
+}
+.view-tree .tree-group {
+  margin: 6px 0 2px;
+  color: var(--dim);
+  font-size: 0.82em;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.view-tree .tree-crumbs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  margin: 0 0 12px;
+}
