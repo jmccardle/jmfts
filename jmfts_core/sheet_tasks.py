@@ -13,6 +13,12 @@ a representation 8.4 chooses — and it runs TWO of 8.4's four shapes and emits 
 both match, because **8.8 leaves every threshold the other two read unset** while neither of
 these two reads one. See :func:`run_extract_sheet`.
 
+8.6's ``propose:links`` lives here too, and it is the first task in this module scoped to the
+WORKBOOK rather than to one sheet: it reads every sheet's profile and proposes the columns
+whose value sets nest. The search itself is :mod:`jmfts_core.column_links`, which holds no
+session; what is here is the half that needs one — gathering the profiles, verifying the
+survivors in SQL, and writing the proposals down.
+
 **The two per-sheet tasks are declared in** :data:`~jmfts_core.ingest_tasks.TASK_ROWS`
 **and not here.** They were literal ``TaskSpec`` values in this module until
 ``SPRINT_JOBS.md`` Phase 3 gave a rule a scope; they are now rows scoped to the children
@@ -51,13 +57,16 @@ adds is the reader (:mod:`jmfts_core.office.workbook`) — tier 2, behind
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Optional, Sequence
 
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from jmfts_core.atoms import (
     COST_CPU,
     EV_BLOB,
     EV_CELL,
+    EV_COLUMN_LINKS,
     EV_MATCHED,
     EV_PROFILE,
     EV_SHEET,
@@ -75,14 +84,40 @@ from jmfts_core.atoms import (
     fixed,
 )
 from jmfts_core.chunking import ChunkStrategy, chunk_text
+from jmfts_core.column_links import (
+    DEFAULT_CONTAINMENT_THRESHOLD,
+    DEFAULT_LSH_PARTITIONS,
+    DEFAULT_MAX_CANDIDATES,
+    DEFAULT_MIN_DISTINCT_VALUES,
+    METHOD_LSH_ENSEMBLE,
+    SKETCH_RESOLUTION,
+    THRESHOLD_UNCALIBRATED,
+    VERIFIED_NONE,
+    VERIFIED_SQL_EXACT,
+    Containment,
+    Verification,
+    candidate_record,
+    census,
+    collapse_mutual,
+    columns_of,
+    find_containments,
+    passes_threshold,
+    recipe_of,
+    sort_candidates,
+    unverifiable_reason,
+)
 from jmfts_core.config import get_settings
 from jmfts_core.embedding import get_embedding_service
 from jmfts_core.ingest_options import STRUCTURE_CHUNK_PARAMS
 from jmfts_core.ingest_tasks import (
+    DEFERRED_REASON,
     TASK_EMBED,
     TASK_EXTRACT_SHEET,
     TASK_PROFILE_SHEET,
+    TASK_PROPOSE_LINKS,
+    TASK_REVIEW_LINK,
     TASK_STRUCTURE_SHEETS,
+    Frontier,
     TaskOutcome,
     enqueue_frontier,
     plan_frontier,
@@ -99,7 +134,7 @@ from jmfts_core.models.document import (
     USETYPE_PROFILE,
     USETYPE_TABLE,
 )
-from jmfts_core.models.task_queue import TaskQueue, WRITE_CHILDREN
+from jmfts_core.models.task_queue import TaskQueue, WRITE_CHILDREN, WRITE_SELF
 from jmfts_core.office.cells import json_value, read_rows
 from jmfts_core.office.sheets import measure_sheet
 from jmfts_core.office.workbook import read_sheets
@@ -121,6 +156,7 @@ from jmfts_core.sheet_records import (
     header_labels,
     plan_record,
 )
+from jmfts_core.sketch import require_datasketch
 from jmfts_core.structure_tasks import RUNG_DECLARED, RUNG_INFERRED
 
 #: What produced these boundaries, recorded beside the rung exactly as the text rungs
@@ -158,6 +194,50 @@ NO_RUNG_REASON = (
     "INGEST_SPEC.md 8.7 makes the sheet block's `rung` a function of the shape chosen in "
     "8.4, and no shape was chosen: 8.8 leaves the thresholds unset. `profile:sheet` draws "
     "no boundary below a sheet, so it claims no rung for one"
+)
+
+#: 8.6's workbook-level task, and it is not a row of ``TASK_ROWS`` — see
+#: :data:`~jmfts_core.ingest_tasks.TASK_PROPOSE_LINKS` for the dependency a row cannot
+#: express. ``self``, because it writes the workbook node's own ``column_links`` evidence and
+#: creates no node. Enqueuing is not a write to the tree (see ``PROBE_WRITE_MODE``), and
+#: today it enqueues nothing at all — see
+#: :data:`~jmfts_core.ingest_tasks.DEFERRED_REASON` for ``review:link``.
+PROPOSE_LINKS_WRITE_MODE = WRITE_SELF
+
+#: Every knob 8.6's containment search reads, in the task row rather than in configuration.
+#: Two reasons, both the ones the ``sheet_profile`` option group gives for ``sketch_columns``:
+#: a re-ingest under a different threshold is a different request and its
+#: ``param_fingerprint`` has to say so (6.1), and a workbook profiled last month has to record
+#: which numbers it was searched under.
+#:
+#: NOT AN ``ingest_options`` GROUP, which is where every row's parameters come from since
+#: Phase 3, and the reason is the one above: a group is resolved per format when ``probe``
+#: finishes and handed to a ROW, and this task has no row. Making it one would mean a
+#: ``params_key`` on a row that cannot state its own dependency, which buys a settable knob
+#: at the price of a task that runs before the profiles exist. The knobs are settable per
+#: task here instead; :func:`_links_params` is what validates them, and it validates rather
+#: than clamps for the reason ``ingest_options`` does.
+#:
+#: **None of them is calibrated.** See :data:`~jmfts_core.column_links.THRESHOLD_UNCALIBRATED`,
+#: which is written into every workbook beside the numbers themselves.
+PROPOSE_LINKS_PARAMS: dict = {
+    "containment_threshold": DEFAULT_CONTAINMENT_THRESHOLD,
+    "lsh_partitions": DEFAULT_LSH_PARTITIONS,
+    "min_distinct_values": DEFAULT_MIN_DISTINCT_VALUES,
+    "max_candidates": DEFAULT_MAX_CANDIDATES,
+}
+
+#: Why a workbook whose sheets were profiled without sketches gets no ``propose:links``.
+#: Scheduling reads the parameter the profile task was planned WITH, so the two cannot
+#: disagree: the containment search compares sketches, and a profile that wrote none leaves
+#: it nothing to compare. Recorded rather than discovered at claim time, because a task
+#: enqueued to fail is a failed workbook and a task not enqueued for a stated reason is a
+#: line in the attempt log.
+NO_SKETCHES_REASON = (
+    "INGEST_SPEC.md 8.6's containment search compares the per-column sketches "
+    "`profile:sheet` writes, and this workbook's profiles were planned with "
+    "`sketch_columns` false, so there is nothing for it to compare. Re-ingest with "
+    "sketching on (see jmfts_core/sketch.py) to get the proposals"
 )
 
 
@@ -243,6 +323,7 @@ def run_structure_sheets(session: Session, task: TaskQueue) -> TaskOutcome:
     # forty-sheet workbook is one evaluation and forty enqueues.
     frontier = plan_frontier(session, doc, produced_by=TASK_STRUCTURE_SHEETS, usetype=USETYPE_SHEET)
     child_ids: list[int] = []
+    profile_task_ids: list[int] = []
     for sheet in sheets:
         node = repo.create(
             title=sheet.name,
@@ -274,8 +355,22 @@ def run_structure_sheets(session: Session, task: TaskQueue) -> TaskOutcome:
             settled=SETTLED_IN_FLIGHT if frontier.in_flight else SETTLED_SETTLED,
         )
         if frontier.in_flight:
-            enqueue_frontier(tasks, node, frontier)
+            queued = enqueue_frontier(tasks, node, frontier)
+            # `enqueue_batch` returns one id per spec, in the order it enqueued them, so the
+            # zip is positional and not a lookup by name. Which of them is the profile is
+            # read off the spec rather than off a position, because the batch's membership is
+            # `plan_frontier`'s answer and it is allowed to change.
+            profile_task_ids.extend(
+                task_id
+                for spec, task_id in zip(frontier.specs, queued)
+                if spec.task_type == TASK_PROFILE_SHEET
+            )
         child_ids.append(node.id)
+
+    # 8.6's workbook-level task, and this is the only moment its dependencies are known: one
+    # `profile:sheet` per sheet, on nodes that did not exist when this handler started. It
+    # goes on the FILE node, so the workbook does not settle until the proposals are made.
+    links_task_id = _enqueue_propose_links(tasks, doc.id, frontier, profile_task_ids)
 
     EvidenceRepository(session).write(
         doc.id,
@@ -301,9 +396,20 @@ def run_structure_sheets(session: Session, task: TaskQueue) -> TaskOutcome:
         # Per sheet, not in total — the numbers below are what one sheet node got, and a
         # reader multiplying by `sheets` gets the workbook's fan-out.
         "queued_per_sheet": [spec.task_type for spec in frontier.specs],
+        # And the one that is not per sheet. Its id rather than a boolean, because what a
+        # reader wants next is the row it waits on (8.6).
+        "propose_links_task_id": links_task_id,
         # 3.4: a rung that ran and stopped where the spec says to stop must not look like
         # one that never ran.
-        "deferred": frontier.deferred,
+        #
+        # A copy, not `frontier.deferred` itself: the frontier is the SHEET nodes' batch and
+        # `propose:links` is not in it, so the workbook's own un-queued task is added here
+        # and never written back into a plan that is about a different scope.
+        "deferred": (
+            frontier.deferred
+            if links_task_id is not None or not profile_task_ids
+            else {**frontier.deferred, TASK_PROPOSE_LINKS: NO_SKETCHES_REASON}
+        ),
         # And a row whose CONDITION was false is a third thing again. It could not be
         # reported here before Phase 3, because the sheet tier was a literal tuple with no
         # condition to report; it is a row now, and a row that did not fire has a reason.
@@ -315,6 +421,40 @@ def run_structure_sheets(session: Session, task: TaskQueue) -> TaskOutcome:
         detail=detail,
         produced={"node_count": len(child_ids), "child_ids": child_ids},
     )
+
+
+def _enqueue_propose_links(
+    tasks: TaskQueueRepository,
+    file_node_id: int,
+    frontier: Frontier,
+    profile_task_ids: Sequence[int],
+) -> Optional[int]:
+    """One ``propose:links`` for the workbook, or ``None`` with the reason left to the caller.
+
+    **The condition is read off the planned spec, not off configuration.**
+    ``sketch_columns`` is a ``profile:sheet`` parameter — a key of the ``sheet_profile``
+    option group, resolved per ingest since Phase 3 — so what decides whether a containment
+    search has anything to compare is what those tasks were queued WITH. Reading it from
+    ``get_settings()`` or from the group's defaults would let the two disagree the moment a
+    caller sets it, which is exactly what Phase 3 made possible.
+    """
+    if not profile_task_ids:
+        return None
+    sketching = any(
+        spec.task_type == TASK_PROFILE_SHEET and spec.params.get("sketch_columns")
+        for spec in frontier.specs
+    )
+    if not sketching:
+        return None
+    return tasks.enqueue(
+        TASK_PROPOSE_LINKS,
+        file_node_id,
+        PROPOSE_LINKS_WRITE_MODE,
+        params=dict(PROPOSE_LINKS_PARAMS),
+        # Every profile, not the last one. 8.6: "This is the first workbook-level task after
+        # the per-sheet fan-out, which is why it needs all sheets profiled first."
+        dependencies=list(profile_task_ids),
+    ).id
 
 
 # ---------------------------------------------------------------------------
@@ -1091,3 +1231,371 @@ def run_extract_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
         # two fields.
         produced={"node_count": len(child_ids), "child_ids": child_ids},
     )
+
+
+# ---------------------------------------------------------------------------
+# propose:links — INGEST_SPEC.md 8.6, SPRINT_0_3_0.md 6.4
+# ---------------------------------------------------------------------------
+
+#: Where the proposals land on the workbook node: an evidence row of their own, beside
+#: ``structure`` and ``matched`` rather than inside either. It is not a rung — no boundary is
+#: drawn and no node is written — and it is not something probe measured.
+LINKS_KEY = EV_COLUMN_LINKS
+
+#: Said once for the whole workbook rather than on each of Part 7.6's payloads, which carry
+#: the number itself. A rebuild estimate under an undecided representation is worth having
+#: and is worth being honest about: 8.4 has four shapes, ``extract:sheet`` now runs two of
+#: them, and only ``records`` writes a node per row.
+REBUILD_ESTIMATE_ASSUMES = (
+    "`estimated_rebuild_nodes` on each review payload is the contained column's row count, "
+    "which assumes INGEST_SPEC.md 8.4's `records` shape — one node per row. `extract:sheet` "
+    "runs that shape and `small_table` beside it, and which of the two a given sheet got is "
+    "on that sheet's node (`sheet.shape`); the other two shapes are unbuilt, because 8.8 "
+    "leaves the thresholds they read unset"
+)
+
+#: Exact verification, in the database, over the value sets 8.5 stored. One statement for
+#: every survivor rather than one per pair, and the value lists never leave Postgres — a
+#: pair of thousand-element arrays pulled into Python per candidate is the cost 6.4's "in
+#: SQL" is avoiding, not a detail of where the comparison happens to be written.
+#:
+#: **It reads ``document_evidence`` and not ``documents``.** Phase 2b moved every named fact
+#: out of ``Document.structured_content`` into a row per name, so the sheet block is the
+#: ``sheet`` row's ``value`` and the join is on ``(document_id, name)``. The row name is a
+#: bind parameter rather than a literal, so the statement and every Python reader of the
+#: same block name it with one constant (:data:`~jmfts_core.atoms.EV_SHEET`).
+#:
+#: The columns are addressed by their ARRAY POSITION in the stored profile
+#: (``ColumnRef.position``), which is what a JSONB path can follow; the worksheet's own
+#: 1-based column index is a different number and is carried separately.
+_VERIFY_SQL = text("""
+    WITH pair(ord, contained_node, contained_pos, container_node, container_pos) AS (
+        SELECT * FROM unnest(
+            CAST(:ords AS int[]),
+            CAST(:contained_nodes AS int[]),
+            CAST(:contained_positions AS int[]),
+            CAST(:container_nodes AS int[]),
+            CAST(:container_positions AS int[])
+        )
+    ),
+    contained_values AS (
+        SELECT p.ord, v.value AS val
+        FROM pair p
+        JOIN document_evidence e
+          ON e.document_id = p.contained_node AND e.name = :sheet_row
+        CROSS JOIN LATERAL jsonb_array_elements_text(
+            e.value -> 'columns' -> p.contained_pos -> 'values'
+        ) AS v(value)
+    ),
+    container_values AS (
+        SELECT p.ord, v.value AS val
+        FROM pair p
+        JOIN document_evidence e
+          ON e.document_id = p.container_node AND e.name = :sheet_row
+        CROSS JOIN LATERAL jsonb_array_elements_text(
+            e.value -> 'columns' -> p.container_pos -> 'values'
+        ) AS v(value)
+    )
+    SELECT p.ord,
+           (SELECT count(*) FROM contained_values c WHERE c.ord = p.ord) AS contained_size,
+           (SELECT count(*) FROM container_values c WHERE c.ord = p.ord) AS container_size,
+           (SELECT count(*) FROM contained_values c
+             WHERE c.ord = p.ord
+               AND EXISTS (SELECT 1 FROM container_values x
+                            WHERE x.ord = p.ord AND x.val = c.val)) AS overlap
+    FROM pair p
+    """)
+
+
+# `sheet.measurements@children` and not `@self`: this task is scoped to the FILE node and
+# every measurement it reads is one level down, on the sheet nodes `structure:sheets` wrote.
+# That locus derives no within-node edge (2.3) and is not meant to — what orders this task
+# after the profiles is the dependency array `_enqueue_propose_links` builds, which names the
+# rows rather than the types and is therefore a stronger statement than an edge.
+#
+# No `fanout` and no `child_key`, because it writes no node at all: 8.6 proposes, and 7.3
+# gives a person the decision. `Atom.__post_init__` requires both together or neither.
+@register_task_handler(
+    TASK_PROPOSE_LINKS,
+    consumes=(f"{EV_SHEET_MEASUREMENTS}@children",),
+    produces=(f"{EV_COLUMN_LINKS}@self",),
+    write_mode=PROPOSE_LINKS_WRITE_MODE,
+    cost_class=COST_CPU,
+)
+def run_propose_links(session: Session, task: TaskQueue) -> TaskOutcome:
+    """Propose the columns of this workbook whose value sets nest. 8.6, by 6.4's mechanism.
+
+    **The LSH pass is recall and the SQL pass is the answer.** ``MinHashLSHEnsemble`` over
+    the per-column sketches finds pairs whose containment is plausibly at or above the
+    threshold — a MinHash carries real error and the ensemble's own guarantee is
+    probabilistic — and what survives it is counted exactly against the stored value sets.
+    Where 8.5 kept no values to count, the candidate says so rather than presenting an
+    estimate as a count; see :func:`~jmfts_core.column_links.unverifiable_reason`, which is
+    the one part of 6.4 this pass cannot finish and why.
+
+    **It fails by name on an install that cannot sketch.** ``require_datasketch()`` runs
+    first, before the sheets are read and before anything decides there is nothing to do: an
+    appliance built without the ``sketch`` extra is a supported deployment, and the failure
+    it deserves says which deployment it is. Silently proposing nothing would be
+    indistinguishable from a workbook whose columns genuinely share no values.
+
+    **It proposes and stops.** 8.6 gives the meaning to a reviewer, so every candidate
+    carries Part 7.6's payload and nothing here writes a relationship. The payloads are
+    written to the node rather than queued as review tasks — see
+    :data:`~jmfts_core.ingest_tasks.DEFERRED_REASON` for ``review:link``, which is the one
+    thing 8.6 names that this pass does not do and the reason it does not.
+    """
+    node = session.get(Document, task.scope_document_id)
+    if node is None:
+        raise ValueError(
+            f"{TASK_PROPOSE_LINKS} is scoped to document {task.scope_document_id}, "
+            "which does not exist"
+        )
+    # First, and deliberately ahead of every cheaper check. See the docstring.
+    require_datasketch()
+    options = _links_params(task)
+
+    sheet_nodes = list(
+        session.execute(
+            select(Document)
+            .where(Document.parent_id == node.id, Document.usetype == USETYPE_SHEET)
+            .order_by(Document.position.asc().nullslast(), Document.id.asc())
+        )
+        .scalars()
+        .all()
+    )
+    if not sheet_nodes:
+        raise ValueError(
+            f"{TASK_PROPOSE_LINKS} is scoped to document {node.id}, which has no "
+            f"{USETYPE_SHEET!r} children; this task is enqueued by {TASK_STRUCTURE_SHEETS} "
+            "in the same transaction that creates them, so an empty list means the tree was "
+            "rearranged underneath a queued task"
+        )
+
+    blocks: list[dict] = []
+    unprofiled: list[str] = []
+    columns: list = []
+    for sheet_node in sheet_nodes:
+        block = evidence_value(session, sheet_node.id, EV_SHEET) or {}
+        # `columns` is written by `sheet_evidence_block` for every sheet, empty ones
+        # included, so its ABSENCE means this sheet was never profiled — not that it holds
+        # no columns. The dependency array should make that impossible; searching the rest
+        # anyway would answer a question about part of the workbook while looking like an
+        # answer about the workbook.
+        if "columns" not in block:
+            unprofiled.append(f"{sheet_node.id}:{block.get('name')!r}")
+            continue
+        blocks.append(block)
+        columns.extend(columns_of(sheet_node.id, block))
+    if unprofiled:
+        raise ValueError(
+            f"{TASK_PROPOSE_LINKS} on document {node.id} found sheets with no profile "
+            f"({', '.join(unprofiled)}); it is enqueued with a dependency on every "
+            f"{TASK_PROFILE_SHEET} of this workbook, so either a sheet node was added after "
+            "the dependency array was built or the profiles were rewritten"
+        )
+
+    measured_columns = sum(len(block.get("columns") or ()) for block in blocks)
+    if measured_columns and not columns:
+        raise ValueError(
+            f"{TASK_PROPOSE_LINKS} on document {node.id} found {measured_columns} "
+            "measured columns and not one sketch. INGEST_SPEC.md 8.6's containment search "
+            "compares sketches, so there is nothing here to compare: these sheets were "
+            "profiled with `sketch_columns` false. Re-run profile:sheet with sketching on"
+        )
+
+    recipe = recipe_of(columns) if columns else None
+    eligible = [column for column in columns if column.sketch_size >= options["min_distinct"]]
+    counted = census(blocks, columns, len(eligible))
+
+    # One column cannot be contained in another one, and `find_containments` would build an
+    # ensemble to discover it. Two is the smallest workbook this question means anything for.
+    containments: list[Containment] = []
+    if len(eligible) > 1:
+        containments = find_containments(
+            eligible,
+            threshold=options["threshold"],
+            partitions=options["partitions"],
+        )
+    # SPRINT_0_3_0.md 6.6's rule, applied to this task's own fan-out: a named limit that
+    # fails, not a silent truncation. Eight hundred columns whose values all nest is three
+    # hundred thousand proposals, which is a JSONB block nobody reads and a review queue
+    # nobody works. The message carries the number, so raising the limit is an informed
+    # decision rather than a guess.
+    #
+    # It bites on what the LSH pass PROPOSED rather than on what survives verification, and
+    # deliberately: the verification is one statement over every pair, and the point of a
+    # limit is to stop before the expensive thing rather than after it.
+    if len(containments) > options["max_candidates"]:
+        raise ValueError(
+            f"{TASK_PROPOSE_LINKS} on document {node.id} proposed {len(containments):,} "
+            "candidate pairs, over the `max_candidates` limit of "
+            f"{options['max_candidates']:,}. Nothing was written and nothing was verified: "
+            "truncating would hide which proposals were dropped. Re-run with a higher "
+            "`max_candidates`, or a higher `containment_threshold` / `min_distinct_values` "
+            "to propose fewer (all three are uncalibrated — INGEST_SPEC.md 8.8)"
+        )
+
+    # Pass 2: measure every proposal, exactly where the values are stored. Pass 3: collapse
+    # the pairs that survive in both directions. Both AFTER the counting, because the
+    # ensemble returns both directions for pairs that nest only one way.
+    verifications = _verify_in_sql(session, containments)
+    confirmed = [
+        containment
+        for containment in containments
+        if passes_threshold(
+            containment, verifications[_pair_key(containment)], options["threshold"]
+        )
+    ]
+    candidates = sort_candidates(
+        [
+            candidate_record(containment, verifications[_pair_key(containment)])
+            for containment in collapse_mutual(confirmed)
+        ]
+    )
+
+    record = {
+        "spec": "INGEST_SPEC.md 8.6; SPRINT_0_3_0.md 6.4",
+        "method": METHOD_LSH_ENSEMBLE,
+        "sheets": len(blocks),
+        **counted,
+        # The knobs it ran under, and the recipe the sketches were built under. The first is
+        # what a threshold sweep varies; the second is what says whether two workbooks'
+        # sketches may be compared at all (jmfts_core/sketch.py).
+        "parameters": {
+            "containment_threshold": options["threshold"],
+            "lsh_partitions": options["partitions"],
+            "min_distinct_values": options["min_distinct"],
+            "max_candidates": options["max_candidates"],
+        },
+        "sketch_recipe": recipe,
+        # How many the ensemble put forward and how many the measurement kept. A reader who
+        # sees two candidates from four hundred proposals is looking at a threshold that is
+        # doing its job; one who sees two from two is looking at a recall pass that found
+        # nothing to reject, which is a different fact about the workbook.
+        "proposed_pairs": len(containments),
+        "confirmed_pairs": len(confirmed),
+        "thresholds": THRESHOLD_UNCALIBRATED,
+        "resolution": SKETCH_RESOLUTION,
+        "rebuild_estimate": REBUILD_ESTIMATE_ASSUMES,
+        "review": {"task": TASK_REVIEW_LINK, "deferred": DEFERRED_REASON[TASK_REVIEW_LINK]},
+        "candidates": candidates,
+    }
+    EvidenceRepository(session).write(node.id, LINKS_KEY, record)
+    session.flush()
+
+    verified = sum(
+        1 for candidate in candidates if candidate["verification"]["method"] == VERIFIED_SQL_EXACT
+    )
+    return TaskOutcome(
+        # No rung, for the reason `profile:sheet` claims none: a rung is a statement about
+        # the evidence a BOUNDARY was drawn from, and this task draws none.
+        rung=None,
+        detail={
+            **counted,
+            "sheets": len(blocks),
+            "proposed_pairs": len(containments),
+            "confirmed_pairs": len(confirmed),
+            "candidates": len(candidates),
+            "verified_in_sql": verified,
+            "unverified": len(candidates) - verified,
+            "mutual": sum(1 for candidate in candidates if candidate["mutual"]),
+            "with_unique_container": sum(1 for c in candidates if c["implications"]),
+            "parameters": record["parameters"],
+            "thresholds": THRESHOLD_UNCALIBRATED,
+            "deferred": {TASK_REVIEW_LINK: DEFERRED_REASON[TASK_REVIEW_LINK]},
+        },
+        produced={"node_count": 0, "child_ids": []},
+    )
+
+
+def _links_params(task: TaskQueue) -> dict:
+    """The four knobs, validated. Out of range is a ValueError, which classifies PERMANENT.
+
+    Validated rather than clamped: a threshold of 1.4 is a mistake somebody made, and a task
+    that quietly searched at 1.0 would report candidates against a number nobody chose.
+
+    ``.get`` over the defaults, where :func:`run_profile_sheet` and :func:`run_extract_sheet`
+    both index their params and say why. The difference is real rather than a slip: their
+    groups are completed by ``ingest_options`` on every row ``plan_frontier`` writes, so a
+    default in those two would be a SECOND source of a value that already has one. This task
+    has no row and no group (:data:`PROPOSE_LINKS_PARAMS`), so these are the only source
+    there is.
+    """
+    params = dict(PROPOSE_LINKS_PARAMS)
+    params.update(task.params or {})
+    threshold = float(params["containment_threshold"])
+    if not 0.0 < threshold <= 1.0:
+        raise ValueError(
+            f"`containment_threshold` is {threshold}; a containment is a fraction of the "
+            "contained column's values and has to be in (0, 1]"
+        )
+    partitions = int(params["lsh_partitions"])
+    minimum = int(params["min_distinct_values"])
+    maximum = int(params["max_candidates"])
+    for name, value in (
+        ("lsh_partitions", partitions),
+        ("min_distinct_values", minimum),
+        ("max_candidates", maximum),
+    ):
+        if value < 1:
+            raise ValueError(f"`{name}` is {value}; it counts things and has to be at least 1")
+    return {
+        "threshold": threshold,
+        "partitions": partitions,
+        "min_distinct": minimum,
+        "max_candidates": maximum,
+    }
+
+
+def _pair_key(containment: Containment) -> tuple:
+    return (containment.contained.key, containment.container.key)
+
+
+def _verify_in_sql(session: Session, containments: Sequence[Containment]) -> dict:
+    """Count the two value sets for every survivor that has two value sets to count.
+
+    The pairs 8.5 kept no values for are not dropped and are not estimated into the same
+    field — they come back as :data:`~jmfts_core.column_links.VERIFIED_NONE` carrying the
+    reason, which is what stops a reader taking a MinHash estimate for a count.
+    """
+    verifications: dict = {}
+    countable: list[Containment] = []
+    for containment in containments:
+        reason = unverifiable_reason(containment)
+        if reason is None:
+            countable.append(containment)
+        else:
+            verifications[_pair_key(containment)] = Verification(
+                method=VERIFIED_NONE, reason=reason
+            )
+    if not countable:
+        return verifications
+
+    rows = session.execute(
+        _VERIFY_SQL,
+        {
+            "ords": list(range(len(countable))),
+            "contained_nodes": [pair.contained.node_id for pair in countable],
+            "contained_positions": [pair.contained.position for pair in countable],
+            "container_nodes": [pair.container.node_id for pair in countable],
+            "container_positions": [pair.container.position for pair in countable],
+            "sheet_row": EV_SHEET,
+        },
+    ).all()
+    measured = {int(row[0]): (int(row[1]), int(row[2]), int(row[3])) for row in rows}
+    for ordinal, containment in enumerate(countable):
+        if ordinal not in measured:
+            raise ValueError(
+                "the exact verification returned no row for candidate "
+                f"{_pair_key(containment)}; one row per pair is what the query's `pair` CTE "
+                "produces, so a missing one means the statement was rewritten"
+            )
+        contained_size, container_size, overlap = measured[ordinal]
+        verifications[_pair_key(containment)] = Verification(
+            method=VERIFIED_SQL_EXACT,
+            contained_size=contained_size,
+            container_size=container_size,
+            overlap=overlap,
+        )
+    return verifications

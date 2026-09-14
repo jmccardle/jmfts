@@ -155,6 +155,29 @@ TASK_STRUCTURE_CONVERSATION = "structure:conversation"
 TASK_PROFILE_SHEET = "profile:sheet"
 TASK_EXTRACT_SHEET = "extract:sheet"
 
+#: ``INGEST_SPEC.md`` 8.6's workbook-level task — "the first workbook-level task after the
+#: per-sheet fan-out, which is why it needs all sheets profiled first". Scoped to the FILE
+#: node, one per workbook, and enqueued by ``structure:sheets`` with a dependency on every
+#: ``profile:sheet`` it queued: those ids are known at that moment and nowhere else, because
+#: the sheet nodes they are scoped to were created by the same loop.
+#:
+#: **STILL NOT A ROW OF** :data:`TASK_ROWS`, **and Phase 3 is what makes that a decision
+#: rather than a limitation.** The two per-sheet tasks above became rows the day a row could
+#: name a scope, and this one could name one too — :data:`ROOT_SCOPE`, the file node. What it
+#: cannot express is its dependency. A row's ordering is ``after``, resolved against the
+#: other rows of the SAME batch, so the strongest thing this row could say is ``after
+#: structure:sheets`` — and ``structure:sheets`` completes at the instant it has ENQUEUED the
+#: profiles, not when they have run. The task would be claimable over a workbook with no
+#: profile on any sheet, and 8.6's whole precondition is that they are all in. The real
+#: dependency is a set of task ids, which exists only inside the loop that created them, so
+#: :func:`jmfts_core.sheet_tasks._enqueue_propose_links` is what enqueues it.
+TASK_PROPOSE_LINKS = "propose:links"
+
+#: The review task 8.6 says ``propose:links`` emits per candidate pair, and Part 7 defines.
+#: Named here with every other task name; it has no handler and, unlike the deferred tasks
+#: above, it is not enqueued at all. See :data:`DEFERRED_REASON` for why.
+TASK_REVIEW_LINK = "review:link"
+
 #: ``OFFICE_SPEC.md`` Part 5, not ``INGEST_SPEC.md`` Part 4 — the first task in this table
 #: that belongs to the office/citation plan rather than to the original file pipeline. It
 #: puts a page and a rectangle on every chunk under a file node
@@ -742,6 +765,36 @@ DEFERRED_REASON: dict[str, str] = {
         "has no handler registered"
     ),
     TASK_EXTRACT_IMAGES: "image handling is INGEST_SPEC.md phasing step 7; no handler registered",
+    # THIS ONE IS NOT LIKE THE OTHERS, and the difference is worth reading before treating
+    # it as another missing handler. A review task is not claimed by a worker at all
+    # (Part 7.3) and must not hold a node in flight (Part 7.4), and the queue as it stands
+    # gives neither: `claim_next` lets an un-badged worker take any row with a NULL badge, so
+    # a queued `review:link` would be claimed within seconds and failed PERMANENT by
+    # `UnknownTaskError`; and `settle_node` calls `structuring_complete`, which counts every
+    # unfinished task, so one that a person answers next month would park the workbook until
+    # they did.
+    #
+    # RE-CHECKED 2026-09-14 against a queue three sprints older than the argument, because
+    # an excuse that has quietly expired is worse than the thing it excuses. Both halves
+    # still hold, and the two things that came close are not it. `ADVISORY_TASK_TYPES`
+    # (`models/task_queue.py`) exempts a type from the `settled` write, but only on a
+    # FAILURE — a pending row still blocks — and its own stated rule is about what a settled
+    # node MEANS, which is a different question from a task nobody has answered yet.
+    # `requeue_expired_claims` takes a lease duration, but it is the heartbeat clock for a
+    # LIVE worker; `recover_claims`' docstring names 7.3's review lease as the general case
+    # it deliberately does not implement, "held for weeks", with no duration to give.
+    #
+    # So `propose:links` writes each candidate's Part 7.6 payload onto the workbook node and
+    # enqueues nothing. The proposals exist, in the shape the review surface will read them
+    # in; what is missing is the claim lease and the `GET /tasks` surface 7.3 asks for, and
+    # half-building it as a queue row a worker eats is worse than not building it.
+    TASK_REVIEW_LINK: (
+        "a review task is claimed by a person or an agent and never by a worker "
+        "(INGEST_SPEC.md 7.3), and it must not block settling (7.4); the queue has neither "
+        "the claim lease nor the exclusion today, so `propose:links` writes each "
+        "candidate's 7.6 payload onto the workbook node instead of queueing a row that a "
+        "worker would claim and fail"
+    ),
 }
 # There is no `TASK_EXTRACT_SHEET` entry, and its absence is the record of a decision.
 # It carried one — "8.4 has four representations and 8.8 leaves every threshold that

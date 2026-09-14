@@ -103,14 +103,18 @@ CREATE INDEX IF NOT EXISTS idx_document_evidence_stale ON document_evidence (nam
     WHERE state = 'stale';
 
 -- ---------------------------------------------------------------------------
--- The move. Thirty keys out of the column, into rows, and then off the column.
+-- The move. Thirty-two keys out of the column, into rows, and then off the column.
 --
--- TWO OF THE THIRTY-ONE MOVE NOTHING AND ARE LISTED ANYWAY. `cell` was registered on
--- 2026-09-08 and `table` on 2026-09-14, both long after this migration, so no database has
--- a node carrying either in `structured_content` and their copies find zero rows. `table`
+-- THREE OF THE THIRTY-TWO MOVE NOTHING AND ARE LISTED ANYWAY. `cell` was registered on
+-- 2026-09-08, `table` on 2026-09-14 and `column_links` the same day, all long after this
+-- migration, so no database has a node carrying any of them in `structured_content` and
+-- their copies find zero rows. `table`
 -- was caught by the full suite at 0.6.0's M1 gate and not by the lane that registered it,
--- which is the reading this paragraph was already written to predict. The list is generated
--- from the
+-- which is the reading this paragraph was already written to predict. `column_links` is
+-- the paragraph working as intended one lane later: 8.6's proposals were written to
+-- `structured_content` on the branch they were recovered from, so the name has a real
+-- pre-2b history and nonetheless zero rows to move — no release ever shipped that branch.
+-- The list is generated from the
 -- REGISTRY rather than from what any particular database holds — `test_evidence_rows.py`
 -- enforces that in both directions — because a name absent here is a key this migration
 -- would leave behind on whatever database is migrated next, and "it did not exist when I
@@ -135,6 +139,7 @@ INSERT INTO _evidence_keys (column_key, name) VALUES
     ('cell', 'cell'),
     ('cells', 'cells'),
     ('chunk_index', 'chunk_index'),
+    ('column_links', 'column_links'),
     ('conversation_id', 'conversation_id'),
     ('effective_content', 'effective_content'),
     ('extraction', 'extraction'),

@@ -181,7 +181,7 @@ class TestRegistryAndDeclarations:
         # second path would be the one that skips the declaration.
         assert set(TASK_HANDLERS) == set(ATOMS)
 
-    def test_twenty_one_atoms_ship(self):
+    def test_twenty_two_atoms_ship(self):
         # SPRINT_JOBS.md Part 2 counted twelve, and an earlier draft said "about fifteen".
         # The number is pinned so that adding a handler is a decision about the design
         # rather than a line that slips in — which is what it was: the thirteenth is
@@ -214,7 +214,27 @@ class TestRegistryAndDeclarations:
         #   before this sprint in everything but name: `IngestRollupPlanner` enqueued it at
         #   settle time and `commit 232cf4f` gave the summary its own node. Registering it
         #   is what makes `EXPLAIN` able to see it.
-        assert len(ATOMS) == 21
+        #
+        # THE TWENTY-SECOND ARRIVED 2026-09-14 and is `propose:links` (INGEST_SPEC.md 8.6,
+        # SPRINT_0_3_0.md 6.4) — the columns of two sheets whose value sets nest, found by
+        # a MinHash containment search and counted exactly in SQL. It is unlike all
+        # twenty-one in two ways and both are the decision this entry records.
+        #
+        # * It is the first atom that is NOT a row of `TASK_ROWS` and is nonetheless part of
+        #   an upload's own fan-out. The three enqueued by a request and the three rollups
+        #   are outside the table because nothing probe measures decides them; this one IS
+        #   decided by what probe measured (`has_sheets`) and still cannot be a row, because
+        #   its precondition is that every `profile:sheet` of the workbook has COMPLETED and
+        #   a row's `after` can only say that `structure:sheets` has — which is the instant
+        #   those profiles were enqueued. `jmfts_core.ingest_tasks.TASK_PROPOSE_LINKS` is
+        #   where that argument lives, beside the constant.
+        # * It is the first atom that writes nothing at all — no node, and not even a task.
+        #   8.6 proposes and 7.3 gives the decision to a person, so it writes `column_links`
+        #   onto the workbook node and stops. The review task 8.6 names is in
+        #   `DEFERRED_REASON` rather than in the queue, and that entry carries the
+        #   re-verification: the claim lease 7.3 needs and the settling exclusion 7.4 needs
+        #   are both still absent, three sprints after the argument was first written down.
+        assert len(ATOMS) == 22
 
     def test_every_evidence_name_is_written_by_something(self):
         # An atom waiting on evidence nothing produces would never be schedulable, and the
