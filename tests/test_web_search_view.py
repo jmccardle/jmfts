@@ -359,13 +359,12 @@ def _fixture(*, params: dict, answers: dict, capabilities=None) -> str:
 
 
 HARNESS = textwrap.dedent("""
-    import { install, serialize, Element, document as dom } from "./dom.mjs";
+    import { install, serialize, document as dom } from "./dom.mjs";
     install();
-    // The stub models a `document` with no `head`, and the view links its own stylesheet onto
-    // one at mount. Given here rather than in the stub because the stub is shared with
-    // `tests/test_web_views.py` and this is the only harness that mounts a view which links a
-    // sheet; when a second one appears, `head` belongs in DOM_STUB instead.
-    dom.head = new Element("head");
+    // The stylesheet this view links at mount lands on `dom.head`, which the SHARED stub now
+    // models — the second view that linked a sheet arrived (the call log, step 30) and this
+    // harness's line 4 said that was when `head` belonged in DOM_STUB. It does; the local
+    // `dom.head = new Element("head")` that used to stand here is gone.
     // Imported for its side effect: the module registers itself, exactly as `manifest.js` does.
     await import("%(static)s/views/search.js");
     const { viewById } = await import("%(static)s/shell/registry.js");

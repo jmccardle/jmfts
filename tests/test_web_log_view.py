@@ -20,18 +20,20 @@ are about what a reader can see:
 These need no database and no browser. Where ``node`` is on PATH they execute the bundle's ES
 modules against a stubbed DOM and a stubbed ``fetch``, which is the arrangement
 ``tests/test_ts_client_codegen.py`` established and ``tests/test_web_views.py`` followed; this
-is the third file in it. The DOM stub is this file's own rather than imported from
-``test_web_views``: that one models what the capability table touches, this one has to model
-``insertBefore``, ``hidden``, ``document.head`` and — the one that carries a property — whether
-a node is still attached, which is how the live subscription knows to let go.
+is the third file in it.
+
+**The stub is ``test_web_views.DOM_STUB`` and this file imports it**, as every browser test
+does. It briefly was not: this lane shipped a copy carrying the four things the call log needs
+that nothing had needed before — ``insertBefore``, ``hidden``, ``document.head``, and whether a
+node is still attached — and that left the repository with two stubs disagreeing about what a
+document has, which is how a view passes its own suite and fails the shell's. All four moved
+into the one stub, each with a line saying which view needs it.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import shutil
-import subprocess
 import textwrap
 from pathlib import Path
 
@@ -40,14 +42,17 @@ from pydantic import BaseModel
 
 from jmfts_core.registry import REGISTRY
 from jmfts_core.rest.main import app  # noqa: F401  — importing it is what fills REGISTRY
+from tests.test_web_views import (  # the one harness this repository has for browser code
+    NODE,
+    _find,
+    _node,
+    needs_node,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 STATIC = REPO / "jmfts-web" / "jmfts_web" / "static"
 VIEW = STATIC / "views" / "log.js"
 MANIFEST = STATIC / "shell" / "manifest.js"
-
-NODE = shutil.which("node")
-needs_node = pytest.mark.skipif(NODE is None, reason="no JavaScript runtime on PATH")
 
 #: The credential the tab holds while every call below is made. It reaches the appliance in an
 #: ``Authorization`` header — the harness asserts that it really did — and must appear nowhere
@@ -59,135 +64,6 @@ TOKEN = "SECRET-TOKEN"
 MINTED = "MINTED-CREDENTIAL"
 
 
-# --------------------------------------------------------------------------- the node harness
-
-
-#: Enough DOM to run this view and the shell that mounts it, and nothing beyond it.
-#:
-#: Two things here are more than bookkeeping. ``textContent = ""`` DETACHES the children it
-#: drops, because that is what the shell does to the outgoing view and ``isConnected`` is what
-#: the log's live subscription reads to decide it has been replaced. And ``hidden`` is a real
-#: property rather than a class, because that is how the empty-state paragraph goes away.
-DOM_STUB = textwrap.dedent("""
-    export class Element {
-      constructor(tag) {
-        this.tagName = String(tag).toUpperCase();
-        this.childNodes = [];
-        this.attributes = {};
-        this.className = "";
-        this.dataset = {};
-        this.hidden = false;
-        this._parent = null;
-        this._attached = false;
-        this._text = "";
-      }
-      _adopt(node) {
-        if (!(node instanceof Element)) throw new TypeError("only elements go in the tree");
-        node._parent = this;
-        return node;
-      }
-      append(...nodes) {
-        for (const node of nodes) this.childNodes.push(this._adopt(node));
-      }
-      insertBefore(node, reference) {
-        const at = this.childNodes.indexOf(reference);
-        if (at === -1) throw new Error("insertBefore: the reference node is not a child");
-        this.childNodes.splice(at, 0, this._adopt(node));
-        return node;
-      }
-      get firstChild() { return this.childNodes[0] ?? null; }
-      // A tree the shell has thrown away answers false, which is the whole point of modelling
-      // this: the view's subscription unsubscribes itself the first time it sees one.
-      get isConnected() {
-        if (this._attached) return true;
-        return this._parent ? this._parent.isConnected : false;
-      }
-      setAttribute(name, value) { this.attributes[name] = String(value); }
-      getAttribute(name) { return name in this.attributes ? this.attributes[name] : null; }
-      get classList() {
-        return {
-          add: (name) => { this.className = this.className ? `${this.className} ${name}` : name; },
-        };
-      }
-      set textContent(value) {
-        for (const child of this.childNodes) child._parent = null;
-        this.childNodes = [];
-        this._text = value === null || value === undefined ? "" : String(value);
-      }
-      get textContent() {
-        return this._text + this.childNodes.map((n) => n.textContent).join("");
-      }
-      // The shell's own log panel writes markup in one go. Kept OUT of textContent so an
-      // assertion about rendered text cannot accidentally match a tag.
-      set innerHTML(value) {
-        for (const child of this.childNodes) child._parent = null;
-        this.childNodes = [];
-        this._html = String(value);
-      }
-      get innerHTML() { return this._html ?? ""; }
-      addEventListener() {}
-      querySelector() { return null; }
-      closest() { return null; }
-    }
-
-    export const document = {
-      head: new Element("head"),
-      createElement: (tag) => new Element(tag),
-      getElementById: () => null,
-    };
-
-    /** The first element with this exact class, anywhere under `root`. */
-    export function find(root, className) {
-      if (root.className === className) return root;
-      for (const child of root.childNodes) {
-        const hit = find(child, className);
-        if (hit) return hit;
-      }
-      return null;
-    }
-
-    /** The rendered tree as plain data, so the assertions can live in Python. */
-    export function serialize(element) {
-      return {
-        tag: element.tagName.toLowerCase(),
-        class: element.className || null,
-        hidden: element.hidden === true,
-        text: element.textContent,
-        html: element.innerHTML || null,
-        children: element.childNodes.map(serialize),
-      };
-    }
-
-    export function install() {
-      globalThis.Element = Element;
-      globalThis.document = document;
-      globalThis.sessionStorage = {
-        _held: new Map(),
-        getItem(key) { return this._held.has(key) ? this._held.get(key) : null; },
-        setItem(key, value) { this._held.set(key, String(value)); },
-        removeItem(key) { this._held.delete(key); },
-      };
-      globalThis.window = {
-        location: { hash: "", origin: "http://appliance:8100" },
-        sessionStorage: globalThis.sessionStorage,
-        addEventListener() {},
-      };
-    }
-    """)
-
-
-def _node(tmp_path: Path, harness: str) -> object:
-    """Run one harness module and parse the single JSON document it prints."""
-    (tmp_path / "dom.mjs").write_text(DOM_STUB, encoding="utf-8")
-    script = tmp_path / "harness.mjs"
-    script.write_text(harness % {"static": STATIC.as_uri()}, encoding="utf-8")
-    done = subprocess.run(
-        [NODE, str(script)], capture_output=True, text=True, cwd=tmp_path, timeout=60
-    )
-    assert done.returncode == 0, done.stderr or done.stdout
-    return json.loads(done.stdout)
-
-
 #: Six calls, chosen to cover every kind of thing a row has to draw: a plain JSON operation, a
 #: response that is genuinely large, the one response that is a credential, a binary operation,
 #: an appliance that said no, and a request that never went out at all.
@@ -197,8 +73,20 @@ def _node(tmp_path: Path, harness: str) -> object:
 #: is how the harness gets a handle on it: a view receives the client in its context, which is
 #: the interface IC-7 gives it, so this is the client every real view calls.
 MAIN_HARNESS = textwrap.dedent("""
-    import { install, serialize, find, Element } from "./dom.mjs";
+    import { install, serialize, Element } from "./dom.mjs";
     install();
+
+    /** The first element with this exact class. Here rather than in the shared stub: only this
+     *  harness needs a handle on a live node, to watch what happens to it after the shell has
+     *  thrown it away. */
+    const find = (node, className) => {
+      if (node.className === className) return node;
+      for (const child of node.childNodes) {
+        const hit = find(child, className);
+        if (hit) return hit;
+      }
+      return null;
+    };
 
     const { registerView } = await import("%(static)s/shell/registry.js");
     let captured = null;
@@ -294,7 +182,7 @@ MAIN_HARNESS = textwrap.dedent("""
 
 
 EMPTY_HARNESS = textwrap.dedent("""
-    import { install, serialize, Element } from "./dom.mjs";
+    import { install, serialize, Element, document as dom } from "./dom.mjs";
     install();
     const shell = await import("%(static)s/shell/shell.js");
     globalThis.fetch = async () => { throw new Error("nothing should be called"); };
@@ -303,7 +191,12 @@ EMPTY_HARNESS = textwrap.dedent("""
     root._attached = true;
     window.location.hash = "#/calls";
     await shell.start(root);
-    console.log(JSON.stringify(serialize(root)));
+    console.log(JSON.stringify({
+      tree: serialize(root),
+      // `serialize` reports attributes, and these are properties the view set. The stylesheet
+      // is what `document.head` is in the shared stub for.
+      stylesheets: dom.head.childNodes.map((node) => ({ rel: node.rel, href: node.href })),
+    }));
     """)
 
 
@@ -316,13 +209,6 @@ def rendered(tmp_path_factory):
 
 
 # ------------------------------------------------------------------------------- the walkers
-
-
-def _find(node: dict, class_name: str) -> list[dict]:
-    found = [node] if node["class"] == class_name else []
-    for child in node["children"]:
-        found.extend(_find(child, class_name))
-    return found
 
 
 def _calls(tree: dict) -> list[dict]:
@@ -366,9 +252,11 @@ def test_the_log_is_a_view_the_manifest_reaches(rendered):
     assert VIEW.is_file()
     manifest = MANIFEST.read_text(encoding="utf-8")
     assert 'import "../views/log.js";' in manifest
-    assert manifest.rstrip().endswith(
-        'import "../views/log.js";'
-    ), "the manifest is append-only AND appended at the END; see its header for why"
+    # Present, not last. This lane appended at the end, and so did the four other F3 lanes;
+    # what order `merge=union` leaves them in afterwards is the merge's business, and a test
+    # that pinned "mine is last" would fail on whoever merged after us rather than on a defect.
+    # That the file holds nothing BUT import lines is `test_web_views`' assertion, not a second
+    # copy of it here.
     assert "calls" in rendered["registered"]
 
 
@@ -622,9 +510,16 @@ def test_the_empty_log_says_why_it_can_be_empty(tmp_path):
     reader who opens this page first sees a page with genuinely nothing on it. The one thing it
     must not do is look broken.
     """
-    tree = _node(tmp_path, EMPTY_HARNESS)
+    result = _node(tmp_path, EMPTY_HARNESS)
+    tree = result["tree"]
     assert _calls(tree) == []
     assert _find(tree, "dim log-tally")[0]["text"] == "No calls yet."
     empty = _find(tree, "dim log-empty")[0]
     assert empty["hidden"] is False
     assert "This page makes no call of its own" in empty["text"]
+
+    # And the view linked its own stylesheet, at mount, onto the head the shared stub models.
+    # `index.html` is the file five F3 worktrees would otherwise all have edited; the guarded
+    # flag and the mount-time call are the form the other view lanes ship, and it stays.
+    assert [sheet["rel"] for sheet in result["stylesheets"]] == ["stylesheet"]
+    assert result["stylesheets"][0]["href"].endswith("/views/log.css")

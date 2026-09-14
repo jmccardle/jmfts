@@ -69,9 +69,28 @@ IC7_VIEW_FIELDS = ("id", "title", "path", "component", "tags")
 #: Enough DOM to run the bundle's rendering, and nothing beyond it.
 #:
 #: A real DOM would be a dependency, and the bundle has none by design. What the modules under
-#: test actually touch is four methods and three properties; anything else throws here rather
+#: test actually touch is a handful of methods and properties; anything else throws here rather
 #: than quietly returning undefined, so a renderer that starts using an API this stub does not
 #: model fails loudly instead of being tested against a shrug.
+#:
+#: **THERE IS ONE OF THESE AND EVERY BROWSER TEST IMPORTS IT.** ``test_web_search_view`` and
+#: ``test_web_log_view`` run their harnesses through :func:`_node` above this line, and a second
+#: copy of the stub would be a second answer to "what does a document have" — which is how a
+#: view passes its own suite and fails the shell's. Anything a view genuinely touches is added
+#: HERE, with a line saying which view needs it:
+#:
+#: * ``document.head`` — three views (``search``, ``log``, ``upload``) link their own stylesheet
+#:   at mount rather than from ``index.html``, which is the file five F3 worktrees would
+#:   otherwise all have edited. Each guards the link behind a module flag and calls it from its
+#:   component, and that form stays even though the stub now models a head: three views agreeing
+#:   is worth more than three saved lines.
+#: * ``insertBefore``/``firstChild`` — the call log prepends a row per event rather than
+#:   re-rendering, so a page open for an hour is not quadratic in what it has seen.
+#: * ``isConnected``, and the parent bookkeeping under it — the shell mounts but does not
+#:   dispose, so the call log's subscription reads it to know the shell has replaced the tree it
+#:   was drawing into. ``textContent``/``innerHTML`` therefore DETACH what they drop, because
+#:   that is what the shell does to an outgoing view.
+#: * ``hidden`` — an empty-state paragraph that goes away when the first row arrives.
 DOM_STUB = textwrap.dedent("""
     export class Element {
       constructor(tag) {
@@ -80,13 +99,31 @@ DOM_STUB = textwrap.dedent("""
         this.attributes = {};
         this.className = "";
         this.dataset = {};
+        this.hidden = false;
+        this._parent = null;
+        this._attached = false;
         this._text = "";
       }
+      _adopt(node) {
+        if (!(node instanceof Element)) throw new TypeError("append() takes elements");
+        node._parent = this;
+        return node;
+      }
       append(...nodes) {
-        for (const node of nodes) {
-          if (!(node instanceof Element)) throw new TypeError("append() takes elements");
-          this.childNodes.push(node);
-        }
+        for (const node of nodes) this.childNodes.push(this._adopt(node));
+      }
+      insertBefore(node, reference) {
+        const at = this.childNodes.indexOf(reference);
+        if (at === -1) throw new Error("insertBefore: the reference node is not a child");
+        this.childNodes.splice(at, 0, this._adopt(node));
+        return node;
+      }
+      get firstChild() { return this.childNodes[0] ?? null; }
+      // A tree the shell has thrown away answers false. A root a harness means to be mounted
+      // sets `_attached` on itself; everything else inherits the answer from its parent.
+      get isConnected() {
+        if (this._attached) return true;
+        return this._parent ? this._parent.isConnected : false;
       }
       setAttribute(name, value) { this.attributes[name] = String(value); }
       getAttribute(name) { return name in this.attributes ? this.attributes[name] : null; }
@@ -96,6 +133,7 @@ DOM_STUB = textwrap.dedent("""
         };
       }
       set textContent(value) {
+        for (const child of this.childNodes) child._parent = null;
         this.childNodes = [];
         this._text = value === null || value === undefined ? "" : String(value);
       }
@@ -104,7 +142,11 @@ DOM_STUB = textwrap.dedent("""
       }
       // The call-log panel writes markup in one go. Kept OUT of textContent so an assertion
       // about rendered text cannot accidentally match a tag; `serialize` reports it separately.
-      set innerHTML(value) { this.childNodes = []; this._html = String(value); }
+      set innerHTML(value) {
+        for (const child of this.childNodes) child._parent = null;
+        this.childNodes = [];
+        this._html = String(value);
+      }
       get innerHTML() { return this._html ?? ""; }
       addEventListener() {}
       querySelector() { return null; }
@@ -112,6 +154,8 @@ DOM_STUB = textwrap.dedent("""
     }
 
     export const document = {
+      // Three views link their own stylesheet through this at mount; see DOM_STUB's note.
+      head: new Element("head"),
       createElement: (tag) => new Element(tag),
       getElementById: () => null,
     };
@@ -122,6 +166,7 @@ DOM_STUB = textwrap.dedent("""
         tag: element.tagName.toLowerCase(),
         class: element.className || null,
         title: element.getAttribute("title"),
+        hidden: element.hidden === true,
         text: element.textContent,
         html: element.innerHTML || null,
         children: element.childNodes.map(serialize),
