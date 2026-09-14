@@ -423,17 +423,32 @@ def test_copy_out_cannot_print_a_credential():
         assert forbidden not in source, f"copyout.js reaches for {forbidden}"
 
 
-def test_the_page_keeps_the_token_in_session_storage_and_out_of_the_url():
-    """Step 19's rule, which step 23 had to preserve while replacing the fetch wrapper."""
-    # ``localStorage`` is NAMED in both files, in the comments that say why it is not used.
-    # What must not exist is a call against it: a credential that outlives the tab.
+def test_the_token_is_kept_in_session_storage_and_out_of_the_url():
+    """Step 19's rule, which step 23 and step 24 each had to preserve while moving the code.
+
+    **Asked of the whole bundle rather than of ``index.html``.** It was one file when this test
+    was written; step 24 made that document a mount point and moved the token entry into
+    ``shell/shell.js``, which is exactly the kind of move a test naming one file stops noticing.
+    What the rule is about is the BUNDLE — no credential outlives the tab, anywhere in it — so
+    that is what is scanned, and a view that reached for ``localStorage`` in step 26 would fail
+    here too.
+    """
+    # ``localStorage`` is NAMED in several of these files, in the comments that say why it is
+    # not used. What must not exist is a call against it: a credential that outlives the tab.
     used = re.compile(r"(?<![.\w])(?:window\.)?localStorage\s*\.")
-    page = (STATIC / "index.html").read_text(encoding="utf-8")
-    assert "sessionStorage" in page
-    assert not used.search(page), "the page writes to localStorage"
+    bundle = {
+        path.relative_to(STATIC).as_posix(): path.read_text(encoding="utf-8")
+        for path in sorted(STATIC.rglob("*"))
+        if path.is_file() and path.suffix in (".html", ".js", ".css")
+    }
+    offenders = [name for name, text in bundle.items() if used.search(text)]
+    assert not offenders, f"these write to localStorage: {offenders}"
+
+    holders = [name for name, text in bundle.items() if "sessionStorage" in text]
+    assert holders, "nothing in the bundle keeps the token anywhere; where did it go?"
+
     transport = (TARGET_DIR / "transport.js").read_text(encoding="utf-8")
     assert 'JMFTSToken: "jmfts.token"' in transport
-    assert not used.search(transport), "the transport writes to localStorage"
 
 
 # ------------------------------------------------------------------- run it, if we can

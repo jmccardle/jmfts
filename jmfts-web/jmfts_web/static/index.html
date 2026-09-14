@@ -4,206 +4,35 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>JMFTS</title>
+<link rel="stylesheet" href="./shell/shell.css">
 <!--
-  docs/SPRINT_0_6_0.md Block F, steps 19 and 23. This is the capability landing, and it is
-  the whole front end until step 24 adds the shell and the view registry.
+  docs/SPRINT_0_6_0.md Block F step 24. This document is the SHELL, and it is deliberately
+  almost empty.
 
-  Step 19 built it around a hand-written fetch wrapper and said step 23 would replace that
-  with a generated client emitting the same event shape. It has: everything below calls
-  ./client/, which is generated from /openapi.json by scripts/generate_ts_client.py, and the
-  call log is the client's own event stream rather than something this page keeps.
+  Until this step it was the whole front end: the capability table, the token form, the call
+  log and every line of script that drew them. Step 24 moved all of it — the table became
+  `views/capabilities.js`, a registered view like any other, and the frame around it became
+  `shell/shell.js`. What is left here is a mount point and one import, and that is the point:
+  Phase F3 forks five worktrees that each add a view (steps 26 to 30), and none of them has a
+  reason to edit this file. A view is a file in `views/` plus one appended line in
+  `shell/manifest.js`. See `shell/registry.js` for IC-7 and `shell/manifest.js` for why that
+  one shared line still merges cleanly from two branches at once.
 
-  That is what makes "the front end thinly wraps the API" checkable. Every row below came
-  from a call the log shows; a row the log has no call for would be something this page
-  computed in the browser, and you could see that from here.
+  Everything reachable from here calls `./client/`, which is generated from `/openapi.json` by
+  `scripts/generate_ts_client.py`, and the call log is the client's own event stream rather
+  than something a page keeps. That is what makes "the front end thinly wraps the API"
+  checkable: a row the log has no call for would be something computed in the browser, and you
+  could see that from the log.
 
-  No build step, no framework, no CDN. ./client/ is ES modules the browser runs as they are.
+  No build step, no framework, no CDN. `./shell/`, `./views/`, `./render/` and `./client/` are
+  ES modules the browser runs as they stand, and nothing here loads from another origin —
+  `tests/test_ts_client_codegen.py::test_nothing_in_the_bundle_loads_from_the_network` holds
+  the whole bundle to that, because an appliance is expected to run air-gapped and a page that
+  renders blank without internet is worse than no page.
 -->
-<style>
-  :root { color-scheme: light dark; --fg: #16181d; --bg: #fbfbfa; --dim: #6a6f7a;
-          --line: #dcdde1; --accent: #1f5fa8; --bad: #a8321f; --soft: #f2f2f0; }
-  @media (prefers-color-scheme: dark) {
-    :root { --fg: #e6e7ea; --bg: #16181d; --dim: #9aa0ad; --line: #2e3239;
-            --accent: #79aef0; --bad: #f0897a; --soft: #1d2026; }
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; padding: 0 16px 64px; background: var(--bg); color: var(--fg);
-         font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-  main { max-width: 62rem; margin: 0 auto; }
-  h1 { font-size: 1.4rem; margin: 32px 0 4px; font-weight: 650; }
-  h2 { font-size: .82rem; text-transform: uppercase; letter-spacing: .07em;
-       color: var(--dim); margin: 28px 0 8px; font-weight: 600; }
-  p.lede { color: var(--dim); margin: 0 0 24px; }
-  code, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-                font-size: .92em; }
-  form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
-         border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
-  input[type=password] { flex: 1 1 20rem; min-width: 0; padding: 6px 8px;
-    border: 1px solid var(--line); border-radius: 4px; background: var(--bg);
-    color: var(--fg); font-family: ui-monospace, Menlo, Consolas, monospace; }
-  button { padding: 6px 14px; border: 1px solid var(--accent); border-radius: 4px;
-    background: var(--accent); color: #fff; cursor: pointer; font: inherit; }
-  button.ghost { background: transparent; color: var(--accent); }
-  button.tiny { padding: 0 6px; font-size: .8em; border-color: var(--line);
-    background: transparent; color: var(--dim); }
-  table { border-collapse: collapse; width: 100%; }
-  td, th { text-align: left; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--line);
-           vertical-align: top; }
-  th { color: var(--dim); font-weight: 600; width: 14rem; }
-  .pill { display: inline-block; padding: 1px 7px; margin: 0 4px 4px 0; border-radius: 10px;
-          border: 1px solid var(--line); font-size: .85em; }
-  .pill.on { border-color: var(--accent); color: var(--accent); }
-  .bad { color: var(--bad); }
-  .dim { color: var(--dim); }
-  #log { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
-  #log > div { padding: 5px 10px; border-bottom: 1px solid var(--line); }
-  #log > div:last-child { border-bottom: 0; }
-  #log .row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-  #log .row .grow { flex: 1 1 auto; }
-  pre.copy { margin: 6px 0 0; padding: 8px 10px; background: var(--soft);
-    border-radius: 4px; overflow-x: auto; white-space: pre; font-size: .85em; }
-</style>
 </head>
 <body>
-<main>
-  <h1>JMFTS</h1>
-  <p class="lede">
-    Matryoshka embeddings, ColBERT-style late interaction, and BM25 over PostgreSQL.
-    This page reports what this appliance accepts, indexes and retrieves — read from
-    <code>/capabilities</code>, which makes no network call of its own.
-  </p>
-
-  <form id="auth" autocomplete="off">
-    <input type="password" id="token" placeholder="JMFTS_API_TOKEN" aria-label="API token">
-    <button type="submit">Connect</button>
-    <button type="button" class="ghost" id="forget">Forget</button>
-    <span id="status" class="dim"></span>
-  </form>
-
-  <div id="out"></div>
-
-  <h2>Calls this page made</h2>
-  <div id="log"><div class="dim">Nothing yet.</div></div>
-</main>
-
-<script type="module">
-import {
-  JmftsClient, TOKEN_KEY, asCurl, asFetch, asPython, detailOf,
-} from "./client/index.js";
-
-const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s).replace(/[&<>"]/g, c => (
-  {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-
-// Same origin, and the token lives in sessionStorage under the key the client names — not
-// localStorage and never the URL. A closed tab has forgotten it; a pasted address does not
-// carry a credential. `credentialFromSession` is the client's default, so nothing here has
-// to reach for the value itself.
-const client = new JmftsClient();
-
-// The log IS the client's event stream. This page adds nothing to it and hides nothing from
-// it, which is the property worth having: what you see below is every request that went out.
-const calls = [];
-client.onCall((event) => { calls.unshift(event); renderLog(); });
-
-function renderLog() {
-  if (calls.length === 0) { $("log").innerHTML = '<div class="dim">Nothing yet.</div>'; return; }
-  $("log").innerHTML = calls.map((c, i) => `
-    <div>
-      <div class="row">
-        <span class="mono grow">${esc(c.method)} ${esc(c.path)}
-          ${esc(new URLSearchParams(
-              Object.entries(c.query).map(([k, v]) => [k, String(v)])).toString())}
-          &rarr; ${c.status === 0 || c.status >= 400
-            ? `<span class="bad">${c.status || esc(detailOf(c.response))}</span>`
-            : c.status}
-          <span class="dim">${c.ms} ms</span></span>
-        <button class="tiny" data-i="${i}" data-as="curl">curl</button>
-        <button class="tiny" data-i="${i}" data-as="python">python</button>
-        <button class="tiny" data-i="${i}" data-as="fetch">fetch</button>
-      </div>
-      <div class="out"></div>
-    </div>`).join("");
-}
-
-// Copy-out. The event is a call plus its arguments, so it prints three ways from the same
-// table the request was built from — and the credential is NEVER in any of them.
-$("log").addEventListener("click", (ev) => {
-  const button = ev.target.closest("button[data-as]");
-  if (!button) return;
-  const event = calls[Number(button.dataset.i)];
-  const printers = { curl: asCurl, python: asPython, fetch: asFetch };
-  const options = { baseUrl: window.location.origin };
-  const target = button.closest("div").parentElement.querySelector(".out");
-  target.innerHTML = `<pre class="copy">${esc(printers[button.dataset.as](event, options))}</pre>`;
-});
-
-const pills = (items, live) => (items || []).length === 0
-  ? '<span class="dim">none</span>'
-  : items.map(i => `<span class="pill${live && live.includes(i) ? " on" : ""}">${esc(i)}</span>`)
-         .join("");
-
-function render(cap) {
-  const e = cap.extras || {};
-  const installed = Object.keys(e).filter(k => e[k]?.installed ?? e[k]);
-  const rows = [
-    ["Version", esc(cap.version ?? "unknown")],
-    ["Extras", pills(Object.keys(e), installed)],
-    ["Can produce a vector", cap.embedding?.local_model_available
-        ? "yes, in this process"
-        : (cap.embedding?.runner_url
-            ? "yes, via " + esc(cap.embedding.runner_url)
-            : '<span class="bad">no — neither a local model nor a runner</span>')],
-    ["Formats identified", pills(cap.formats)],
-    ["Ingest entry points", pills(cap.ingest?.usetypes)],
-    ["Retrieval methods", pills(cap.retrieval?.methods)],
-    ["Held out of every result", pills(cap.retrieval?.excluded_usetypes)],
-    // The one row below that is NOT from a call, and it says so. Property 2 of step 23 is
-    // that a view showing something the log has no call for computed it in the browser; a
-    // page claiming that has to hold itself to it, and the way to hold to it is to label
-    // the exception rather than to quietly have one.
-    ["Operations this client knows <span class=\"dim\">(generated table, not a call)</span>",
-      String(Object.keys(client.operations).length)],
-  ];
-  $("out").innerHTML = "<h2>This appliance</h2><table>" + rows.map(
-    ([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("") + "</table>";
-}
-
-async function load() {
-  $("out").innerHTML = "";
-  try {
-    // `/health` is the one path in PUBLIC_PATHS, so this answers with no credential — which
-    // is what lets the next failure be read as "the token is wrong" rather than "nothing is
-    // running". The client knows it takes none; the operation table says so.
-    await client.health_check_liveness();
-  } catch {
-    $("status").innerHTML = '<span class="bad">the appliance is not answering</span>';
-    return;
-  }
-  try {
-    render(await client.capabilities({ corpus: true }));
-    $("status").textContent = "connected";
-  } catch (err) {
-    $("status").innerHTML = '<span class="bad">' + esc(err.message) +
-      " &mdash; check the token</span>";
-  }
-}
-
-$("auth").addEventListener("submit", (ev) => {
-  ev.preventDefault();
-  const value = $("token").value.trim();
-  if (value) sessionStorage.setItem(TOKEN_KEY, value);
-  $("token").value = "";
-  load();
-});
-$("forget").addEventListener("click", () => {
-  sessionStorage.removeItem(TOKEN_KEY);
-  $("status").textContent = "token forgotten";
-  $("out").innerHTML = "";
-});
-
-if (sessionStorage.getItem(TOKEN_KEY)) load();
-else $("status").textContent = "a token is needed for everything except /health";
-</script>
+<div id="shell"></div>
+<script type="module" src="./shell/shell.js"></script>
 </body>
 </html>

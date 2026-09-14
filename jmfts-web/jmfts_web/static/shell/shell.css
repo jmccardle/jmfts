@@ -1,0 +1,137 @@
+/* The shell's stylesheet, and the class vocabulary views draw with.
+ *
+ * docs/SPRINT_0_6_0.md Block F step 24. One stylesheet, owned by the shell, linked once from
+ * index.html. A view that needs styling of its own adds it from its own module rather than a
+ * second <link> here — index.html is a file five F3 worktrees would otherwise all edit, which
+ * is the conflict IC-7 exists to remove.
+ *
+ * Loads nothing from anywhere but this origin: no font host, no CDN, and no absolute URL in a
+ * CSS url() anywhere. The appliance is expected to run air-gapped, and a page that renders
+ * blank without internet is worse than no page —
+ * `test_nothing_in_the_bundle_loads_from_the_network` holds this file to it with the rest of
+ * the bundle, including the prose in this comment, which is why the rule above is spelled out
+ * rather than demonstrated.
+ */
+
+:root {
+  color-scheme: light dark;
+  --fg: #16181d;
+  --bg: #fbfbfa;
+  --dim: #6a6f7a;
+  --line: #dcdde1;
+  --accent: #1f5fa8;
+  --bad: #a8321f;
+  --soft: #f2f2f0;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e6e7ea;
+    --bg: #16181d;
+    --dim: #9aa0ad;
+    --line: #2e3239;
+    --accent: #79aef0;
+    --bad: #f0897a;
+    --soft: #1d2026;
+  }
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 0 16px 64px;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+#shell { max-width: 62rem; margin: 0 auto; }
+h1 { font-size: 1.4rem; margin: 24px 0 4px; font-weight: 650; }
+h2 {
+  font-size: .82rem; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--dim); margin: 28px 0 8px; font-weight: 600;
+}
+p.lede { color: var(--dim); margin: 0 0 24px; }
+p.note { margin: 4px 0 0; font-size: .88em; }
+code, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: .92em; }
+a { color: var(--accent); }
+
+/* ------------------------------------------------------------------ header and navigation */
+.shell-header {
+  display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap;
+  padding: 14px 0 12px; border-bottom: 1px solid var(--line);
+}
+.shell-brand { font-weight: 700; letter-spacing: .04em; text-decoration: none; color: var(--fg); }
+.shell-nav { display: flex; gap: 18px; flex-wrap: wrap; align-items: baseline; }
+.shell-nav-group { display: flex; gap: 10px; align-items: baseline; }
+.shell-nav-tag {
+  font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; color: var(--dim);
+}
+.shell-nav-link { text-decoration: none; }
+.shell-nav-link.on { font-weight: 650; text-decoration: underline; }
+
+/* --------------------------------------------------------------------------- token entry */
+.shell-auth {
+  display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+  border: 1px solid var(--line); border-radius: 6px; padding: 12px; margin: 16px 0 0;
+}
+input[type=password] {
+  flex: 1 1 20rem; min-width: 0; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: 4px;
+  background: var(--bg); color: var(--fg);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+button {
+  padding: 6px 14px; border: 1px solid var(--accent); border-radius: 4px;
+  background: var(--accent); color: #fff; cursor: pointer; font: inherit;
+}
+button.ghost { background: transparent; color: var(--accent); }
+button.tiny {
+  padding: 0 6px; font-size: .8em; border-color: var(--line);
+  background: transparent; color: var(--dim);
+}
+
+/* ----------------------------------------------------------------------------- the view */
+.shell-view { display: block; min-height: 8rem; }
+.shell-error h1 { margin-top: 24px; }
+
+table { border-collapse: collapse; width: 100%; }
+td, th {
+  text-align: left; padding: 5px 10px 5px 0;
+  border-bottom: 1px solid var(--line); vertical-align: top;
+}
+th { color: var(--dim); font-weight: 600; width: 16rem; }
+.pill {
+  display: inline-block; padding: 1px 7px; margin: 0 4px 4px 0; border-radius: 10px;
+  border: 1px solid var(--line); font-size: .85em;
+}
+.pill.on { border-color: var(--accent); color: var(--accent); }
+.bad { color: var(--bad); }
+.dim { color: var(--dim); }
+
+/* ------------------------------------------------------------------- renderers (IC-8) */
+.render-plain, .render-code, .render-markdown-source, .render-transcript-source {
+  margin: 0; padding: 10px 12px; background: var(--soft); border-radius: 4px;
+  overflow-x: auto; white-space: pre-wrap; font-size: .9em;
+}
+.render-notice {
+  margin: 0 0 8px; padding: 6px 10px; font-size: .88em;
+  border-left: 3px solid var(--bad); background: var(--soft); color: var(--dim);
+}
+
+/* --------------------------------------------------------------- highlight overlay (IC-9) */
+.overlay-surface { position: relative; display: inline-block; max-width: 100%; }
+.overlay-box {
+  position: absolute; pointer-events: none;
+  border: 2px solid var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.overlay-notice { margin: 6px 0 0; font-size: .88em; color: var(--bad); }
+
+/* -------------------------------------------------------------------------- the call log */
+.shell-log { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.shell-log > div { padding: 5px 10px; border-bottom: 1px solid var(--line); }
+.shell-log > div:last-child { border-bottom: 0; }
+.shell-log .row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.shell-log .row .grow { flex: 1 1 auto; }
+pre.copy {
+  margin: 6px 0 0; padding: 8px 10px; background: var(--soft);
+  border-radius: 4px; overflow-x: auto; white-space: pre; font-size: .85em;
+}

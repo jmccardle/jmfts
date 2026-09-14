@@ -1,0 +1,16 @@
+# Merge behaviour this repository depends on, rather than hopes for.
+#
+# docs/SPRINT_0_6_0.md Block F step 24, IC-7. The front end's view manifest is a list of
+# import lines that Phase F3's five worktrees each append one line to, at the same end of the
+# same file, without ever seeing each other. Git's default three-way merge calls two appends
+# at one position a conflict; `union` takes both sides of the hunk instead.
+#
+# That is the whole mechanism behind IC-7's pin — "two views added in two worktrees merge
+# without conflict" — and `tests/test_web_views.py` holds it from both directions: it asks git
+# itself (`git check-attr merge`) whether this line reaches the manifest, and it performs the
+# two-branch merge with the attribute and without it, so a clean merge cannot be luck.
+#
+# `union` is correct here ONLY because the file is append-only and every line is independent.
+# It is the wrong driver for a file where two branches can edit the same line — it would keep
+# both edits — which is why this names one path and not a directory.
+jmfts-web/jmfts_web/static/shell/manifest.js merge=union
