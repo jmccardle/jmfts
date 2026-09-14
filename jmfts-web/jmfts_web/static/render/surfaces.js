@@ -223,6 +223,22 @@ export function highlightNotice(found) {
         return `This passage is at ${found.ref}, which is outside the region shown here.`;
       }
       return `This passage is on sheet ${found.sheet}, and this is sheet ${found.showing}.`;
+    case HIGHLIGHT_STATUS.BOX: {
+      // A BOX that runs on gets a sentence, because otherwise it does not get one. `overlay.js`
+      // carries `continues` "so a viewer can say 'continues on p. 4' rather than presenting a
+      // partial box as a whole one" and nothing said it until now: a box over the first page of
+      // a two-page passage drew identically to a box over the whole passage, which is the
+      // capability table's defect — absent drawn the same as complete — in the one place the
+      // whole sprint is about. Null and not an empty list is the contract's "absent, not
+      // empty", so an empty array would still be a passage that runs on and is asked the same.
+      if (!found.continues || found.continues.length === 0) return null;
+      const pages = found.continues.map((page) => page + 1);
+      const where =
+        pages.length === 1
+          ? `page ${pages[0]}`
+          : `pages ${pages.slice(0, -1).join(", ")} and ${pages[pages.length - 1]}`;
+      return `The box is this page's part of the passage; it continues on ${where}.`;
+    }
     default:
       return null;
   }

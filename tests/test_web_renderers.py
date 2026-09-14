@@ -615,6 +615,26 @@ FIGURE_HARNESS = textwrap.dedent("""
       rendition: true, filename: file.filename, mime: file.detected_mime,
     }));
 
+    // A box that is only part of its passage, and a box that is the whole of one. The two must
+    // not read the same; `overlay.js` carries `continues` precisely so they cannot.
+    const overlay = await import("%(static)s/render/overlay.js");
+    const anchor = %(pdf)s;
+    const boxed = surfaces.rasterSurface({
+      kind: "pdf-page", pixels: { width: 1224, height: 1584 }, dpi: 144, page: anchor.page,
+    });
+    // Both keys, always — IC-9 refuses a caller that passes only one, because "I did not look"
+    // is not "there was no reason recorded". There is no unresolved row in any of these cases.
+    const notice = (continues) => surfaces.highlightNotice(
+      overlay.highlight(
+        { anchor: continues === null ? anchor : { ...anchor, continues }, unresolved: null },
+        boxed
+      )
+    );
+    out.notices.whole = notice(null);
+    out.notices.partialOne = notice([4]);
+    out.notices.partialMany = notice([4, 5]);
+    out.notices.partialEmpty = notice([]);
+
     // The original bytes, once a view has asked for them.
     const original = new Blob([PNG], { type: "application/vnd.openxmlformats-officedocument" });
     out.notices.download = serialize(surfaces.downloadLink(original, "report.docx"));
@@ -912,6 +932,31 @@ def test_the_page_says_which_representation_of_a_document_it_is_showing(figures)
     # The other answer is a sentence too, rather than the absence of one.
     held = figures["notices"]["rendition"]["text"]
     assert "holds a rendition" in held and "Block G step 33" in held
+
+
+def test_a_box_over_part_of_a_passage_does_not_read_like_a_box_over_all_of_it(figures):
+    """The one thing `continues` was carried for, said out loud at last.
+
+    `overlay.js` has frozen `continues` onto every BOX since step 25, with a comment saying it
+    is there "so a viewer can say 'continues on p. 4' rather than presenting a partial box as a
+    whole one" — and until this merge nothing said it. A box over the first page of a two-page
+    passage drew identically to a box over the whole passage, which is the capability table's
+    defect (absent drawn the same as complete) in the one place this sprint is about. Found by
+    `wt/view-tree` while adopting this library, fixed here rather than in either worktree
+    because `render/surfaces.js` is the one place that composes this wording.
+
+    A whole passage still gets NO sentence. The box is the statement, and a second one saying
+    "this is all of it" would be noise on every citation in the corpus.
+    """
+    assert figures["notices"]["whole"] is None
+    assert figures["notices"]["partialEmpty"] is None, "absent, not empty — the anchor contract"
+
+    one = figures["notices"]["partialOne"]
+    assert "continues on page 5" in one, one
+    assert "this page's part" in one
+
+    many = figures["notices"]["partialMany"]
+    assert "continues on pages 5 and 6" in many, many
 
 
 def test_bytes_and_failures_are_each_drawn_as_themselves(figures):
