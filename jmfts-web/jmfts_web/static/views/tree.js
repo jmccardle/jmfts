@@ -91,7 +91,11 @@ const make = (tag, className, text) => {
 
 const link = (className, text, href) => {
   const element = make("a", className, text);
-  element.href = href;
+  // setAttribute, not the reflected property. They are the same thing to a browser, and the
+  // attribute is the one a test can read back — `tests/test_web_renderers.py`'s `deep()`
+  // serialises attributes, and the alternative was a second DOM stub that serialises
+  // properties, which is the thing this repository has exactly one of.
+  element.setAttribute("href", href);
   return element;
 };
 
@@ -171,7 +175,7 @@ function preview(node) {
  */
 export function nodeRow(node, { client }) {
   const box = make("div", "tree-node");
-  box.dataset.id = String(node.id);
+  box.setAttribute("data-id", String(node.id));
   const row = make("div", "tree-row");
 
   const expander = make("button", "tiny tree-expander", "+");

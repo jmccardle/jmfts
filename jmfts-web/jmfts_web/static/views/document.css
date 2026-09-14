@@ -3,13 +3,11 @@
  * docs/SPRINT_0_6_0.md Block F step 28, and `views/tree.css`'s header gives the rule both
  * files are here under.
  *
- * THE GRID'S PITCH IS LOAD-BEARING AND IT IS DECLARED TWICE ON PURPOSE. `cellsSurface()` in
- * `document.js` computes the overlay's pixel extent as (columns + 1) × CELL_W by (rows + 1) ×
- * CELL_H, so the box it hands IC-9 lands on the right cells only while this stylesheet lays
- * the cells out on exactly that pitch. Two files cannot import one number, so
- * `tests/test_web_document_view.py::test_the_grid_pitch_in_the_stylesheet_is_the_one_the_
- * surface_computes_in` reads both and fails when they disagree — which is the alternative to
- * a comment asking somebody to remember.
+ * THE GRID THAT WAS HERE HAS GONE TO `render/sheet.js`, and with it the one number this file
+ * could get wrong. A sheet region is drawn on a fixed pitch so that the overlay's linear
+ * transform lands on the right cells, and that pitch is now declared in the markup the grid is
+ * built from — so the surface knows its own extent without measuring a layout, and without a
+ * constant in one file having to agree with a rule in another.
  */
 
 .view-document .doc-head {
@@ -31,42 +29,14 @@
   padding: 12px;
   margin: 8px 0 0;
 }
-.view-document .doc-frame {
-  max-width: 100%;
-  overflow: auto;
-  border: 1px solid var(--line);
-}
-.view-document .doc-caption {
-  margin: 4px 0 0;
-  font-size: 0.85em;
-}
 
-/* The fixed pitch. See the header: `cellsSurface()` computes in these two numbers. */
-.view-document .doc-grid {
-  border-collapse: collapse;
-  table-layout: fixed;
-  width: auto;
-}
-.view-document .doc-grid td,
-.view-document .doc-grid th {
-  width: 104px;
-  height: 24px;
-  max-width: 104px;
-  padding: 0 4px;
-  border: 1px solid var(--line);
-  font-size: 0.85em;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  vertical-align: middle;
-}
-.view-document .doc-grid th {
-  color: var(--dim);
-  font-weight: 600;
-  text-align: center;
-}
-.view-document .doc-grid td.formula {
-  border-bottom: 2px solid var(--accent);
+/* The control beside a highlight that is not a box: "Show page 4". The SENTENCE is
+ * `render/surfaces.js`'s — one wording, in one place — and this is the route to it, which only
+ * a view can know. */
+.view-document .doc-jump {
+  display: inline-block;
+  margin: 4px 0 0;
+  font-size: 0.9em;
 }
 
 .view-document .doc-stub {

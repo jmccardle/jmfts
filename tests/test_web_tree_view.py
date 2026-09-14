@@ -24,8 +24,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
-import subprocess
 import textwrap
 from pathlib import Path
 
@@ -33,85 +31,16 @@ import pytest
 
 from jmfts_client.contracts.document import DocumentResponse
 
+# THE ONE DOM STUB. `tests/test_web_views.py` owns the stub every browser test in this
+# repository runs against, and `tests/test_web_renderers.py` adds attribute-level
+# serialisation to it — which is what an assertion about a link's href needs, since a view
+# sets one with `setAttribute` and the shared serialiser reports `title` alone.
+from tests.test_web_renderers import _node
+from tests.test_web_views import NODE, STATIC, _find, needs_node
+
 REPO = Path(__file__).resolve().parents[1]
-STATIC = REPO / "jmfts-web" / "jmfts_web" / "static"
 VIEW = STATIC / "views" / "tree.js"
 MANIFEST = STATIC / "shell" / "manifest.js"
-
-NODE = shutil.which("node")
-needs_node = pytest.mark.skipif(NODE is None, reason="no JavaScript runtime on PATH")
-
-DOM_STUB = textwrap.dedent("""
-    export class Element {
-      constructor(tag) {
-        this.tagName = String(tag).toUpperCase();
-        this.childNodes = [];
-        this.attributes = {};
-        this.className = "";
-        this.dataset = {};
-        this.hidden = false;
-        this.href = null;
-        this.disabled = false;
-        this.listeners = {};
-        this._text = "";
-      }
-      append(...nodes) {
-        for (const node of nodes) {
-          if (!(node instanceof Element)) throw new TypeError("append() takes elements");
-          this.childNodes.push(node);
-        }
-      }
-      setAttribute(name, value) { this.attributes[name] = String(value); }
-      getAttribute(name) { return name in this.attributes ? this.attributes[name] : null; }
-      set textContent(value) {
-        this.childNodes = [];
-        this._text = value === null || value === undefined ? "" : String(value);
-      }
-      get textContent() {
-        return this._text + this.childNodes.map((n) => n.textContent).join("");
-      }
-      addEventListener(name, handler) { this.listeners[name] = handler; }
-    }
-
-    const head = new Element("head");
-    export const document = { createElement: (tag) => new Element(tag), head };
-
-    /** The rendered tree as plain data, so the assertions live in Python. */
-    export function serialize(element) {
-      return {
-        tag: element.tagName.toLowerCase(),
-        class: element.className || null,
-        text: element.textContent,
-        href: element.href,
-        hidden: element.hidden,
-        id: element.dataset.id ?? null,
-        children: element.childNodes.map(serialize),
-      };
-    }
-
-    export function install() {
-      globalThis.__head = head;
-      globalThis.Element = Element;
-      globalThis.document = document;
-    }
-    """)
-
-
-def _node(tmp_path: Path, harness: str, **substitutions: str) -> object:
-    """Run one harness module and parse the single JSON document it prints."""
-    (tmp_path / "dom.mjs").write_text(DOM_STUB, encoding="utf-8")
-    # `str.replace` and not `%`-formatting: a fixture is JSON and JSON is full of `%`-free
-    # punctuation right up until the day a document title carries a percent sign.
-    source = harness.replace("%(static)s", STATIC.as_uri())
-    for name, value in substitutions.items():
-        source = source.replace(f"%({name})s", value)
-    script = tmp_path / "harness.mjs"
-    script.write_text(source, encoding="utf-8")
-    done = subprocess.run(
-        [NODE, str(script)], capture_output=True, text=True, cwd=tmp_path, timeout=60
-    )
-    assert done.returncode == 0, done.stderr or done.stdout
-    return json.loads(done.stdout)
 
 
 def _document(**overrides) -> dict:
@@ -136,13 +65,6 @@ def _document(**overrides) -> dict:
     }
     fields.update(overrides)
     return json.loads(DocumentResponse(**fields).model_dump_json())
-
-
-def _find(node: dict, className: str) -> list[dict]:
-    found = [node] if node["class"] == className else []
-    for child in node["children"]:
-        found.extend(_find(child, className))
-    return found
 
 
 # --------------------------------------------------------------------------- the declaration
@@ -205,10 +127,9 @@ def test_the_view_reads_only_fields_the_document_contract_carries():
 # ------------------------------------------------------------------------------ the grouping
 
 EXPAND_HARNESS = textwrap.dedent("""
-    import { install, serialize } from "./dom.mjs";
+    import { install, deep as serialize, document as dom } from "./dom.mjs";
     install();
     const { expandInto, byUsetype, CHILD_LIMIT } = await import("%(static)s/views/tree.js");
-    const { document } = await import("./dom.mjs");
 
     const children = %(children)s;
     const calls = [];
@@ -216,7 +137,7 @@ EXPAND_HARNESS = textwrap.dedent("""
       get_children: async (args) => { calls.push(args); return children; },
     };
 
-    const container = document.createElement("div");
+    const container = dom.createElement("div");
     const groups = await expandInto(container, 9, { client });
     console.log(JSON.stringify({
       calls,
@@ -263,7 +184,7 @@ def test_one_sheet_with_two_child_shapes_shows_both_of_them(tmp_path):
 
     # And every child is a row, whatever group it fell into: five children in, five rows out.
     rows = _find(result["tree"], "tree-node")
-    assert [row["id"] for row in rows] == ["11", "12", "15", "13", "14"]
+    assert [row["attrs"]["data-id"] for row in rows] == ["11", "12", "15", "13", "14"]
     assert "Q3 Pipeline as a table" in result["tree"]["text"]
 
 
@@ -314,7 +235,7 @@ def test_a_node_with_no_children_says_so(tmp_path):
 # ---------------------------------------------------------------------------------- the page
 
 PAGE_HARNESS = textwrap.dedent("""
-    import { install, serialize } from "./dom.mjs";
+    import { install, deep as serialize, document as dom } from "./dom.mjs";
     install();
     const view = await import("%(static)s/views/tree.js");
     const { views } = await import("%(static)s/shell/registry.js");
@@ -360,7 +281,7 @@ PAGE_HARNESS = textwrap.dedent("""
     out.failed = serialize(row.element);
     // Three mounts above, and one stylesheet: the view's own, appended to <head> by the
     // view's own module. index.html is a file five F3 worktrees would otherwise all edit.
-    out.styles = globalThis.__head.childNodes.map((n) => [n.rel, n.href]);
+    out.styles = dom.head.childNodes.map((n) => [n.rel, n.href]);
     console.log(JSON.stringify(out));
     """)
 
@@ -416,7 +337,7 @@ def test_the_roots_page_says_which_nodes_no_search_can_reach(page):
     """
     assert page["rootCalls"] == [["roots", None]]
     rows = _find(page["roots"], "tree-node")
-    assert [row["id"] for row in rows] == ["1", "2", "3"]
+    assert [row["attrs"]["data-id"] for row in rows] == ["1", "2", "3"]
 
     text = page["roots"]["text"]
     assert "in_flight — not yet reachable by any search" in text
@@ -424,10 +345,10 @@ def test_the_roots_page_says_which_nodes_no_search_can_reach(page):
 
     # A node with no title is marked as having none rather than being given one.
     untitled = _find(page["roots"], "tree-title untitled")
-    assert [link["text"] for link in untitled] == ["(untitled)"]
+    assert [found["text"] for found in untitled] == ["(untitled)"]
 
     # Both destinations are links, so they survive a reload and can be copied.
-    hrefs = [row["children"][0]["children"][1]["href"] for row in rows]
+    hrefs = [row["children"][0]["children"][1]["attrs"]["href"] for row in rows]
     assert hrefs == ["#/document?id=1", "#/document?id=2", "#/document?id=3"]
     assert "#/documents?root=3" in json.dumps(page["roots"])
 

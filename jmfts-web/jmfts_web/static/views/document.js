@@ -14,48 +14,58 @@
 //      `jmfts_core/evidence.py:453` is why.
 //
 // ---------------------------------------------------------------------------------------
-// WHAT DRAWS WHAT, AND WHY THE BYTES ARE NOT A RENDERER'S JOB
+// WHAT DRAWS WHAT: A RENDERER DRAWS CONTENT, THIS VIEW DRAWS SOURCE
 //
 // IC-8 is `(content, presentation, document) -> element`, keyed by the `renderer` value the
-// DATABASE hands the page. It is SYNCHRONOUS and it is handed text, which is the right shape
+// DATABASE hands the page. It is synchronous and it is handed TEXT, which is the right shape
 // for `rendered_content` and is not a shape that can fetch anything. The three byte routes
 // need a credential — `<img src="/documents/7/image">` sends no Authorization header and
-// answers 401 — so a page image is fetched by the client as a blob and shown through an
-// object URL. That fetch belongs to the VIEW.
+// answers 401 — so the bytes are fetched by the client and shown through an object URL, and
+// that fetch belongs to the VIEW.
 //
-// So the division is: `render()` draws the node's CONTENT; this view draws its SOURCE. Step
-// 29 (`wt/renderers`) owns `render/` and is completing the renderer set in parallel; nothing
-// here names a renderer, branches on one, or assumes which ones exist. What it does is call
-// `render()` and show what comes back, including the "this renderer is not finished" notice
-// that `render()` puts there itself.
+// Step 29 tried the other arrangement for a day — four renderers that fetched, declaring what
+// they needed — and reversed it (`2eec3ce`), which left the division above standing and left
+// this view holding it. What `render/` ships instead is a LIBRARY OF FUNCTIONS THAT TAKE WHAT
+// THE VIEW ALREADY FETCHED: `pageFigure` a Blob, `gridFigure` a cells response, `regionFigure`
+// a crop. This view calls the routes and hands over the answers.
+//
+// SO THE ARITHMETIC IS NOT HERE ANY MORE, and that is this file's half of IC-9's one claim.
+// This view had its own `pageSurface`, `cellsSurface` and box-positioning, each of which was a
+// second answer to "where does a box go" — and one of them was wrong: an absolute-pixel box on
+// a `max-width: 100%` picture stays where the unscaled picture used to be. `drawHighlight`
+// positions as a fraction of the surface, and one copy that is right beats two that agree
+// today. What stayed here is what nothing in `render/` has: which surface a node HAS, the
+// three ways a passage can have no rectangle, and the route a "show page 4" link points at.
 //
 // ---------------------------------------------------------------------------------------
 // A SPREADSHEET REGION IS CELLS, NOT A PICTURE OF CELLS
 //
 // `services/document_service.py:1548`'s `_pdf_anchor` refuses to crop a `cells` anchor and
 // names `GET /documents/{id}/cells` in the refusal; step 22's brief gives the reason ("for a
-// sheet, JSON cells are the better answer than a picture of cells"). This view honours that
-// on the client side: a sheet node, or any node whose anchor addresses cells, gets a GRID —
-// values, formulas behind them, and the anchor's range boxed on it by the same overlay that
-// boxes a PDF rectangle. `cellsSurface()` is what lets one overlay do both.
+// sheet, JSON cells are the better answer than a picture of cells"). This view honours that on
+// the client side: a sheet node, or any node whose anchor addresses cells, gets a GRID from
+// `render/sheet.js` — values, the formulas behind them, and the anchor's range boxed on it by
+// the same overlay that boxes a PDF rectangle.
 
 import { registerView } from "../shell/registry.js";
 import { render } from "../render/renderers.js";
-import { HIGHLIGHT_STATUS, OverlayError, highlight } from "../render/overlay.js";
+import { HIGHLIGHT_STATUS, OverlayError } from "../render/overlay.js";
+import { gridFigure } from "../render/sheet.js";
+import {
+  DPI_DEFAULT,
+  anchorPair,
+  describeAnchor,
+  highlightNotice,
+  pageFigure,
+  pageFor,
+  sourceNotice,
+} from "../render/surfaces.js";
 
 /** A route argument this view cannot honour. */
 export class DocumentParamError extends Error {
   constructor(message) {
     super(message);
     this.name = "DocumentParamError";
-  }
-}
-
-/** A cell reference this grid cannot resolve. Not an `OverlayError`: see `cellsSurface`. */
-export class CellRefError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "CellRefError";
   }
 }
 
@@ -71,18 +81,6 @@ export const ANCHOR_UNRESOLVED_ROW = "source_anchor.unresolved";
 export const CHILD_PAGE = 20;
 
 /**
- * The density this view asks for, which is the server's own default (`rendering.py`'s
- * `DPI_DEFAULT`) sent EXPLICITLY. The number that produced a picture is then in the call log
- * beside the picture, rather than being a server-side default a reader has to go and look up
- * in order to compute the scale the box was drawn at.
- */
-export const DPI_DEFAULT = 150;
-
-/** The grid's pitch, in CSS pixels. Fixed, and the CSS below fixes it — see `cellsSurface`. */
-export const CELL_W = 104;
-export const CELL_H = 24;
-
-/**
  * Load this view's stylesheet, once.
  *
  * `shell/shell.css:4` is the rule, `views/document.css` is the file, and the call is the first
@@ -90,9 +88,10 @@ export const CELL_H = 24;
  * every view for its registration alone, and a module that reaches for `document.head` when it
  * is merely imported cannot be imported that way.
  *
- * `views/document.css` fixes the grid's pitch at `CELL_W` × `CELL_H`, which is the geometry
- * `cellsSurface()` computes its box in. Two files cannot import one number; the test named in
- * that stylesheet's header reads both and fails when they disagree.
+ * It styles this view's own chrome and nothing else. The grid a sheet region is drawn on used
+ * to be in here too, at a pitch that had to agree with a constant in this module; both moved to
+ * `render/sheet.js`, which declares the pitch in the markup so that the surface knows its own
+ * extent without measuring a layout.
  */
 let linked = false;
 function linkStyles() {
@@ -113,7 +112,11 @@ const make = (tag, className, text) => {
 
 const link = (className, text, href) => {
   const element = make("a", className, text);
-  element.href = href;
+  // setAttribute, not the reflected property. They are the same thing to a browser, and the
+  // attribute is the one a test can read back — `tests/test_web_renderers.py`'s `deep()`
+  // serialises attributes, and the alternative was a second DOM stub that serialises
+  // properties, which is the thing this repository has exactly one of.
+  element.setAttribute("href", href);
   return element;
 };
 
@@ -200,12 +203,15 @@ export function broughtACitation(params) {
 }
 
 /**
- * The `{anchor, unresolved}` pair off a `GET /documents/{id}/evidence` response.
+ * The anchor pair off a `GET /documents/{id}/evidence` response, plus whether anything tried.
  *
- * A name PRESENT with a null value and a name ABSENT are different answers — 3.2, restated at
- * `DocumentEvidenceResponse`'s docstring — so this reports which of the two it found. "The
- * citation rung ran and placed nothing" and "nothing has run" are both "no box", and only one
- * of them is worth waiting for.
+ * The pair itself is `anchorPair` in `render/surfaces.js` — one reader, and this is not a
+ * second one. What is added is `attempted`, and it is a distinction that module deliberately
+ * does not make: it collapses "absent" and "present and null" because for DRAWING they are the
+ * same fact, and they are. For SAYING they are not. 3.2 has them as two facts —
+ * `DocumentEvidenceResponse`'s docstring restates it — and "the citation rung ran and placed
+ * nothing" is a finished answer while "nothing has run yet" is a reason to come back later.
+ * This page says which; `anchorPair` draws the same box either way.
  */
 export function evidenceFromRows(response) {
   const rows = response?.evidence;
@@ -215,12 +221,28 @@ export function evidenceFromRows(response) {
         `no evidence object (got ${JSON.stringify(response)}).`
     );
   }
-  const anchor = ANCHOR_ROW in rows ? rows[ANCHOR_ROW] : null;
-  const unresolved = ANCHOR_UNRESOLVED_ROW in rows ? rows[ANCHOR_UNRESOLVED_ROW] : null;
   return {
-    anchor: anchor ?? null,
-    unresolved: unresolved ?? null,
+    ...anchorPair(response),
     attempted: ANCHOR_ROW in rows || ANCHOR_UNRESOLVED_ROW in rows,
+  };
+}
+
+/**
+ * What the `file` evidence row says about the bytes this node came from, or null.
+ *
+ * Feeds `sourceNotice`, which needs `rendition` as "is `file.rendition_ref` PRESENT" rather
+ * than "is it truthy" — `OFFICE_SPEC.md` Part 6 names that key, and a row that carries it with
+ * a null value is a rendition that was attempted, which is not the same as one nobody asked
+ * for. Null when this page never read the evidence, which is the search-hit case: a sentence
+ * about a row nobody read would be a claim rather than a reading.
+ */
+export function sourceFacts(response) {
+  const file = response?.evidence?.file;
+  if (file === null || file === undefined || typeof file !== "object") return null;
+  return {
+    rendition: Object.prototype.hasOwnProperty.call(file, "rendition_ref"),
+    filename: file.filename ?? null,
+    mime: file.detected_mime ?? null,
   };
 }
 
@@ -233,322 +255,71 @@ export function hrefWith(params, overrides) {
   return `#/document?${query.toString()}`;
 }
 
-// ------------------------------------------------------------------------------- surfaces
-
-/**
- * The surface a rendered PDF page presents to the overlay.
- *
- * `pixels` is what the PNG DECODED to, read off the image rather than computed, and `source`
- * is derived from it: `jmfts_core/rendering.py` rasterises at `dpi/72` of the page's points,
- * so points are pixels × 72 ÷ dpi. Deriving it this way rather than asking for the media box
- * means there is no second number to be wrong — the scale the overlay divides by is the scale
- * the bytes were actually rendered at, including the rounding pymupdf did.
- *
- * `originCorner: "top-left"` because pymupdf's page space is top-left with y downward, which
- * is also what a `source_anchor` bbox is written in (`citation_tasks.py`) and what CSS wants.
- * The overlay refuses a surface that does not declare it, and that refusal is the reason this
- * is stated here rather than assumed three lines lower.
- */
-export function pageSurface({ page, pixels, dpi }) {
-  const scale = 72 / dpi;
-  return {
-    kind: "pdf-page",
-    page,
-    pixels: { width: pixels.width, height: pixels.height },
-    source: { width: pixels.width * scale, height: pixels.height * scale },
-    originCorner: "top-left",
-  };
-}
-
-const A1_CELL = /^([A-Z]+)([0-9]+)$/;
-
-/**
- * The surface a rendered cell grid presents to the overlay.
- *
- * IC-9 delegates A1 to the surface on purpose: "`jmfts_core/office/cells.py` owns that grammar
- * and a second parser in the client would be a second grammar", and a third in JavaScript
- * would be worse again. So this does not PARSE A1 — it LOOKS UP a reference against the
- * columns and rows the server said it rendered. `B4` is resolved by finding "B" in
- * `cells.columns` and 4 in `cells.rows`, which cannot drift from the grammar because it never
- * implements it: anything that is not a plain `<letters><digits>` pair, or a pair of them
- * either side of a colon, REFUSES rather than being guessed at.
- *
- * The coordinate space is CELLS, one unit per column and per row, with the header row and the
- * row-number gutter counted as the first unit of each axis — so the box lands on the grid this
- * module draws below, whose CSS pitch is `CELL_W` × `CELL_H` and is fixed for exactly that
- * reason. A range outside what was rendered returns null, which the overlay reads as
- * "elsewhere" rather than as a failure.
- */
-export function cellsSurface(cells) {
-  const columns = cells.columns;
-  const rows = cells.rows.map((row) => row.row);
-  const at = (text, where) => {
-    const match = A1_CELL.exec(String(text).trim().toUpperCase());
-    if (!match) {
-      throw new CellRefError(
-        `${JSON.stringify(where)} is not an A1 reference this grid can look up. It resolves ` +
-          "a plain COLUMNROW pair such as B4, or two of them as B4:H120 — the grammar itself " +
-          "lives in jmfts_core/office/cells.py and is not reimplemented here."
-      );
-    }
-    const column = columns.indexOf(match[1]);
-    const row = rows.indexOf(Number(match[2]));
-    return column === -1 || row === -1 ? null : { column, row };
-  };
-  return {
-    kind: "sheet-region",
-    sheet: cells.sheet,
-    source: { width: columns.length + 1, height: rows.length + 1 },
-    pixels: { width: (columns.length + 1) * CELL_W, height: (rows.length + 1) * CELL_H },
-    originCorner: "top-left",
-    cellRect: (ref) => {
-      const parts = String(ref).split(":");
-      if (parts.length > 2) {
-        throw new CellRefError(
-          `${JSON.stringify(ref)} has ${parts.length - 1} colons; a range is one rectangle.`
-        );
-      }
-      const first = at(parts[0], ref);
-      const last = at(parts[parts.length - 1], ref);
-      if (first === null || last === null) return null;
-      // +1 on both axes for the header row and the gutter column, and +1 again on the far
-      // edge because a cell occupies its whole unit rather than sitting at a point.
-      return [
-        Math.min(first.column, last.column) + 1,
-        Math.min(first.row, last.row) + 1,
-        Math.max(first.column, last.column) + 2,
-        Math.max(first.row, last.row) + 2,
-      ];
-    },
-  };
-}
-
-/** The absolutely positioned rectangle, in the surface's pixels. */
-export function boxElement(box) {
-  const element = make("div", "overlay-box");
-  element.setAttribute(
-    "style",
-    `left:${box.left}px;top:${box.top}px;width:${box.width}px;height:${box.height}px`
-  );
-  return element;
-}
-
-/**
- * What to SAY about a highlight result, beside whatever was drawn.
- *
- * Every one of IC-9's five statuses gets a sentence, and that is the requirement rather than a
- * flourish: a viewer that drew a box for one status and nothing for the other four would be
- * the surface that hides `source_anchor.unresolved`, which is the failure the whole contract
- * is shaped around. Returns null only for a plain box that continues nowhere — there the
- * rectangle IS the statement.
- */
-export function highlightNotice(result, { params = {}, page = null } = {}) {
-  const human = (zeroBased) => `page ${zeroBased + 1}`;
-  switch (result.status) {
-    case HIGHLIGHT_STATUS.BOX:
-      if (!result.continues || result.continues.length === 0) return null;
-      return make(
-        "p",
-        "overlay-notice",
-        `The box covers this page only; the passage continues on ` +
-          `${result.continues.map(human).join(", ")}.`
-      );
-    case HIGHLIGHT_STATUS.CONTINUED: {
-      const notice = make(
-        "p",
-        "overlay-notice",
-        `The passage runs through ${human(result.page)} and the rectangle was recorded on ` +
-          `${human(result.from)}, so nothing is boxed here. `
-      );
-      notice.append(
-        link(null, `Show ${human(result.from)}`, hrefWith(params, { page: result.from }))
-      );
-      return notice;
-    }
-    case HIGHLIGHT_STATUS.ELSEWHERE: {
-      if (result.sheet !== undefined) {
-        return make(
-          "p",
-          "overlay-notice",
-          result.ref !== undefined
-            ? `The passage is at ${result.ref} of ${result.sheet}, which is outside the region ` +
-              "this grid rendered."
-            : `The passage is on sheet ${result.sheet} and this grid is showing ` +
-              `${result.showing ?? "another sheet"}.`
-        );
-      }
-      const notice = make(
-        "p",
-        "overlay-notice",
-        `The passage is on ${human(result.page)}, and this is ` +
-          `${page === null ? "another page" : human(page)}. `
-      );
-      notice.append(
-        link(null, `Show ${human(result.page)}`, hrefWith(params, { page: result.page }))
-      );
-      return notice;
-    }
-    case HIGHLIGHT_STATUS.NONE:
-      return make(
-        "p",
-        "dim",
-        "No rectangle is recorded for this node, and no reason is recorded either — so " +
-          "nothing has tried to place it. `citation` is the rung that writes one."
-      );
-    case HIGHLIGHT_STATUS.UNRESOLVED:
-      return make(
-        "p",
-        "overlay-notice",
-        `No rectangle could be recovered for this node: ${result.reason} (code ${result.code}).`
-      );
-    default:
-      throw new Error(
-        `the overlay answered with a status this view has no sentence for: ${result.status}`
-      );
-  }
-}
-
-/**
- * Decode a PNG blob far enough to know its pixel size, and hand back the element itself.
- *
- * The same element is then shown, so the browser decodes once. An object URL rather than a
- * data URL because the bytes are already a Blob and a base64 round trip of a 1275×1650 page is
- * work with nothing on the other end of it.
- */
-async function decodeImage(blob) {
-  const url = URL.createObjectURL(blob);
-  const element = new Image();
-  const measured = new Promise((resolve, reject) => {
-    element.onload = () => resolve({ width: element.naturalWidth, height: element.naturalHeight });
-    element.onerror = () =>
-      reject(
-        new Error("the appliance answered with bytes this browser could not decode as an image")
-      );
-  });
-  element.src = url;
-  try {
-    return { element, pixels: await measured };
-  } finally {
-    // Revoked once the bytes are decoded, which is the whole life of the URL: the element
-    // keeps the image, and the handle is what would otherwise keep the blob alive for the
-    // life of the tab. A viewer that walks fifty pages of a PDF holds fifty of them.
-    URL.revokeObjectURL(url);
-  }
-}
-
 // -------------------------------------------------------------------------- source panels
+//
+// Three panels, and none of them owns any geometry. `render/surfaces.js` and `render/sheet.js`
+// take what was fetched and hand back a `<figure>` carrying `surface()`, `overlayContainer`
+// and `highlight` — the box already drawn and the sentence already written. What is left here
+// is the half only a view can do: make the call, and turn "the passage is on page 4" into a
+// link to page 4.
 
 /**
- * A rendered page with the box on it. Returns the panel and what the overlay decided.
+ * The route-aware half of a highlight that is not a box.
  *
- * Exported for `tests/test_web_document_view.py`, and for step 31: the beeline is this
- * function reached with an anchor the search hit carried, and nothing else about it is new.
+ * `highlightNotice` in `render/surfaces.js` writes the sentence — "This passage is on page 4."
+ * — and cannot write the link, because `render/` knows nothing about this front end's routing
+ * and should not: a fragment router is the shell's, and a module that drew boxes would be
+ * carrying a second reason to change. So the prose stays there and the NAVIGATION is here.
+ * There is exactly one sentence per outcome and it is theirs; this adds a control beside it.
  */
-export async function pagePanel({ client, documentId, page, dpi, evidence, params }) {
+export function pageLink(found, params) {
+  if (!found) return null;
+  const page =
+    found.status === HIGHLIGHT_STATUS.CONTINUED
+      ? found.from
+      : found.status === HIGHLIGHT_STATUS.ELSEWHERE && found.page !== undefined
+        ? found.page
+        : null;
+  // A `cells` anchor answers ELSEWHERE with a sheet rather than a page, and there is no route
+  // to another sheet: `/cells` serves the region this node is addressed at. Null, not a guess.
+  if (page === null) return null;
+  return link("doc-jump", `Show page ${page + 1}`, hrefWith(params, { page }));
+}
+
+/**
+ * A rendered page with the passage boxed on it. The beeline's picture.
+ *
+ * Exported for `tests/test_web_document_view.py`, and for step 31: the beeline is this function
+ * reached with an anchor the search hit carried, and nothing else about it is new.
+ *
+ * `dpi` is SENT rather than left to the server's default, because the scale the box is drawn at
+ * is the ratio of the picture's pixels to the page's points and the second of those is derived
+ * from the first using this number. A client that assumed the server's default would keep
+ * drawing boxes after that default moved, each one off by the ratio.
+ */
+export async function pagePanel({ client, documentId, page, dpi, evidence, label, params }) {
   const blob = await client.get_document_image({ document_id: documentId, page, dpi });
-  const { element: image, pixels } = await decodeImage(blob);
-  image.setAttribute("alt", `page ${page + 1} of document ${documentId}`);
-
-  const panel = make("div");
-  const scroll = make("div", "doc-frame");
-  const frame = make("div", "overlay-surface");
-  frame.append(image);
-  scroll.append(frame);
-  panel.append(scroll);
-  // WHAT CAME BACK, AS BYTES AND AS PIXELS. A binary response has no shape a page can print —
-  // `JSON.stringify` flattens a Blob to `{}`, which is how bytes become an empty object on
-  // screen — so what is printed is its size and its media type, beside the density that
-  // produced it. Those three are what a reader needs in order to know the box was drawn at the
-  // scale the picture was rendered at rather than at some other one.
-  panel.append(
-    make(
-      "p",
-      "dim doc-caption",
-      `page ${page + 1} — ${blob.size} bytes of ${blob.type || "an undeclared media type"}, ` +
-        `${pixels.width}×${pixels.height} px at ${dpi} dpi`
-    )
-  );
-
-  const surface = pageSurface({ page, pixels, dpi });
-  let result;
-  try {
-    result = highlight(evidence, surface);
-  } catch (error) {
-    if (!(error instanceof OverlayError)) throw error;
-    // A span anchor is a VALID anchor with no geometry, and an unknown kind means this front
-    // end is older than the appliance. Both messages are written for a reader and both say
-    // what to do next, so they go on the page as they are rather than being restated.
-    panel.append(make("p", "overlay-notice", error.message));
-    return { element: panel, result: null, surface };
-  }
-  if (result.status === HIGHLIGHT_STATUS.BOX) frame.append(boxElement(result.box));
-  const notice = highlightNotice(result, { params, page });
-  if (notice) panel.append(notice);
-  return { element: panel, result, surface };
+  const figure = await pageFigure({ blob, page, dpi, evidence, label });
+  const jump = pageLink(figure.highlight, params);
+  if (jump) figure.append(jump);
+  return { element: figure, result: figure.highlight, surface: figure.surface() };
 }
 
-/** The grid, with the anchor's range boxed on it. */
-export async function cellsPanel({ client, documentId, ref, evidence, params }) {
-  const cells = await client.get_document_cells({ document_id: documentId, ref });
-  const surface = cellsSurface(cells);
-
-  const panel = make("div");
-  const heading = make(
-    "p",
-    "dim",
-    `${cells.sheet} — ${cells.ref} (${cells.row_count} rows, ${cells.cell_count} cells), ` +
-      `addressed by ${cells.ref_source}`
-  );
-  panel.append(heading);
-
-  const scroll = make("div", "doc-frame");
-  const frame = make("div", "overlay-surface");
-  frame.append(gridElement(cells));
-  scroll.append(frame);
-  panel.append(scroll);
-
-  let result;
-  try {
-    result = highlight(evidence, surface);
-  } catch (error) {
-    if (!(error instanceof OverlayError)) throw error;
-    panel.append(make("p", "overlay-notice", error.message));
-    return { element: panel, result: null, surface };
-  }
-  if (result.status === HIGHLIGHT_STATUS.BOX) frame.append(boxElement(result.box));
-  const notice = highlightNotice(result, { params });
-  if (notice) panel.append(notice);
-  return { element: panel, result, surface };
-}
-
-/** The cells as a table on the fixed pitch `cellsSurface` computes its coordinates in. */
-export function gridElement(cells) {
-  const table = make("table", "doc-grid");
-  const head = make("tr");
-  head.append(make("th", null, ""));
-  for (const column of cells.columns) head.append(make("th", null, column));
-  table.append(head);
-
-  for (const row of cells.rows) {
-    const line = make("tr");
-    line.append(make("th", null, String(row.row)));
-    row.values.forEach((value, index) => {
-      const column = cells.columns[index];
-      const note = cells.cells[`${column}${row.row}`];
-      // A value and the formula behind it are two facts about one cell, and the grid shows
-      // the value with the formula on it rather than one instead of the other — which is the
-      // whole reason a sheet region is served as cells and not as a picture.
-      const cell = make(
-        "td",
-        note && note.formula ? "formula" : null,
-        value === null ? "" : String(value)
-      );
-      if (note && note.formula) cell.setAttribute("title", note.formula);
-      line.append(cell);
-    });
-    table.append(line);
-  }
-  return table;
+/**
+ * The grid, with the anchor's range boxed on it.
+ *
+ * `ref` is omitted rather than sent as null when the caller names none, which asks `/cells` for
+ * the node's own region — its `cells` anchor if it has one, the sheet's measured used range
+ * otherwise, with `ref_source` saying which. That decision is `_cells_bounds`' and this does
+ * not reproduce it.
+ */
+export async function cellsPanel({ client, documentId, ref, evidence }) {
+  const cells = await client.get_document_cells({
+    document_id: documentId,
+    ...(ref === null || ref === undefined ? {} : { ref }),
+  });
+  const figure = gridFigure(cells, evidence);
+  return { element: figure, result: figure.highlight ?? null, surface: figure.surface() };
 }
 
 /**
@@ -565,8 +336,14 @@ export function gridElement(cells) {
  * "this is a .docx", "Document 7 has no stored blob", "retry at 218 dpi or below" — and
  * rewriting one into "could not load" throws away the half that says what to do next.
  */
-export function sourceOffer({ client, documentId, page, dpi, evidence, params }) {
+export function sourceOffer({ client, documentId, page, dpi, evidence, facts, label, params }) {
   const panel = make("div");
+  // `sourceNotice` is `render/surfaces.js`'s ONE wording for "what is on this page is the text
+  // this appliance read out of the document, not a rendered page of it", and step 29's brief
+  // requires the page to say it. It is shown only when this page actually read the `file` row
+  // it is a statement about — a sentence about a row nobody read would be a claim rather than
+  // a reading, and a search hit that handed over its own citation costs no evidence call.
+  if (facts !== null) panel.append(sourceNotice(facts));
   panel.append(anchorSummary(evidence));
 
   const offer = make("button", "tiny", `Render page ${page + 1} of the source anyway`);
@@ -576,7 +353,7 @@ export function sourceOffer({ client, documentId, page, dpi, evidence, params })
     offer.disabled = true;
     into.textContent = "";
     try {
-      const drawn = await pagePanel({ client, documentId, page, dpi, evidence, params });
+      const drawn = await pagePanel({ client, documentId, page, dpi, evidence, label, params });
       into.append(drawn.element);
       return drawn;
     } catch (error) {
@@ -594,23 +371,34 @@ export function sourceOffer({ client, documentId, page, dpi, evidence, params })
 // ------------------------------------------------------------------------------ the page
 
 const USETYPE_SHEET = "sheet";
+const USETYPE_FILE = "file";
+const PDF_MIME = "application/pdf";
 
 /**
  * Which source surface this node has, before anything is fetched.
  *
- * A decision taken from the anchor and the usetype rather than by calling `/image` and reading
- * the refusal, because firing a call that is expected to 409 on every text node is noise in
- * the one log this front end asks to be judged by. Where there is nothing to decide from, the
- * panel is OFFERED and not loaded: the reader asks, the appliance answers, and its refusal —
- * "this is a .docx", "there are no stored bytes" — is written to be read and goes on the page
- * as it arrives.
+ * A decision taken from what this page already knows — the anchor, the usetype, and the media
+ * type the `file` row recorded — rather than by calling `/image` and reading the refusal.
+ * Firing a call that is expected to 409 on every text node is noise in the one log this front
+ * end asks to be judged by, and step 23's second property is that the log is the evidence.
+ *
+ * Where there is nothing to decide from, the panel is OFFERED and not loaded: the reader asks,
+ * the appliance answers, and its refusal — "this is a .docx", "there are no stored bytes" — is
+ * written to be read and goes on the page as it arrives.
+ *
+ * `mime` is why a PDF file node opens showing page 1 rather than a button. It is the one case
+ * where a node with no anchor certainly HAS a picture: `/image` on a `file` node renders page
+ * 0 by that node's own definition (`get_document_image`: "a file node is the whole document").
+ * Absent — the search-hit case, where no evidence was read — it falls to the offer, which is
+ * the honest answer to "I do not know what these bytes are".
  */
-export function plannedSurface({ node, anchor }) {
-  if (anchor && anchor.kind === "cells") return { kind: "cells", ref: null };
-  if (anchor && anchor.kind === "pdf") return { kind: "page", page: anchor.page };
+export function plannedSurface({ node, anchor, mime = null }) {
+  if (anchor && anchor.kind === "cells") return { kind: "cells" };
+  if (anchor && anchor.kind === "pdf") return { kind: "page" };
   if (anchor && anchor.kind === "span") return { kind: "span" };
-  if (node.usetype === USETYPE_SHEET) return { kind: "cells", ref: null };
-  return { kind: "offer", page: 0 };
+  if (node.usetype === USETYPE_SHEET) return { kind: "cells" };
+  if (node.usetype === USETYPE_FILE && mime === PDF_MIME) return { kind: "page" };
+  return { kind: "offer" };
 }
 
 /**
@@ -625,11 +413,17 @@ export function plannedSurface({ node, anchor }) {
 export function anchorSummary(evidence) {
   const { anchor, unresolved, attempted } = evidence;
   if (anchor === null && unresolved !== null) {
+    // The sentence is `render/surfaces.js`'s, reached through the status vocabulary rather
+    // than rewritten here. There is one wording for "no rectangle could be recovered, and here
+    // is the reason the recorder wrote", and a second one in a view is how the two drift.
     return make(
       "p",
       "overlay-notice",
-      `No rectangle could be recovered for this node: ${unresolved.reason} ` +
-        `(code ${unresolved.code}).`
+      highlightNotice({
+        status: HIGHLIGHT_STATUS.UNRESOLVED,
+        code: unresolved.code,
+        reason: unresolved.reason,
+      })
     );
   }
   if (anchor === null) {
@@ -926,9 +720,12 @@ async function component({ client, params }) {
   // is NOT asked for: `get_document` defaults `include_embed=false`, and this page never sets
   // it — 768 floats is about 15 kB of JSON per row and there is nothing on this page that
   // reads a vector.
-  const evidence = broughtACitation(params)
-    ? { anchor, unresolved }
-    : evidenceFromRows(await client.get_document_evidence({ document_id: id }));
+  const read = broughtACitation(params)
+    ? null
+    : await client.get_document_evidence({ document_id: id });
+  const evidence = read === null ? { anchor, unresolved } : evidenceFromRows(read);
+  const facts = read === null ? null : sourceFacts(read);
+  const label = view.title || `document ${view.id}`;
 
   page.append(head(view, node));
   page.append(crumbs(view));
@@ -937,49 +734,61 @@ async function component({ client, params }) {
   const source = section(page, "Source");
   const requested = integerParam(params, "page");
   const dpi = integerParam(params, "dpi") ?? DPI_DEFAULT;
-  const planned = plannedSurface({ node, anchor: evidence.anchor });
-  const shown = requested === null ? planned : { kind: "page", page: requested };
+  const planned = plannedSurface({ node, anchor: evidence.anchor, mime: facts?.mime ?? null });
+  // A page named on the route wins, and it wins even over a `cells` node: a reader who typed
+  // `?page=` asked a question, and answering a different one is the failure this whole panel
+  // is written against. `/image` refuses a worksheet by name and the refusal goes on the page.
+  const shown = requested === null ? planned.kind : "page";
 
   try {
-    if (shown.kind === "page") {
+    if (shown === "page") {
+      // WHICH PAGE is `pageFor`'s decision and not this view's: the route's number, else page
+      // 0 for a file node, else the node's own pdf anchor, else a refusal naming what to do.
+      // The number it returns is then SENT as `?page=`, so the server never takes the same
+      // decision from the other end and the two cannot disagree.
       const drawn = await pagePanel({
         client,
         documentId: id,
-        page: shown.page,
+        page: pageFor(view, evidence, requested),
         dpi,
         evidence,
+        label,
         params,
       });
       source.append(drawn.element);
-    } else if (shown.kind === "cells") {
-      const drawn = await cellsPanel({ client, documentId: id, ref: shown.ref, evidence, params });
+    } else if (shown === "cells") {
+      const drawn = await cellsPanel({ client, documentId: id, ref: null, evidence });
       source.append(drawn.element);
-    } else if (shown.kind === "span") {
-      // The overlay refuses to draw a span on a page and says to highlight the text instead.
-      // The text is right there in `rendered_content`, so the passage itself is shown — which
-      // is the answer to "where did this come from" for a document nothing has paginated.
+    } else if (shown === "span") {
+      // A span IS a valid anchor and it has no geometry — the overlay refuses to draw one on a
+      // page and says to highlight the text instead. The text is right here in
+      // `rendered_content`, so the passage itself is what this panel shows.
       const { char_start: start, char_end: end } = evidence.anchor;
+      if (facts !== null) source.append(sourceNotice(facts));
       source.append(
-        make(
-          "p",
-          "dim",
-          `This node is addressed at characters ${start}–${end} of its source's extracted ` +
-            "markdown, which is a range in text and has no rectangle on any page."
-        )
+        make("p", "dim", `This passage is at ${describeAnchor(evidence.anchor)} of that text.`)
       );
       source.append(make("pre", "render-plain", view.rendered_content.slice(start, end)));
     } else {
       const offered = sourceOffer({
         client,
         documentId: id,
-        page: shown.page,
+        // The offer is for page 1 — the only page a node with no anchor can be offered without
+        // guessing which page it came from, and `pageFor` refuses to guess that for good
+        // reason. The reader asking is what makes it a question rather than an assertion.
+        page: 0,
         dpi,
         evidence,
+        facts,
+        label,
         params,
       });
       source.append(offered.element);
     }
   } catch (error) {
+    // Everything above can refuse, and every refusal is written to be read: an OverlayError
+    // that names the text renderer, a `SurfaceError` that says to name a page, an HTTP error
+    // carrying the appliance's own sentence. They go on the page as they arrived.
     source.append(make("p", "bad", error.message));
   }
 

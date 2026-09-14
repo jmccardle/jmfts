@@ -24,10 +24,9 @@ before the overlay can put a box on it.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
-import shutil
-import subprocess
 import textwrap
 from pathlib import Path
 
@@ -51,134 +50,42 @@ from jmfts_client.contracts.view import (
     ViewTripleRef,
 )
 
+# THE ONE DOM STUB, AND THE ONE EXTENSION OF IT. `tests/test_web_views.py` owns the stub every
+# browser test in this repository runs against; `tests/test_web_renderers.py` adds the two
+# things a page holding BYTES needs — attribute-level serialisation and object URLs — and this
+# view is the other page that holds bytes, so it imports that rather than growing a third
+# answer to "what does a document have".
+from tests.test_web_renderers import _node, _style, png_bytes
+from tests.test_web_views import NODE, STATIC, _find
+
 REPO = Path(__file__).resolve().parents[1]
-STATIC = REPO / "jmfts-web" / "jmfts_web" / "static"
 VIEW = STATIC / "views" / "document.js"
 MANIFEST = STATIC / "shell" / "manifest.js"
 
-NODE = shutil.which("node")
-needs_node = pytest.mark.skipif(NODE is None, reason="no JavaScript runtime on PATH")
-
-#: A US Letter page (612x792 points) rendered at 150 dpi, which is what
-#: ``jmfts_core/rendering.py`` calls ``DPI_DEFAULT``. The numbers are real because the scale
-#: this test asserts on is their ratio.
-PAGE_PIXELS = {"width": 1275, "height": 1650}
+#: US Letter at 150 dpi — `rendering.py`'s own default density, which this view sends
+#: explicitly. 612x792 points becomes 1275x1650 pixels, and that ratio is the scale every box
+#: below is positioned by.
+PAGE_PIXELS = (1275, 1650)
+PAGE_POINTS = (612.0, 792.0)
 PAGE_DPI = 150
 
 #: ``citation_tasks.py``'s shape, in PDF points, on a 0-based page.
 PDF_ANCHOR = {"kind": "pdf", "page": 3, "bbox": [72.0, 118.4, 540.0, 262.9]}
-CELLS_ANCHOR = {"kind": "cells", "sheet": "Q3 Pipeline", "ref": "B4:C5"}
+CELLS_ANCHOR = {"kind": "cells", "sheet": "Q3 Pipeline", "ref": "C5:D6"}
 SPAN_ANCHOR = {"kind": "span", "char_start": 6, "char_end": 11}
-
-DOM_STUB = textwrap.dedent("""
-    export class Element {
-      constructor(tag) {
-        this.tagName = String(tag).toUpperCase();
-        this.childNodes = [];
-        this.attributes = {};
-        this.className = "";
-        this.dataset = {};
-        this.hidden = false;
-        this.href = null;
-        this.value = "";
-        this.disabled = false;
-        this.listeners = {};
-        this._text = "";
-      }
-      append(...nodes) {
-        for (const node of nodes) {
-          if (!(node instanceof Element)) throw new TypeError("append() takes elements");
-          this.childNodes.push(node);
-        }
-      }
-      setAttribute(name, value) { this.attributes[name] = String(value); }
-      getAttribute(name) { return name in this.attributes ? this.attributes[name] : null; }
-      set textContent(value) {
-        this.childNodes = [];
-        this._text = value === null || value === undefined ? "" : String(value);
-      }
-      get textContent() {
-        return this._text + this.childNodes.map((n) => n.textContent).join("");
-      }
-      addEventListener(name, handler) { this.listeners[name] = handler; }
-    }
-
-    /** An <img> that decodes to whatever `globalThis.__pixels` says, or fails on demand. */
-    export class Image extends Element {
-      constructor() { super("img"); this.naturalWidth = 0; this.naturalHeight = 0; }
-      set src(value) {
-        this._src = value;
-        queueMicrotask(() => {
-          if (globalThis.__undecodable) return this.onerror(new Error("undecodable"));
-          this.naturalWidth = globalThis.__pixels.width;
-          this.naturalHeight = globalThis.__pixels.height;
-          this.onload();
-        });
-      }
-      get src() { return this._src; }
-    }
-
-    const head = new Element("head");
-    export const document = { createElement: (tag) => new Element(tag), head };
-
-    export function serialize(element) {
-      return {
-        tag: element.tagName.toLowerCase(),
-        class: element.className || null,
-        text: element.textContent,
-        href: element.href,
-        style: element.getAttribute("style"),
-        title: element.getAttribute("title"),
-        children: element.childNodes.map(serialize),
-      };
-    }
-
-    export function install() {
-      globalThis.__head = head;
-      globalThis.Element = Element;
-      globalThis.Image = Image;
-      globalThis.document = document;
-      globalThis.__pixels = { width: 0, height: 0 };
-      globalThis.__revoked = [];
-      // Added TO the platform's URL rather than replacing it: `new URL(path, import.meta.url)`
-      // is how a view resolves its own stylesheet, and a stub that shadowed the constructor
-      // would be testing against a DOM the browser does not have.
-      globalThis.URL.createObjectURL = () => "blob:the-page";
-      globalThis.URL.revokeObjectURL = (url) => globalThis.__revoked.push(url);
-    }
-    """)
-
-
-def _node(tmp_path: Path, harness: str, **substitutions: str) -> object:
-    """Run one harness module and parse the single JSON document it prints."""
-    (tmp_path / "dom.mjs").write_text(DOM_STUB, encoding="utf-8")
-    source = harness.replace("%(static)s", STATIC.as_uri())
-    for name, value in substitutions.items():
-        source = source.replace(f"%({name})s", value)
-    script = tmp_path / "harness.mjs"
-    script.write_text(source, encoding="utf-8")
-    done = subprocess.run(
-        [NODE, str(script)], capture_output=True, text=True, cwd=tmp_path, timeout=60
-    )
-    assert done.returncode == 0, done.stderr or done.stdout
-    return json.loads(done.stdout)
-
-
-def _find(node: dict, className: str) -> list[dict]:
-    found = [node] if node["class"] == className else []
-    for child in node["children"]:
-        found.extend(_find(child, className))
-    return found
 
 
 def _box(node: dict) -> dict:
-    """The one overlay box in a tree, as four numbers off its inline style."""
+    """The one overlay box in a tree, as four percentages off its inline style.
+
+    PERCENTAGES, and that is what this reads rather than pixels. The picture is
+    ``max-width: 100%`` so a narrow window scales it, and a box in absolute pixels would stay
+    where the unscaled picture used to be — which is what this view drew until ``drawHighlight``
+    took the arithmetic over.
+    """
     boxes = _find(node, "overlay-box")
     assert len(boxes) == 1, f"expected exactly one box, found {len(boxes)}"
-    return {
-        name: float(value)
-        for name, value in re.findall(r"([a-z]+):([-0-9.e]+)px", boxes[0]["style"])
-    }
+    return _style(boxes[0])
 
 
 # ---------------------------------------------------------------------------- the fixtures
@@ -375,7 +282,7 @@ def test_the_view_reads_only_fields_the_contracts_carry():
         )
     # And the check is not vacuous: the two biggest shapes really are read here.
     assert re.search(r"\bview\.presentation\b", code)
-    assert re.search(r"\bcells\.columns\b", code)
+    assert re.search(r"\bview\.rendered_content\b", code)
 
 
 # ------------------------------------------------------- IC-4: the anchor rides on the route
@@ -501,91 +408,87 @@ def test_a_row_that_is_absent_and_a_row_that_is_null_are_different_answers(param
 # ------------------------------------------------------------------- IC-9: the two surfaces
 
 PANEL_HARNESS = textwrap.dedent("""
-    import { install, serialize } from "./dom.mjs";
+    import { install, deep as serialize, installObjectUrls } from "./dom.mjs";
     install();
+    installObjectUrls();
     const view = await import("%(static)s/views/document.js");
-    const { HIGHLIGHT_STATUS } = await import("%(static)s/render/overlay.js");
+    const { CELL } = await import("%(static)s/render/sheet.js");
 
     const ANCHORS = %(anchors)s;
-    globalThis.__pixels = %(pixels)s;
+    const PNG = Uint8Array.from(atob("%(png)s"), (c) => c.charCodeAt(0));
     const calls = [];
     const client = {
       get_document_image: async (args) => {
         calls.push(["image", args]);
-        // A real Blob: the page prints its size and its media type, because JSON.stringify
-        // flattens one to `{}` and "bytes came back" is not something a reader can check.
-        return new Blob([new Uint8Array(4)], { type: "image/png" });
+        return new Blob([PNG], { type: "image/png" });
       },
       get_document_cells: async (args) => { calls.push(["cells", args]); return %(cells)s; },
     };
 
-    const out = { calls: {}, panels: {}, results: {}, notices: {}, refusals: {}, planned: {} };
+    const out = { calls: {}, panels: {}, results: {}, planned: {}, cell: CELL };
 
     const page3 = await view.pagePanel({
-      client, documentId: 7, page: 3, dpi: %(dpi)s,
+      client, documentId: 7, page: 3, dpi: %(dpi)s, label: "The report",
       evidence: { anchor: ANCHORS.pdf, unresolved: null }, params: { id: "7" },
     });
     out.calls.image = [...calls];
     out.panels.page = serialize(page3.element);
     out.results.page = page3.result;
-    out.surface = page3.surface;
-    out.revoked = [...globalThis.__revoked];
+    out.surface = { ...page3.surface, cellRect: undefined };
 
     const page9 = await view.pagePanel({
-      client, documentId: 7, page: 9, dpi: %(dpi)s,
+      client, documentId: 7, page: 9, dpi: %(dpi)s, label: "The report",
       evidence: { anchor: ANCHORS.pdf, unresolved: null }, params: { id: "7" },
     });
     out.panels.elsewhere = serialize(page9.element);
     out.results.elsewhere = page9.result;
 
-    const span = await view.pagePanel({
-      client, documentId: 7, page: 0, dpi: %(dpi)s,
-      evidence: { anchor: ANCHORS.span, unresolved: null }, params: { id: "7" },
+    const continued = await view.pagePanel({
+      client, documentId: 7, page: 4, dpi: %(dpi)s, label: "The report",
+      evidence: { anchor: { ...ANCHORS.pdf, continues: [4] }, unresolved: null },
+      params: { id: "7", anchor: "{}" },
     });
-    out.panels.span = serialize(span.element);
-    out.results.span = span.result;
+    out.panels.continued = serialize(continued.element);
+    out.results.continued = continued.result;
 
     calls.length = 0;
     const grid = await view.cellsPanel({
       client, documentId: 7, ref: null,
-      evidence: { anchor: ANCHORS.cells, unresolved: null }, params: { id: "7" },
+      evidence: { anchor: ANCHORS.cells, unresolved: null },
     });
     out.calls.cells = [...calls];
     out.panels.cells = serialize(grid.element);
     out.results.cells = grid.result;
-    out.cellsSurface = {
-      kind: grid.surface.kind, sheet: grid.surface.sheet,
-      source: grid.surface.source, pixels: grid.surface.pixels,
-      originCorner: grid.surface.originCorner,
-    };
+    out.cellsSurface = { ...grid.surface, cellRect: undefined };
 
-    const surface = view.cellsSurface(%(cells)s);
-    out.rects = { inside: surface.cellRect("B4:C5"), outside: surface.cellRect("AA900") };
-    for (const [label, ref] of [["a sheet prefix", "Q3!B4"], ["absolute", "$B$4"],
-                                ["two colons", "B4:C5:D6"]]) {
-      try { surface.cellRect(ref); out.refusals[label] = null; }
-      catch (error) { out.refusals[label] = [error.name, error.message]; }
-    }
-
-    for (const [label, result] of [
-      ["box", { status: HIGHLIGHT_STATUS.BOX, continues: null }],
-      ["spread", { status: HIGHLIGHT_STATUS.BOX, continues: [4, 5] }],
-      ["continued", { status: HIGHLIGHT_STATUS.CONTINUED, page: 4, from: 3 }],
-      ["elsewhere", { status: HIGHLIGHT_STATUS.ELSEWHERE, page: 3 }],
-      ["otherSheet", { status: HIGHLIGHT_STATUS.ELSEWHERE, sheet: "Q4", showing: "Q3 Pipeline" }],
-      ["none", { status: HIGHLIGHT_STATUS.NONE }],
-      ["unresolved", { status: HIGHLIGHT_STATUS.UNRESOLVED, code: "no_text_layer",
-                       reason: "the page is a scan" }],
-    ]) {
-      const notice = view.highlightNotice(result, { params: { id: "7" }, page: 0 });
-      out.notices[label] = notice === null ? null : serialize(notice);
-    }
+    // A span anchor on a page surface: the overlay refuses and the refusal is the answer.
+    try {
+      await view.pagePanel({
+        client, documentId: 7, page: 0, dpi: %(dpi)s, label: "The report",
+        evidence: { anchor: ANCHORS.span, unresolved: null }, params: { id: "7" },
+      });
+      out.results.span = null;
+    } catch (error) { out.results.span = [error.name, error.message]; }
 
     out.planned.pdf = view.plannedSurface({ node: { usetype: "chunk" }, anchor: ANCHORS.pdf });
     out.planned.cells = view.plannedSurface({ node: { usetype: "chunk" }, anchor: ANCHORS.cells });
     out.planned.span = view.plannedSurface({ node: { usetype: "chunk" }, anchor: ANCHORS.span });
     out.planned.sheet = view.plannedSurface({ node: { usetype: "sheet" }, anchor: null });
     out.planned.text = view.plannedSurface({ node: { usetype: "chunk" }, anchor: null });
+    out.planned.pdfFile = view.plannedSurface({
+      node: { usetype: "file" }, anchor: null, mime: "application/pdf" });
+    out.planned.otherFile = view.plannedSurface({
+      node: { usetype: "file" }, anchor: null, mime: "application/vnd.oasis.opendocument.text" });
+    out.planned.unknownFile = view.plannedSurface({ node: { usetype: "file" }, anchor: null });
+
+    const summary = (evidence) => serialize(view.anchorSummary(evidence));
+    out.summaries = {
+      unresolved: summary({
+        anchor: null, unresolved: { code: "no_text_layer", reason: "the page is a scan" } }),
+      nothingRan: summary({ anchor: null, unresolved: null, attempted: false }),
+      ranAndFound: summary({ anchor: null, unresolved: null, attempted: true }),
+      unknownKind: summary({ anchor: { kind: "waveform" }, unresolved: null }),
+    };
     console.log(JSON.stringify(out));
     """)
 
@@ -598,154 +501,170 @@ def panels(tmp_path_factory):
         tmp_path_factory.mktemp("panels"),
         PANEL_HARNESS,
         anchors=json.dumps({"pdf": PDF_ANCHOR, "cells": CELLS_ANCHOR, "span": SPAN_ANCHOR}),
-        pixels=json.dumps(PAGE_PIXELS),
+        png=base64.b64encode(png_bytes(*PAGE_PIXELS)).decode(),
         dpi=str(PAGE_DPI),
         cells=json.dumps(_cells()),
     )
 
 
 def test_a_rendered_page_declares_the_scale_it_was_rendered_at(panels):
-    """The surface is derived from the bytes, not from a second number about the document.
+    """The surface is derived from the bytes, and this view no longer does the deriving.
 
-    ``rendering.py`` rasterises at ``dpi/72`` of the page's points, so points are pixels × 72 ÷
-    dpi and the scale the overlay divides by is the scale the image was actually produced at —
-    pymupdf's rounding included. Asking the appliance for the media box instead would introduce
-    a second number that can be wrong, and a box drawn at a silently wrong scale is the failure
-    ``_check_bounds`` refuses to clamp for.
+    ``rasterSurface`` takes the pixel extent ``pngSize`` read out of the PNG's own IHDR and the
+    density THIS VIEW ASKED FOR, and the page's size in points is their ratio. Sending ``dpi``
+    rather than letting the server default it is what makes that ratio knowable: a client that
+    omitted it would keep drawing boxes after the default moved, each one off by the ratio, and
+    nothing on the page would say so.
+
+    The extent comes from the header rather than from ``naturalWidth`` after a load event,
+    which is the half this lane got wrong and deleted: it is available the moment the bytes
+    arrive, and it is the same number in a browser and in a test with no layout at all.
     """
     assert panels["calls"]["image"] == [["image", {"document_id": 7, "page": 3, "dpi": PAGE_DPI}]]
-    assert panels["surface"]["pixels"] == PAGE_PIXELS
-    assert panels["surface"]["source"] == pytest.approx({"width": 612.0, "height": 792.0})
-    # No default: pymupdf's page space is top-left with y downward, and the overlay refuses a
-    # surface that does not say which corner it means.
+    assert panels["surface"]["pixels"] == {"width": PAGE_PIXELS[0], "height": PAGE_PIXELS[1]}
+    assert panels["surface"]["source"] == pytest.approx(
+        {"width": PAGE_POINTS[0], "height": PAGE_POINTS[1]}
+    )
+    # Declared by the factory, never passed: a page rendered by pymupdf is top-left with y
+    # downward, and a caller that could pass a corner is a coin flip on every box.
     assert panels["surface"]["originCorner"] == "top-left"
     assert panels["surface"]["page"] == 3
-    # The object URL lives exactly as long as the decode. Fifty pages is otherwise fifty blobs.
-    assert panels["revoked"] == ["blob:the-page"]
-
-    # WHAT CAME BACK, PRINTED AS BYTES. A binary response has no shape a page can render —
-    # `JSON.stringify` flattens a Blob to `{}` — so the caption names its size, its media type,
-    # and the density that produced the pixels the box was scaled against.
-    caption = _find(panels["panels"]["page"], "dim doc-caption")[0]
-    assert caption["text"] == "page 4 — 4 bytes of image/png, 1275×1650 px at 150 dpi"
 
 
 def test_a_pdf_anchor_is_boxed_on_the_page_it_names(panels):
-    """The beeline's last inch, and the geometry that makes it land.
+    """The beeline's last inch: the rectangle the answer came from, on the page it is on.
 
-    612x792 points at 150 dpi is 1275x1650 pixels, so the scale is 25/12. The anchor's
-    rectangle in points times that scale is the box, and it is positioned inside the same
-    ``.overlay-surface`` the image is in — which is what ``shell.css`` styles for IC-9.
+    The box is positioned as a FRACTION of the surface — 72 of 612 points is 11.7647% — so it
+    survives the scaling a narrow window does to a ``max-width: 100%`` picture. That is
+    ``drawHighlight``'s arithmetic and not this view's; what this view did with the same
+    rectangle was absolute pixels, which is a box that slides off the picture on a phone.
     """
     assert panels["results"]["page"]["status"] == "box"
     assert panels["results"]["page"]["continues"] is None
     assert _box(panels["panels"]["page"]) == pytest.approx(
-        {"left": 150.0, "top": 246.667, "width": 975.0, "height": 301.042}, rel=1e-4
+        {"left": 11.7647, "top": 14.9495, "width": 76.4706, "height": 18.2449}, abs=1e-4
     )
     frame = _find(panels["panels"]["page"], "overlay-surface")[0]
     assert [child["tag"] for child in frame["children"]] == ["img", "div"]
+    assert (
+        "Page 4, rendered at 150 dpi." in panels["panels"]["page"]["text"]
+    ), "pages are labelled 1-based for a reader and 0-based on the wire"
 
 
 def test_a_box_is_never_drawn_on_a_page_the_passage_is_not_on(panels):
     """Confidently wrong is worse than absent, and indistinguishable from right.
 
-    Page 9 of a passage anchored on page 3 gets no rectangle and a sentence naming the page
-    that has one — with a link to it, because the reader's next move is obvious and making them
-    edit the fragment by hand would be the other kind of defect.
+    Page 9 of a passage anchored on page 3 gets no rectangle, the sentence naming the page that
+    has one, and — this view's half — a LINK to it. The sentence is ``highlightNotice``'s, in
+    ``render/surfaces.js``, because there is one wording for each outcome; the link is here,
+    because ``render/`` knows nothing about this front end's routing and should not.
+
+    The same holds for a page the passage merely runs onto: ``continues`` covers only the page
+    the passage BEGINS on, so page 4 of a 3-to-4 passage is "continued" and the link points
+    back at page 4 — one-based — of the page the rectangle is on.
     """
     assert panels["results"]["elsewhere"] == {"status": "elsewhere", "page": 3}
     assert not _find(panels["panels"]["elsewhere"], "overlay-box")
-    notice = _find(panels["panels"]["elsewhere"], "overlay-notice")[0]
-    assert (
-        "page 4" in notice["text"]
-    ), "pages are labelled 1-based for a reader, 0-based on the wire"
-    assert "#/document?id=7&page=3" in json.dumps(panels["panels"]["elsewhere"])
+    assert "This passage is on page 4." in panels["panels"]["elsewhere"]["text"]
+    jump = _find(panels["panels"]["elsewhere"], "doc-jump")[0]
+    assert jump["text"] == "Show page 4"
+    assert jump["attrs"]["href"] == "#/document?id=7&page=3"
+
+    assert panels["results"]["continued"]["status"] == "continued"
+    continued = _find(panels["panels"]["continued"], "doc-jump")[0]
+    assert continued["text"] == "Show page 4"
+    # The rest of the route rides along, so a hit's anchor is not lost by following the link.
+    assert continued["attrs"]["href"] == "#/document?id=7&anchor=%7B%7D&page=3"
 
 
 def test_a_span_anchor_says_where_it_can_be_drawn_instead_of_failing_silently(panels):
     """A span IS a valid anchor; what it has no geometry for is a page.
 
-    The overlay refuses and its message points at the text renderer. The panel shows that
-    message rather than rewriting it, because the sentence already says what to do next.
+    The overlay refuses and its message points at the text renderer. This view lets that reach
+    the page rather than rewriting it, because the sentence already says what to do next — and
+    the panel a span-anchored node gets by default is the passage itself, not a page at all.
     """
-    assert panels["results"]["span"] is None
-    notice = _find(panels["panels"]["span"], "overlay-notice")[0]
-    assert "anchor.py" in notice["text"]
-    assert not _find(panels["panels"]["span"], "overlay-box")
+    name, message = panels["results"]["span"]
+    assert name == "OverlayError"
+    assert "anchor.py" in message
 
 
-def test_a_spreadsheet_region_is_a_grid_of_cells_with_the_range_boxed_on_it(panels):
-    """Step 22's decision, drawn: cells, not a picture of cells.
+def test_the_box_on_a_grid_lands_on_the_cell_the_ref_names(panels):
+    """THE GUTTER OFFSET, pinned against the markup rather than against the arithmetic.
 
-    ``B4:C5`` on a grid whose first column is A and whose first row is 3 lands one column in
-    and one row down — plus one unit on each axis for the column-letter header and the
-    row-number gutter, which is why ``cellsSurface`` counts them as the first unit rather than
-    leaving the box to float over the wrong cells.
+    This is the one thing that had to be tested before this view's own ``cellsSurface`` could be
+    deleted. Two internally consistent conventions can disagree by one cell: the grid draws a
+    row-number gutter and a column-letter header, and whether those count as the first unit of
+    the coordinate space is a decision both the surface and ``cellRect`` have to take the same
+    way. ``render/sheet.js`` takes it in two places — ``columns + 1``/``shown + 1`` in
+    ``surface()``, and ``+1``/``+2`` in ``rectFor`` — and this asserts they agree with the
+    TABLE, which is the thing a reader actually looks at.
+
+    The check is deliberately not "the percentages are these numbers", which would be a second
+    copy of the same arithmetic. It converts the box back into cell indices and then reads the
+    cell at those indices out of the rendered grid: the box must sit on the cells holding
+    ``Won`` and ``kim``, which is what ``C5:D6`` names in this fixture, and not on their
+    neighbours.
     """
-    assert panels["calls"]["cells"] == [["cells", {"document_id": 7, "ref": None}]]
-    assert panels["cellsSurface"]["source"] == {"width": 5, "height": 5}
-    assert panels["cellsSurface"]["pixels"] == {"width": 5 * 104, "height": 5 * 24}
+    surface = panels["cellsSurface"]
+    cell = panels["cell"]
+    box = _box(panels["panels"]["cells"])
+
+    # Percentages back to cell indices, using the surface's own extent.
+    columns = surface["source"]["width"]
+    rows = surface["source"]["height"]
+    left = round(box["left"] / 100 * columns)
+    top = round(box["top"] / 100 * rows)
+    width = round(box["width"] / 100 * columns)
+    height = round(box["height"] / 100 * rows)
+    assert (width, height) == (2, 2), "C5:D6 is two cells by two cells"
+
+    # The grid as drawn: row 0 is the column letters, column 0 is the row-number gutter.
+    grid = _find(panels["panels"]["cells"], "render-sheet-grid")[0]
+    corner = grid["children"][top]["children"][left]
+    far = grid["children"][top + height - 1]["children"][left + width - 1]
+    # C5 is the third column of the row numbered 5 — `4000` — and D6 is `sam`. Written out
+    # like this because the first draft of this test asserted the cells one row and one column
+    # up, which is exactly the off-by-one-cell it was written to catch: reading the answer off
+    # the fixture by hand is the check, and the grid disagreed with the hand.
+    assert corner["text"] == "4000", f"the box starts on {corner['text']!r}, not on C5"
+    assert far["text"] == "sam", f"the box ends on {far['text']!r}, not on D6"
+
+    # And the pitch the surface measures in is the pitch the markup declares, which is what
+    # lets a box be placed without measuring a layout.
+    assert surface["pixels"] == {"width": columns * cell["width"], "height": rows * cell["height"]}
     assert panels["results"]["cells"]["status"] == "box"
 
-    # One column in, one row down, two cells wide and two tall, on the declared pitch.
-    assert _box(panels["panels"]["cells"]) == pytest.approx(
-        {"left": 2 * 104.0, "top": 2 * 24.0, "width": 2 * 104.0, "height": 2 * 24.0}
+
+def test_a_spreadsheet_region_is_asked_for_once_and_as_cells(panels):
+    """Step 22's decision, and the call that carries it.
+
+    ``ref`` is omitted rather than sent as null, which asks ``/cells`` for the node's own region
+    — its ``cells`` anchor if it has one, the measured used range otherwise, with ``ref_source``
+    saying which. One call, and the grid is drawn from what it answered.
+    """
+    assert panels["calls"]["cells"] == [["cells", {"document_id": 7}]]
+    assert "Q3 Pipeline" in panels["panels"]["cells"]["text"]
+    assert "measured this sheet to hold" in panels["panels"]["cells"]["text"]
+
+
+def test_the_three_ways_a_passage_can_have_no_rectangle_read_differently(panels):
+    """The distinction this view keeps that ``anchorPair`` deliberately drops.
+
+    For DRAWING, an absent ``source_anchor`` row and one written with a null value are the same
+    fact and ``anchorPair`` collapses them. For SAYING they are not: "nothing has tried to place
+    this node" is a reason to come back later and "an atom ran and placed nothing" is a finished
+    answer. ``source_anchor.unresolved`` is the third, and its sentence is
+    ``highlightNotice``'s rather than a second wording written here.
+    """
+    assert "the page is a scan" in panels["summaries"]["unresolved"]["text"]
+    assert "no_text_layer" in panels["summaries"]["unresolved"]["text"]
+    assert "nothing has tried to place this node" in panels["summaries"]["nothingRan"]["text"]
+    assert (
+        panels["summaries"]["ranAndFound"]["text"] == "This node carries no anchor into its source."
     )
-
-    # The values are values, and the formula behind one of them is on it rather than instead
-    # of it — which is what a raster of the same region could not do.
-    grid = _find(panels["panels"]["cells"], "doc-grid")[0]
-    assert [cell["text"] for cell in grid["children"][0]["children"]] == ["", "A", "B", "C", "D"]
-    assert [cell["text"] for cell in grid["children"][2]["children"]] == [
-        "4",
-        "Acme",
-        "Won",
-        "12000",
-        "kim",
-    ]
-    formula = _find(grid, "formula")[0]
-    assert formula["title"] == "=B4*1.2"
-    # A blank cell is blank, and it is not the word "null".
-    assert grid["children"][3]["children"][4]["text"] == ""
-    assert "addressed by used_range" in panels["panels"]["cells"]["text"]
-
-
-def test_the_grid_looks_a_reference_up_and_refuses_to_invent_a_grammar(panels):
-    """IC-9 delegates A1 to the surface, and the surface delegates the grammar to the server.
-
-    ``CellsAnchor``'s docstring refuses a second A1 parser in the client and a third in
-    JavaScript would be worse again, so this resolves a reference against the columns and rows
-    the appliance said it rendered: ``B`` is an index into ``cells.columns`` and ``4`` an index
-    into ``cells.rows``. Anything that is not a plain COLUMNROW pair — a sheet prefix, an
-    absolute reference, a second colon — refuses rather than being guessed at, and a range that
-    is simply outside the rendered region is null, which the overlay reads as "elsewhere".
-    """
-    assert panels["rects"]["inside"] == [2, 2, 4, 4]
-    assert panels["rects"]["outside"] is None
-    for label in ("a sheet prefix", "absolute", "two colons"):
-        name, message = panels["refusals"][label]
-        assert name == "CellRefError", label
-    assert "office/cells.py" in panels["refusals"]["absolute"][1]
-
-
-def test_every_overlay_status_reaches_the_page_as_its_own_sentence(panels):
-    """The requirement, rather than a flourish.
-
-    A viewer that drew a box for one status and nothing for the other four would be the surface
-    that hides ``source_anchor.unresolved`` — the failure IC-9 is shaped around. A plain box
-    that continues nowhere is the one case with no sentence, because there the rectangle IS the
-    statement.
-    """
-    notices = panels["notices"]
-    assert notices["box"] is None
-    assert "continues on page 5, page 6" in notices["spread"]["text"]
-    assert "page 4" in notices["continued"]["text"] and "page 5" in notices["continued"]["text"]
-    assert "#/document?id=7&page=3" in json.dumps(notices["continued"])
-    assert "page 4" in notices["elsewhere"]["text"]
-    assert "Q4" in notices["otherSheet"]["text"]
-    assert "nothing has tried to place it" in notices["none"]["text"]
-    assert "the page is a scan" in notices["unresolved"]["text"]
-    assert "no_text_layer" in notices["unresolved"]["text"]
+    assert "waveform" in panels["summaries"]["unknownKind"]["text"]
+    assert "older than the appliance" in panels["summaries"]["unknownKind"]["text"]
 
 
 def test_the_surface_is_chosen_before_anything_is_fetched(panels):
@@ -753,26 +672,35 @@ def test_the_surface_is_chosen_before_anything_is_fetched(panels):
 
     Step 23's second property is that a view showing something the log has no call for computed
     it in the browser. A page that probed ``/image`` on every node to find out whether there was
-    a picture would fill that log with expected refusals, so the surface is decided from the
-    anchor and the usetype, and where there is nothing to decide from the panel is OFFERED.
+    a picture would fill that log with expected refusals, so the surface is decided from what
+    the page already knows, and where it knows nothing the panel is OFFERED.
+
+    ``mime`` is the one that earns its place: a ``file`` node whose bytes are a PDF certainly
+    has a picture — ``/image`` renders page 0 of it by that node's own definition — so it opens
+    showing page 1 instead of a button. A ``file`` node that is a ``.odt`` does not, and one
+    whose type was never read is not guessed at.
     """
-    assert panels["planned"]["pdf"] == {"kind": "page", "page": 3}
-    assert panels["planned"]["cells"] == {"kind": "cells", "ref": None}
+    assert panels["planned"]["pdf"] == {"kind": "page"}
+    assert panels["planned"]["cells"] == {"kind": "cells"}
     assert panels["planned"]["span"] == {"kind": "span"}
-    assert panels["planned"]["sheet"] == {"kind": "cells", "ref": None}
-    assert panels["planned"]["text"] == {"kind": "offer", "page": 0}
+    assert panels["planned"]["sheet"] == {"kind": "cells"}
+    assert panels["planned"]["text"] == {"kind": "offer"}
+    assert panels["planned"]["pdfFile"] == {"kind": "page"}
+    assert panels["planned"]["otherFile"] == {"kind": "offer"}
+    assert panels["planned"]["unknownFile"] == {"kind": "offer"}
 
 
 # ------------------------------------------------------------------------------- the page
 
 PAGE_HARNESS = textwrap.dedent("""
-    import { install, serialize } from "./dom.mjs";
+    import { install, deep as serialize, installObjectUrls, document as dom } from "./dom.mjs";
     install();
+    installObjectUrls();
     const module = await import("%(static)s/views/document.js");
     const { views } = await import("%(static)s/shell/registry.js");
 
     const fixtures = %(fixtures)s;
-    globalThis.__pixels = %(pixels)s;
+    const PNG = Uint8Array.from(atob("%(png)s"), (c) => c.charCodeAt(0));
     const registration = views().find((v) => v.id === "document");
 
     const record = () => {
@@ -787,9 +715,10 @@ PAGE_HARNESS = textwrap.dedent("""
           return { document_id: 7, evidence: { source_anchor: null } };
         },
         get_document_image: async (a) => {
-        calls.push(["image", a]);
-        return new Blob([new Uint8Array(4)], { type: "image/png" });
-      },
+          calls.push(["image", a]);
+          return new Blob([PNG], { type: "image/png" });
+        },
+        get_document_cells: async (a) => { calls.push(["cells", a]); return fixtures.cells; },
         expand_children: async (a) => { calls.push(["expand", a]); return fixtures.more; },
         create_link: async (a) => { calls.push(["link", a]); return fixtures.created; },
       };
@@ -865,8 +794,16 @@ PAGE_HARNESS = textwrap.dedent("""
     out.children = serialize(stubs.element);
     out.calls.paging = paging.calls;
 
-    // Six mounts above, and one stylesheet — appended to <head> by the view's own module.
-    out.styles = globalThis.__head.childNodes.map((n) => [n.rel, n.href]);
+    // A SHEET NODE, which is the case the double-`/cells` defect was found on.
+    const sheet = record();
+    sheet.view_document = async (a) => { sheet.calls.push(["view", a]); return fixtures.sheetView; };
+    sheet.get_document = async (a) => { sheet.calls.push(["document", a]); return fixtures.sheetNode; };
+    out.sheet = serialize(await registration.component(
+      { client: sheet, params: { id: "9" }, navigate: () => {} }));
+    out.calls.sheet = sheet.calls;
+
+    // Seven mounts above, and one stylesheet — appended to <head> by the view's own module.
+    out.styles = dom.head.childNodes.map((n) => [n.rel, n.href]);
     console.log(JSON.stringify(out));
     """)
 
@@ -893,12 +830,15 @@ def page(tmp_path_factory):
                 renderer="plain", child_handling="hidden", link_handling="footnotes"
             ),
         ),
+        "cells": _cells(),
+        "sheetView": _view(id=9, title="Q3 Pipeline", usetype="sheet", children_stubs=[]),
+        "sheetNode": _document(id=9, usetype="sheet", produced_by="extract:sheet"),
     }
     return _node(
         tmp_path_factory.mktemp("page"),
         PAGE_HARNESS,
         fixtures=json.dumps(fixtures),
-        pixels=json.dumps(PAGE_PIXELS),
+        png=base64.b64encode(png_bytes(*PAGE_PIXELS)).decode(),
         anchor=json.dumps(PDF_ANCHOR),
     )
 
@@ -945,7 +885,8 @@ def test_a_hit_that_brought_its_anchor_is_not_asked_to_bring_it_twice(page):
     assert ["image", {"document_id": 7, "page": 3, "dpi": 150}] in [
         [name, args] for name, args in page["calls"]["anchored"]
     ]
-    assert _box(page["anchored"])["left"] == pytest.approx(150.0)
+    # 72 of 612 points, as a fraction of the surface rather than in pixels.
+    assert _box(page["anchored"])["left"] == pytest.approx(11.7647, abs=1e-4)
 
 
 def test_a_node_with_no_anchor_is_offered_a_picture_rather_than_refused_one(page):
@@ -1035,6 +976,34 @@ def test_more_children_comes_from_the_offset_the_view_surface_has(page):
     assert "which is all of them" in page["children"]["text"]
 
 
+def test_a_sheet_node_asks_for_its_cells_once(page):
+    """The defect this lane found from the other side, checked the way it was found.
+
+    For one day the tuple carried a ``sheet-region`` RENDERER and migration 023 pointed usetype
+    ``sheet`` at it, so a sheet node drew a grid in the content panel and a second grid in this
+    view's source panel — two identical tables and two ``/cells`` calls for one node. Lane 29
+    reversed that (``2eec3ce``), and what this asserts is the reversal from this end: the call
+    list for a sheet mount carries exactly one ``cells`` entry, and the grid on the page is the
+    one this view drew.
+
+    Kept rather than deleted with the defect. A content renderer that fetched was tried once
+    and could be tried again; the property that matters — a view asks for a thing once — is
+    cheap to hold and expensive to notice the loss of.
+    """
+    calls = [name for name, _ in page["calls"]["sheet"]]
+    assert calls.count("cells") == 1, page["calls"]["sheet"]
+    assert page["calls"]["sheet"] == [
+        ["view", {"document_id": 9}],
+        ["document", {"document_id": 9}],
+        ["back", {"document_id": 9, "limit": 20}],
+        ["evidence", {"document_id": 9}],
+        ["cells", {"document_id": 9}],
+    ]
+    grids = _find(page["sheet"], "render-sheet-grid")
+    assert len(grids) == 1, "one node, one grid"
+    assert "Q3 Pipeline" in page["sheet"]["text"]
+
+
 def test_the_stylesheet_comes_from_the_view_and_is_linked_once(page):
     """``shell/shell.css:4``'s rule, and the timing note that goes with it.
 
@@ -1049,24 +1018,6 @@ def test_the_stylesheet_comes_from_the_view_and_is_linked_once(page):
     assert rel == "stylesheet"
     assert href.endswith("/views/document.css")
     assert href.startswith("file:"), "resolved against the module's own URL, not a host"
-
-
-def test_the_grid_pitch_in_the_stylesheet_is_the_one_the_surface_computes_in():
-    """Two files, one number, and a test rather than a request to remember.
-
-    ``cellsSurface()`` computes the overlay's pixel extent as (columns + 1) × ``CELL_W`` by
-    (rows + 1) × ``CELL_H``, so the box lands on the right cells only while the stylesheet lays
-    them out on exactly that pitch. CSS cannot import a JavaScript constant, so the agreement
-    is asserted here: change one and this goes red rather than the boxes going crooked.
-    """
-    js = VIEW.read_text(encoding="utf-8")
-    css = (STATIC / "views" / "document.css").read_text(encoding="utf-8")
-    width = int(re.search(r"export const CELL_W = (\d+);", js).group(1))
-    height = int(re.search(r"export const CELL_H = (\d+);", js).group(1))
-    grid = css[css.index(".view-document .doc-grid td,") :]
-    assert f"width: {width}px;" in grid, f"document.css does not lay cells out {width}px wide"
-    assert f"height: {height}px;" in grid
-    assert f"max-width: {width}px;" in grid
 
 
 def test_no_id_is_a_landing_and_an_unreadable_id_is_a_refusal(page):
