@@ -433,9 +433,20 @@ export async function regionFigure({ blob, dpi, anchor, label }) {
  * the failure this step is written to avoid" — and the requirement is about the PAGE saying
  * so, not about which function says it.
  *
- * `rendition` is read from a named row rather than inferred from a failed call: pass
- * `Object.prototype.hasOwnProperty.call(file, "rendition_ref")` — `OFFICE_SPEC.md` Part 6
- * names that key — so that both answers are sentences and neither is a caught exception.
+ * `rendition` is read from a named row rather than inferred from a failed call, so that both
+ * answers are sentences and neither is a caught exception. Pass whether the `rendition`
+ * evidence row is present on the file node — `GET /documents/{id}/evidence`, the name spelled
+ * once at `RenditionRepository.EVIDENCE_NAME`.
+ *
+ * NOT `file.rendition_ref`, which is what `OFFICE_SPEC.md` Part 6 names and what this comment
+ * said until step 32 landed. Two reasons, and the first is a contradiction inside the
+ * specifications rather than a preference: `INGEST_SPEC.md` 3.3 says of that block "`file` is
+ * what we received. It never changes after upload", so a task writing `rendition_ref` into it
+ * edits the record of the upload to describe a derivation of the upload. The second is that a
+ * ref is a large-object OID — an address, carrying neither `page_count` nor the per-page
+ * geometry a box has to be scaled against. The `rendition` row carries both, and
+ * `RenditionRepository.delete` retracts it in the same transaction as the bytes, so eviction
+ * cannot leave this sentence claiming a page that is gone. Part 6 is the document to correct.
  */
 export function sourceNotice({ rendition, filename, mime }) {
   const note = el("p", "render-notice");
@@ -444,9 +455,10 @@ export function sourceNotice({ rendition, filename, mime }) {
       "yet — serving a citation image off a rendition is docs/SPRINT_0_6_0.md Block G step " +
       "33. What follows is the markdown `extract:text` read out of the source."
     : "This is the markdown this appliance read out of the document, NOT a rendered page of " +
-      "it. There is no rendered page: `file.rendition_ref` is not on this node, and nothing " +
-      "in this appliance writes one — `render:pdf` is Block G step 32. What is below is what " +
-      "was chunked, embedded and indexed, which is what a search hit hits.";
+      "it. There is no rendered page: this node carries no `rendition` row. Either " +
+      "`render:pdf` has not run on it, or this appliance has no converter configured — " +
+      "JMFTS_CONVERT_URL. What is below is what was chunked, embedded and indexed, which " +
+      "is what a search hit hits.";
   const described = [filename, mime].filter(Boolean).join(", ");
   if (!described) return note;
   const holder = el("div", "render-source-notice");
