@@ -226,10 +226,17 @@ class TestExplainAgreesWithThePlanner:
 
     def test_a_plan_reports_only_its_own_scope(self):
         """A scope's plan is a batch for one node. The sheet tier decided in the file
-        node's batch would be work enqueued onto a node that cannot hold it."""
+        node's batch would be work enqueued onto a node that cannot hold it.
+
+        `render:pdf` is in the expected set from `SPRINT_0_6_0.md` Block G step 32, and it
+        belongs there for the reason this test is about: it is scoped to the FILE node —
+        LibreOffice paginates the workbook, not a worksheet — so a root plan that omitted it
+        would be as wrong as one that included `profile:sheet`. Its condition for `xlsx` is
+        `has_sheets`, the same pattern `structure:sheets` reads.
+        """
         patterns = {"has_sheets": True, "sheet_count": 3}
         root = plan_after_probe("xlsx", patterns)
-        assert {spec.task_type for spec in root.eligible} == {"structure:sheets"}
+        assert {spec.task_type for spec in root.eligible} == {"structure:sheets", "render:pdf"}
         assert "profile:sheet" not in root.not_applicable
 
     @pytest.mark.parametrize("fmt,patterns", AGREEMENT_GRID)

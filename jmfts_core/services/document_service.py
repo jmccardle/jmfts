@@ -90,7 +90,6 @@ from jmfts_core.office.cells import (
 from jmfts_core.registry import expose, register_service
 from jmfts_core.rendering import (
     DPI_DEFAULT,
-    PDF_MEDIA_TYPE,
     PNG_MEDIA_TYPE,
     RenderTooLarge,
     UnreadablePdf,
@@ -99,6 +98,7 @@ from jmfts_core.rendering import (
 )
 from jmfts_core.repositories.blob import BlobRepository
 from jmfts_core.repositories.evidence import EvidenceRepository
+from jmfts_core.repositories.rendition import NoRenditionError, pdf_for
 from jmfts_core.repositories.search import SearchRepository
 from jmfts_core.repositories.document import (
     DocumentRepository,
@@ -1525,25 +1525,32 @@ class DocumentService:
                 "was unlinked, is a real state of this tree"
             )
 
-        # `detected_mime` and NOT the blob row's served `mime_type`, and the difference is
-        # the one `ingest_service.py:773` states: the bytes are evidence and the header is a
-        # claim. A real PDF always detects by its magic bytes (`probe.py:59`), so absent or
-        # different here is evidence that these are not one — and believing a declaration
-        # instead would hand `pymupdf` a `.docx` and turn a clear refusal into a parse error.
-        found = EvidenceRepository(self.session).read(file_node.id, "file") or {}
-        detected = found.get("detected_mime")
-        if detected != PDF_MEDIA_TYPE:
-            raise NotAPdfSource(
-                f"Document {file_node.id} is {detected or 'bytes nothing recognised'} "
-                f"(declared {found.get('declared_mime') or 'nothing'}), not "
-                f"{PDF_MEDIA_TYPE}. Rendering an office format goes through a rendition, "
-                "which is OFFICE_SPEC.md Part 11 step 7 and has no code here yet"
-            )
-
+        # ONE QUESTION, ASKED SOMEWHERE ELSE: `repositories.rendition.pdf_for` decides which
+        # bytes a page is drawn from — this node's own, when `file.detected_mime` says PDF,
+        # or its stored rendition when `render:pdf` has made one. Until Block G step 32 this
+        # method answered the first half itself and refused everything else with "rendering
+        # an office format goes through a rendition, which is OFFICE_SPEC.md Part 11 step 7
+        # and has no code here yet". It has code now, and the decision moved rather than
+        # being copied: step 33's `citation` recovery has to resolve the same bytes, and two
+        # readers with two answers to "is this a PDF" is a rectangle drawn on one document
+        # and measured against another.
+        #
+        # `detected_mime` and NOT the blob row's served `mime_type` is still the rule, and it
+        # is `pdf_for`'s docstring that carries it now: the bytes are evidence and the header
+        # is a claim (`ingest_service.py:773`).
+        #
         # `read_bytes` raises `BlobLeakError` when the row is there and the large object is
         # not. That is left UNMAPPED and reaches a 500 on purpose: the row asserts the bytes
         # exist, so its being wrong is a corruption report and not a state to describe.
-        return blobs.read_bytes(file_node.id)
+        try:
+            return pdf_for(self.session, file_node).data
+        except NoRenditionError as exc:
+            # Mapped to the status this verb already had for "these are not PDF bytes",
+            # because that is what the caller can act on and the distinction between "not a
+            # PDF" and "not a PDF YET" is in the message rather than in the code. The message
+            # names `render:pdf`, so a caller who uploaded a `.docx` a second ago is told to
+            # wait for a task rather than that their file is the wrong kind.
+            raise NotAPdfSource(str(exc)) from exc
 
     def _pdf_anchor(self, document_id: int) -> PdfAnchor:
         """This node's own ``source_anchor``, as a page and a rectangle — or why it is not one.

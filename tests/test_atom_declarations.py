@@ -181,7 +181,7 @@ class TestRegistryAndDeclarations:
         # second path would be the one that skips the declaration.
         assert set(TASK_HANDLERS) == set(ATOMS)
 
-    def test_twenty_one_atoms_ship(self):
+    def test_twenty_three_atoms_ship(self):
         # SPRINT_JOBS.md Part 2 counted twelve, and an earlier draft said "about fifteen".
         # The number is pinned so that adding a handler is a decision about the design
         # rather than a line that slips in — which is what it was: the thirteenth is
@@ -214,7 +214,22 @@ class TestRegistryAndDeclarations:
         #   before this sprint in everything but name: `IngestRollupPlanner` enqueued it at
         #   settle time and `commit 232cf4f` gave the summary its own node. Registering it
         #   is what makes `EXPLAIN` able to see it.
-        assert len(ATOMS) == 21
+        #
+        # TWENTY-TWO AND TWENTY-THREE ARRIVED 2026-09-14 with 0.6.0 Block G step 32, and
+        # they are the first two atoms whose work is not done by this process at all:
+        # `render:pdf` and `convert:ooxml` hand bytes to a LibreOffice and store what comes
+        # back (`OFFICE_SPEC.md` Parts 1 and 6). Two and not one, and the split is the same
+        # kind of decision as `validate:shape` against `derive:rule`: they consume the same
+        # evidence and produce different artefacts for different readers — a PDF nothing but
+        # a page image wants, and an OOXML package nothing but a tier-2 reader wants — so one
+        # atom would have had two products, two conditions and one retry budget.
+        #
+        # Both declare `cpu`, which is the cost class being honest rather than cheap:
+        # `COST_CLASSES` names what THIS process spends, and this process spends an XML-RPC
+        # call. What the conversion costs is a property of the pool behind
+        # `JMFTS_CONVERT_URL`, which no cost class in this vocabulary can say — the same gap
+        # `ROADMAP.md` gap 10 describes for the queue's one integer priority.
+        assert len(ATOMS) == 23
 
     def test_every_evidence_name_is_written_by_something(self):
         # An atom waiting on evidence nothing produces would never be schedulable, and the

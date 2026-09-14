@@ -166,6 +166,27 @@ TASK_EXTRACT_SHEET = "extract:sheet"
 #: two spellings together.
 TASK_CITATION = "citation"
 
+#: ``OFFICE_SPEC.md`` Part 6 and Part 1 — the two tasks that drive LibreOffice, and the only
+#: two things in this appliance that need tier 3. :mod:`jmfts_core.render_tasks` is the
+#: handler module and :mod:`jmfts_core.convert` is the seam.
+#:
+#: ``render:pdf`` paginates a document into a stored PDF, because an office format has no
+#: pages until something does. That is what makes Part 1's simplification true: after it,
+#: every renderable document in the system is a PDF, so serving a citation image is
+#: ``pymupdf`` over stored bytes and NO node on the query path needs LibreOffice.
+#:
+#: ``convert:ooxml`` re-expresses a legacy ``.doc``/``.xls``/``.ppt`` as the OOXML package of
+#: the same application, so the tier-2 readers can open it. Nothing consumes that package
+#: yet, and ``render_tasks``'s module docstring names the one concept that is missing before
+#: anything can.
+#:
+#: ``render:pdf`` also appears in
+#: :data:`~jmfts_core.models.task_queue.ADVISORY_TASK_TYPES`, which cannot import this module,
+#: and ``tests/test_render_tasks.py`` pins the two spellings together — as
+#: ``tests/test_citation_task.py`` does for :data:`TASK_CITATION`.
+TASK_RENDER_PDF = "render:pdf"
+TASK_CONVERT_OOXML = "convert:ooxml"
+
 #: ``INGEST_SPEC.md`` 11.5 — put this file's subtree into every BM25 index whose root is
 #: the file node or one of its ancestors. The last row of 11.1's parity table, and the one
 #: that ``SPRINT_JOBS.md`` 15.4 S5 could not leave open: ``POST /ingest`` used to index its
@@ -444,6 +465,7 @@ HAS_IMAGES = "has_images"
 IS_SCANNED = "is_scanned"
 IS_CONVERSATION = "is_conversation"
 IS_DAMAGED = "is_damaged"
+IS_LEGACY_BINARY = "is_legacy_binary"
 CHAR_COUNT = "char_count"
 PAGES_WITH_TABLES = "pages_with_tables"
 
@@ -480,6 +502,10 @@ GUARDABLE_PATTERNS: dict[str, str] = {
     IS_SCANNED: TYPE_BOOL,
     IS_CONVERSATION: TYPE_BOOL,
     IS_DAMAGED: TYPE_BOOL,
+    # `probe._probe_ole2` measures it from the OLE2 directory, and it is the one pattern that
+    # separates a 1997 `.doc` from an encrypted OOXML package — the two carry identical magic
+    # bytes and go opposite ways. `convert:ooxml` is what it decides.
+    IS_LEGACY_BINARY: TYPE_BOOL,
     CHAR_COUNT: TYPE_INT,
     PAGES_WITH_TABLES: TYPE_LIST,
 }
@@ -711,6 +737,34 @@ CONVERSATION_PATTERN: dict[str, str] = {
     "text": IS_CONVERSATION,
 }
 
+#: Which pattern, per format, means "there is a document in here for LibreOffice to
+#: paginate". ``OFFICE_SPEC.md`` Part 6's ``render:pdf`` row is predicated on it, and it is a
+#: fifth per-format dict for the reason the four above are: the condition is a fact about the
+#: FORMAT, and a row naming a bare pattern could not express it.
+#:
+#: **THERE IS NO ``pdf`` ENTRY AND THAT IS THE WHOLE RULE.** A PDF already has pages, so a
+#: rendition of one would be a byte-for-byte second copy of the upload — the row is reported
+#: impossible for it, which is what the asymmetry in :data:`DECLARED_STRUCTURE`'s docstring
+#: buys: as a requirement an absent entry can never be satisfied. ``repositories.rendition
+#: .pdf_for`` is the other half of the same decision, serving a PDF from its own blob.
+#:
+#: Each entry names a pattern that says the file has CONTENT, not merely that it is of that
+#: format, and each is the pattern probe actually emits for it: a ``.pptx`` with no slides
+#: and a workbook with no sheets paginate into nothing, and spending a LibreOffice run to
+#: find that out is a run nobody needed. ``ole2`` names ``is_legacy_binary`` for a stronger
+#: version of the same point — an MSI or a ``Thumbs.db`` carries the same magic bytes as a
+#: ``.doc`` and is not a document at all.
+RENDITION_SOURCE_PATTERN: dict[str, str] = {
+    "docx": HAS_TEXT_LAYER,
+    "pptx": HAS_TEXT_LAYER,
+    "xlsx": HAS_SHEETS,
+    "ole2": IS_LEGACY_BINARY,
+}
+
+#: Stands in a row's ``requires``/``forbids`` for "whatever pattern says THIS format holds a
+#: document that has to be paginated before it has pages", resolved through the dict above.
+RENDITION_SOURCE = "@rendition_source"
+
 #: Stands in a row's ``requires``/``forbids`` for "whatever pattern says THIS format names
 #: a sheet list", resolved through the dict above.
 SHEET_LIST = "@sheet_list"
@@ -729,6 +783,7 @@ SENTINEL_PATTERNS: dict[str, dict[str, str]] = {
     PAGE_GEOMETRY: PAGE_GEOMETRY_PATTERN,
     SHEET_LIST: SHEET_LIST_PATTERN,
     CONVERSATION: CONVERSATION_PATTERN,
+    RENDITION_SOURCE: RENDITION_SOURCE_PATTERN,
 }
 
 #: Why a task whose Part 4 condition HOLDS is nevertheless not enqueued: its handler
@@ -1276,6 +1331,41 @@ TASK_ROWS: tuple[TaskRow, ...] = (
         ),
         params_key="embed",
     ),
+    # OFFICE_SPEC.md Part 6 and Part 1 — the two tier-3 rows (SPRINT_0_6_0.md Block G step
+    # 32). Both are scoped to the file node, both read only the uploaded bytes, and NEITHER
+    # is ordered against anything in this table: they consume `matched` and `blob`, which
+    # probe and the upload have already written when this table is evaluated.
+    #
+    # LAST, and the placement is the only thing about them that is a choice rather than a
+    # fact. Order here is enqueue order within one batch and nothing else — with no `after`
+    # and no child scope, a row placed anywhere plans identically — so they go at the end,
+    # where an append cannot collide with a lane editing a row in the middle of the table.
+    #
+    # `render:pdf` is ADVISORY (models/task_queue.ADVISORY_TASK_TYPES). That is what makes
+    # an unconditional row safe on an appliance with no LibreOffice: the task fails
+    # PERMANENTLY with a message naming JMFTS_CONVERT_URL and the image, and the document
+    # settles anyway with its text, its chunks and its vectors. Part 6: "Rendering degrades;
+    # retrieval does not."
+    #
+    # UNCONDITIONAL, with no option to switch it off, and that is Block G answering
+    # OFFICE_SPEC.md Part 12 question 1 rather than carrying it. That question proposed an
+    # option because a rendition "roughly doubles blob storage for office documents"; the
+    # measurement says the denominator was wrong — original bytes are 144 MB of a 2988 MB
+    # reference database, 4.8%, so the upper bound is +4.8% — and a rendition is DERIVED,
+    # which makes the policy cache eviction rather than retention. An option here would also
+    # have been the wrong mechanism for a different reason: a row's condition is a pure
+    # function of (format, patterns, options) so that EXPLAIN can answer without bytes, and
+    # "is there a converter configured" is a fact about the DEPLOYMENT, which does not belong
+    # in either.
+    TaskRow(TASK_RENDER_PDF, write_mode=WRITE_SELF, requires=(RENDITION_SOURCE,)),
+    # NOT advisory, and the asymmetry with the row above is the rule applied twice. A .docx
+    # with no rendition is a complete searchable document missing a picture; a .doc with no
+    # conversion has no reader that can open it, so it has no text and no children — which is
+    # `extract:text`'s case, and `settled='failed'` is the true thing to say about that node.
+    #
+    # A bare pattern rather than a sentinel: `is_legacy_binary` is measured for `ole2` and
+    # for nothing else, so the condition is already per-format without a dict to say so.
+    TaskRow(TASK_CONVERT_OOXML, write_mode=WRITE_SELF, requires=(IS_LEGACY_BINARY,)),
 )
 
 
@@ -1480,6 +1570,22 @@ def _no_sheet_list_reason(fmt: str) -> str:
     return f"format {fmt!r} names no worksheet list a declared rung could read"
 
 
+def _no_rendition_source_reason(fmt: str) -> str:
+    """Why a row requiring :data:`RENDITION_SOURCE` can never fire for this format.
+
+    A fifth sentinel with the same shape and one reader it is worth writing for: ``pdf``.
+    The sentence has to say that a PDF gets no rendition BECAUSE it is already one, rather
+    than leaving an operator to conclude that renditions are broken for the format the
+    feature is mostly used on.
+    """
+    if fmt == "pdf":
+        return (
+            "format 'pdf' already has pages, so a rendition of it would be a second copy of "
+            "the upload; `pdf_for` serves a PDF from its own stored bytes"
+        )
+    return f"format {fmt!r} holds no document this appliance knows how to paginate"
+
+
 #: sentinel -> the sentence explaining why a row requiring it is impossible for a format.
 #: Beside :data:`SENTINEL_PATTERNS` and keyed the same way, so a sentinel cannot be added to
 #: one without the other: a requirement that no format can satisfy and no sentence to say
@@ -1489,6 +1595,7 @@ SENTINEL_REASONS: dict[str, Callable[[str], str]] = {
     PAGE_GEOMETRY: _no_page_geometry_reason,
     SHEET_LIST: _no_sheet_list_reason,
     CONVERSATION: _no_conversation_reason,
+    RENDITION_SOURCE: _no_rendition_source_reason,
 }
 
 
@@ -2691,6 +2798,12 @@ from jmfts_core import fetch_tasks  # noqa: E402,F401  (side effect: registratio
 # above it: it reads a shape binding, the triples its scope resolves to, and the node the
 # request minted to hold the report. It touches no evidence block and no ingest rung.
 from jmfts_core import validate_tasks  # noqa: E402,F401  (side effect: registration)
+
+# OFFICE_SPEC.md Part 6's two tier-3 handlers. Last, and they need nothing from the modules
+# above: both read the uploaded bytes and the `matched` block, and hand them to
+# `jmfts_core.convert`, which imports no task module at all — deliberately, so that the seam
+# to LibreOffice is importable by a process that registers no handlers.
+from jmfts_core import render_tasks  # noqa: E402,F401  (side effect: registration)
 
 # SPRINT_0_5_0.md Block B steps 6-8's rule pass, beside the validator and after it for the
 # same reasons. It imports `jmfts_core.shacl_rules`, which is domain code and imports no task

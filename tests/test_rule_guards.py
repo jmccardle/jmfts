@@ -41,6 +41,7 @@ from jmfts_core.ingest_tasks import (
     PATTERNS_NOT_PROBED,
     TASK_EXTRACT_FACTS,
     TASK_EXTRACT_TEXT,
+    TASK_RENDER_PDF,
     TASK_ROWS,
     TASK_STRUCTURE_DECLARED,
     TASK_STRUCTURE_INFERRED,
@@ -216,9 +217,16 @@ class TestTheTwoUnknownPolicies:
         # that table and nothing else, so a rollup rung is not in the answer — see
         # `jmfts_core.index_tasks` for what that costs and `SPRINT_JOBS.md` Phase 7 for
         # where it ends. What this test is about is untouched: the two `.docx` fields.
+        #
+        # `render:pdf` JOINED THE LIST at Block G step 32, and it reads the SAME pattern this
+        # test is about: `@rendition_source` resolves to `has_text_layer` for a .docx, so a
+        # flattening that emptied the two fields would take the rendition with the rung. It
+        # is asserted here rather than in a list of its own for that reason — one more name
+        # in this exact list is the cheapest place the regression stays visible.
         assert _eligible("docx", {HAS_TEXT_LAYER: True}) == [
             TASK_EXTRACT_TEXT,
             TASK_STRUCTURE_INFERRED,
+            TASK_RENDER_PDF,
         ]
 
 

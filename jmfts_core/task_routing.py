@@ -85,6 +85,29 @@ BADGE_EMBED = "embed"
 #: answers this badge if it can get a completion, however it gets one.
 BADGE_LLM = "llm"
 
+#: The LibreOffice pool. ``OFFICE_SPEC.md`` Part 1's tier 3: a ~500 MB system package that no
+#: wheel can install, so a worker either has it in its image or it does not.
+#:
+#: NAMED FOR THE RESOURCE like :data:`BADGE_LLM`, and here that matters more than it does
+#: there, because two deployments answer it and only one of them has LibreOffice locally:
+#: a worker built from ``Dockerfile.libreoffice`` runs its own unoserver, and ANY ordinary
+#: worker with ``JMFTS_CONVERT_URL`` set can convert over the network. The second is the
+#: reason this policy is not merely optional but usually unnecessary — a fleet that gives
+#: every worker the URL needs no badge at all, exactly as a fleet with ``JMFTS_RUNNER_URL``
+#: needs no GPU in every pod.
+BADGE_CONVERT = "convert"
+
+#: Route the two tier-3 tasks at a pool that has LibreOffice. Offered, not applied, for
+#: :data:`EMBEDDING_POLICY`'s reason and with a sharper edge: badges are asymmetric, so a
+#: cluster that sets this and runs no ``convert`` worker does not convert slowly, it STALLS —
+#: and because ``render:pdf`` is advisory, the stall is silent in a second way, with the task
+#: pending forever and the document settling without its rendition and without a failure.
+#: Set it only where the pool exists; ``deploy/k8s/23-worker-convert.yaml`` defines one.
+CONVERT_POLICY: dict[str, str] = {
+    "render:pdf": BADGE_CONVERT,
+    "convert:ooxml": BADGE_CONVERT,
+}
+
 #: Embedding work: the handlers that run the embedding model. See the measurement above.
 #:
 #: The structure rungs used to be in here and are deliberately NOT any more. They earned
