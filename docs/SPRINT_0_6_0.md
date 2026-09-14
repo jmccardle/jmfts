@@ -287,12 +287,36 @@ one of the two rungs is ever eligible for a document" (`ingest_tasks.py:1160`–
 of the prose formats it was written about and false for a workbook, so the comment is part of
 the fix.
 
+**There is a THIRD cause, it was found on 2026-09-13 while step 7 was being built, and it
+decides the shape of the fix.** The two above are real and repairing only them is **worse
+than the defect**. `docs/STRESS_CORPUS.md` 4.4c measured it: `index:bm25 added 0 documents
+while the subtree holds 3 record nodes; it saw a subtree of 2`.
+
+**A workbook's leaves are not written by its structure rung, and every other format's are.**
+`structure:sheets` writes the `sheet` containers; `extract:sheet` writes the rows, one rung
+further down and scoped to a different node (`ingest_tasks.py:1089`, `:1104`). So a row
+widened to name `structure:sheets` fires while the rows do not yet exist, records a
+`completed` attempt with `documents_indexed: 0`, and consumes the one chance the task gets —
+replacing a visible absence with a silent claim of success. That is the Fail Early violation
+this block is named for, introduced by the fix for it.
+
+`_check_task_rows` cannot state the missing dependency at all: rule 2 refuses to order two
+rows on different nodes and rule 1 refuses a second row under one name. So the row is
+**deleted** and `index:bm25` is planned at the settling boundary by `IngestRollupPlanner`
+instead, offered before `structure:semantic` because BM25 needs neither a GPU nor an LLM and
+should not queue behind one. `docs/SPRINT_JOBS.md` §5.2 recommends exactly this.
+
+**Two costs, named here rather than discovered later.** `index:bm25` leaves `EXPLAIN`'s
+answer, because `explain_plan` reads `TASK_ROWS` and nothing else — `SPRINT_JOBS.md` Phase 7
+is where that ends, and `docs/reference/INDEXING.md` regenerates to say the name is not
+scheduled from the table. And the old row's `skipped` outcome for an upload no index covers
+is gone, because the planner refuses to enqueue a row whose only outcome could be `skipped`;
+two tests that asserted that trace now assert the guarantee instead.
+
 **Step 7's real cost is what "the content" means for a sheet.** A `record` node's text is
-labelled prose built by `sheet_tasks.py`, and a `cell` node's is one value. Indexing every
-`cell` would put a corpus of bare numbers into the inverted index and move every IDF in the
-index it joins. The narrow version — `record` nodes only — is what the measurement in
-`docs/STRESS_CORPUS.md` 4.4 is about (4,601 `record` nodes averaging 457 characters) and is
-what this step scopes. Part 4 question 4.3.
+labelled prose built by `sheet_tasks.py`. The narrow version — `record` nodes only — is what
+the measurement in `docs/STRESS_CORPUS.md` 4.4 is about (4,601 `record` nodes averaging 457
+characters) and is what this step scopes. Part 4 question 4.3, **answered**.
 
 **Step 8 is the one step here whose entry condition is a run rather than a fixture, and that
 is stated rather than hidden.** `tests/test_maxsim_recall.py` measures `recall@10` against an
@@ -676,7 +700,11 @@ recorded in `CHANGELOG.md` as a behaviour break rather than a fix, because for a
 single-principal deployment nothing moves at all and for a governed one the old numbers were
 never the caller's to read.
 
-### 4.3 Does a `cell` node reach BM25, or only a `record` node
+### 4.3 Does a `cell` node reach BM25, or only a `record` node — ANSWERED 2026-09-13
+
+**`record` nodes only.** `cell` joins `Settings.bm25_exclude_usetypes` and stays out of
+`search_exclude_usetypes`, so the exclusion is about the inverted index and not about the
+node: a `cell` is still retrievable by every other method.
 
 Step 7. `record` nodes carry labelled prose. `cell` nodes carry one value each, and `39d5f20`
 made `cell` children of a `record` for rows too long to embed.
@@ -684,12 +712,35 @@ made `cell` children of a `record` for rows too long to embed.
 Indexing every `cell` puts a corpus of bare values into the inverted index and moves every IDF
 in the index it joins — and this codebase has measured ranking changes going wrong twice.
 
-What the answer changes: whether a search for a distinctive single value in a wide row finds
-it. That is a real retrieval case for a spreadsheet and it is exactly the case `record`-only
-does not reach.
+**Two corrections to this question's own premise, read out of the code while step 7 was
+built.** Both narrow the cost of the answer and neither changes it.
 
-**Absent an answer, `record` nodes only**, because that is the population
-`docs/STRESS_CORPUS.md` 4.4 measured and the only one this step has a number for.
+* **A `cell` node's text is not a bare value.** `sheet_records.py:199` builds
+  `"Designator: R59."` — labelled prose, the same shape a `record` carries, just shorter.
+  The paragraph above says "one value each" and that was wrong.
+* **`cell` nodes exist ONLY for a row too long to embed whole** (`sheet_tasks.py:811`–`:841`),
+  and such a row's `record` parent then carries no `content` at all. So the population this
+  answer excludes is not "every cell in the corpus" — it is the columns of the few rows that
+  overflowed.
+
+**The cost, stated exactly:** an overflowed row reaches the index only through whichever of
+its columns were long enough to be chunked. Recorded at the setting rather than here.
+
+**The hazard was measured rather than asserted.** `ran` 2026-09-13: one BM25 index holding a
+3-section prose document, then the same index after a 60-row worksheet settled into it.
+
+| | `total_docs` | `avg_doc_length` | `doc_freq('population')` |
+|---|---:|---:|---:|
+| prose only | 4 | 47.250 | 4 |
+| prose + workbook | 65 | 11.815 | 65 |
+
+The same seven prose hits on the same query fell from `0.1777` to `0.0080`, `0.1762` to
+`0.0085`, `0.1625` to `0.0074` — a uniform −95.2% to −95.5%. **Their order among themselves
+is unchanged**; what moves is the page, because records and their containers now take the top
+five. That is length normalisation working on a corpus that changed, and it is the same
+effect `docs/STRESS_CORPUS.md` 4.4d saw at scale (`universal` 155 → 145.3). The fixture is
+deliberately extreme — 60 short documents against 4 long ones, with the term in all 65 — and
+it is quoted because it is the hazard this question is about.
 
 ### 4.4 What is the MaxSim recall threshold a threshold on
 

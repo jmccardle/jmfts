@@ -127,6 +127,19 @@ drained a queue at once.
    partial-retrieval gap rather than a loss, and it is silent: the index exists, answers, and
    returns nothing.
 
+   **Correction, 2026-09-13: there is a THIRD cause, and this entry named two.** Repairing
+   only the two above is worse than the defect. A workbook's leaves are not written by its
+   structure rung and every other format's are — `structure:sheets` writes the `sheet`
+   containers and `extract:sheet` writes the rows, one rung down and scoped to a different
+   node. A row widened to name `structure:sheets` therefore fires before the rows exist,
+   records a `completed` attempt with `documents_indexed: 0`, and consumes the one chance the
+   task gets. `STRESS_CORPUS.md` 4.4c measured it: *`index:bm25 added 0 documents while the
+   subtree holds 3 record nodes; it saw a subtree of 2`*. The fix that shipped deletes the
+   row and plans `index:bm25` at the settling boundary instead, per `SPRINT_JOBS.md` §5.2.
+   **Being wrong in this entry is what the entry is for** — it is where a gap is written down
+   before anybody has had to build against it, and this one survived two re-reads before
+   meeting the code corrected it. `docs/SPRINT_0_6_0.md` Block B step 7 carries the detail.
+
 9. ~~22.5% of a real corpus is retrievable and has nothing to display.~~ **CLOSED 2026-09-07,
    and the count was an undercount.** The real figure was 26,870 of 57,492 settled nodes.
    The decision went to projection rather than exclusion, settled by measuring what the
