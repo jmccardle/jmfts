@@ -269,11 +269,12 @@ def test_two_views_added_in_two_worktrees_merge_without_conflict(tmp_path):
     merged = (work / "manifest.js").read_text(encoding="utf-8")
     assert "<<<<<<<" not in merged
     imports = re.findall(r'^import "(.+)";$', merged, re.M)
-    assert imports == [
-        "../views/capabilities.js",
-        "../views/search.js",
-        "../views/upload.js",
-    ], imports
+    # Whatever the real manifest already carries, plus the two this test appended, in order.
+    # Written against the file rather than against a literal list because M3's five worktrees
+    # each add a line to it — a literal list here would be a test that fails once per view
+    # added, which is a test that has to be edited by five branches at once.
+    already = re.findall(r'^import "(.+)";$', MANIFEST.read_text(encoding="utf-8"), re.M)
+    assert imports == [*already, "../views/search.js", "../views/upload.js"], imports
 
 
 def test_without_the_union_driver_those_same_two_views_conflict(tmp_path):
@@ -434,7 +435,10 @@ def test_the_shell_routes_on_the_fragment_and_carries_a_views_arguments(tmp_path
     """
     result = _node(tmp_path, SHELL_HARNESS)
 
-    assert result["registered"] == ["capabilities"]
+    # FIRST, not only: the manifest is append-only and M3's worktrees each add a view, so what
+    # this holds is the property the paragraph above states — an empty fragment lands on the
+    # first registered view, and "first" does not move as views are added after it.
+    assert result["registered"][0] == "capabilities", result["registered"]
     assert result["routes"]["empty"] == {"path": "/capabilities", "params": {}}
     assert result["routes"]["plain"] == {"path": "/capabilities", "params": {}}
     assert result["routes"]["withParams"] == {
