@@ -206,8 +206,25 @@ directory, because the directory is published wholesale. The working record in `
 explains WHY and stays internal; these say WHAT and ship, which is what the four hundred
 held-back citations otherwise deny an outside reader.
 
-**The two release in lockstep: one number, two wheels, one tag.** `./bump-version.sh`
-sets all three copies of the version. See `docs/RELEASING.md` step 1 for why.
+**`jmfts-web/jmfts_web/static/client/` is generated too, and it is the THIRD generated
+artefact with the same seal.** Four files — the operation table, the verb class and their two
+`.d.ts` declarations — rendered from `/openapi.json` rather than from the route table, because
+the document carries the corrected `security` block and all 115 mounted operations, seven of
+which are hand-written routes with no `ExposeSpec` and therefore no `_verbs.py` method.
+
+```bash
+python -m scripts.generate_ts_client           # rewrite the bundle's client
+python -m scripts.generate_ts_client --check   # exit 1 if any file is stale
+```
+
+`tests/test_ts_client_codegen.py` runs the check, refuses a file in that directory that is
+neither generated nor the named hand-written runtime, and — where `node` is on PATH — executes
+the generated module against a stubbed `fetch` to hold IC-6's nine-field call event. There is
+no build step: they are ES modules the browser runs as they stand.
+
+**The three release in lockstep: one number, three wheels, one tag.** `./bump-version.sh`
+sets all three copies of the version. See `docs/RELEASING.md` step 1 for why — and question
+4.10 of `docs/SPRINT_0_6_0.md` for why that runbook still says "two".
 
 ### One definition, many transports
 

@@ -32,11 +32,13 @@ __all__ = ["static_dir", "index_path", "__version__"]
 #: The bundle, relative to this file. ``tests/test_web_distribution.py`` refuses a
 #: distribution whose bundle is missing.
 #:
-#: **There is no build step yet and that is not an omission.** At step 19 the bundle is one
-#: hand-written document, because one document is what it takes to prove the mount, the
-#: extra and the release plumbing all work. Block F step 24 adds the source tree and the
-#: build that writes here; until there is something to compile, a build script would be a
-#: file that runs and does nothing.
+#: **There is no build step and that is not an omission.** Part of ``static/client/`` IS
+#: generated — ``scripts.generate_ts_client`` renders it from the appliance's
+#: ``/openapi.json`` (Block F step 23) — but it is generated as ES modules the browser runs
+#: as they stand, so nothing has to be compiled between here and a page. What a build step
+#: would add is a bundler and a TypeScript compiler, and Block F step 24 is where that
+#: decision belongs; until there is a source tree to compile, it would be a file that runs
+#: and does nothing.
 _STATIC = Path(__file__).resolve().parent / "static"
 
 
@@ -52,8 +54,8 @@ def static_dir() -> Path:
     if not _STATIC.is_dir():
         raise FileNotFoundError(
             f"jmfts-web is installed but its bundle is missing at {_STATIC}. "
-            "This is a packaging fault, not a configuration one: run jmfts-web/build.sh "
-            "in a source checkout, or reinstall the wheel."
+            "This is a packaging fault, not a configuration one: reinstall the wheel, or in "
+            "a source checkout run python -m scripts.generate_ts_client."
         )
     return _STATIC
 

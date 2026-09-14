@@ -16,6 +16,36 @@ It is not useful on its own — there is nothing to import and nothing to run. `
 depends on it, and `jmfts_core.rest.main` mounts it at `/app` when it is present. An
 appliance without it starts normally and serves no `/app`.
 
+## One generated client, and one event per call
+
+`jmfts_web/static/client/` is the only way this front end talks to an appliance. Four of its
+files are generated from the appliance's own `/openapi.json`, the way `jmfts-client`'s
+`_verbs.py` is generated from the route table:
+
+```bash
+python -m scripts.generate_ts_client            # in a jmfts source checkout
+python -m scripts.generate_ts_client --check    # exit 1 if the bundle is stale
+```
+
+The other six are the hand-written runtime — the request path, the three copy-out printers,
+and the entry point. `tests/test_ts_client_codegen.py` refuses a stale generated file and
+refuses a file that is in neither set.
+
+Every call emits one event: `{op_id, method, path, path_params, query, body, status,
+response, ms}`. Three things follow from that.
+
+* **Replay.** An event is a call plus its arguments, so `client.replay(event, {…})` re-sends
+  it with any of them edited.
+* **Verifiable thinness.** A view showing something the call log has no event for computed it
+  in the browser. That is readable from the log rather than arguable from the source.
+* **Copy-out.** `asCurl`, `asPython` and `asFetch` print any event three ways — and none of
+  them prints the credential. Each names the environment variable it lives in instead.
+
+There is no build step and no bundler: these are ES modules the browser runs as they stand,
+with `.d.ts` declarations beside them for TypeScript consumers. Nothing loads from a CDN, a
+font host or anywhere but the appliance's own origin, because this appliance is expected to
+run air-gapped.
+
 ## Why a separate distribution
 
 An extra guards dependencies. Static files inside the server package would ship with the
