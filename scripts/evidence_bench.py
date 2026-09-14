@@ -125,7 +125,7 @@ PROFILES: dict[str, dict] = {
             "index": 2,
             "name": "FY26 Bookings",
             "state": "visible",
-            "shape": "records",
+            "shape": ["records"],
             "record_count": 1_284,
             "measurements": {
                 "rows": 1_284,

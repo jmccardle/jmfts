@@ -110,6 +110,23 @@ USETYPE_RECORD = "record"
 #: `USETYPE_SUMMARY` to undo.
 USETYPE_CELL = "cell"
 
+#: The whole worksheet as one markdown table, in one node (8.4's `small_table`). The shape
+#: 8.4 lists FIRST and the one nothing had ever built: `run_extract_sheet` branched on
+#: `header_row` alone, so a sheet either became rows or became nothing, and the markdown
+#: `profile:sheet` rendered was counted, reported as a boolean and discarded.
+#:
+#: NOT `section` and not `chunk`, though it is a text leaf like a chunk. A chunk is a piece
+#: of prose whose boundary this appliance chose and a section is a region the document
+#: named; this is a whole sheet kept WHOLE, on the argument 8.4 makes for the shape — "a
+#: small table is often exactly the retrieval unit we want, and splitting it destroys it" —
+#: so the one thing a reader has to be able to ask of it is whether it is entire. Sharing a
+#: string with either would make that unanswerable.
+#:
+#: A `table` node and the `record` nodes of the same sheet routinely BOTH exist, and neither
+#: contains the other: they are two renderings of one sheet, they are separate documents, and
+#: a query matching both returns both. See `jmfts_core.sheet_records.BOTH_SHAPES_BASIS`.
+USETYPE_TABLE = "table"
+
 
 class Document(Base):
     """Core document model with hierarchical structure and vector embeddings"""

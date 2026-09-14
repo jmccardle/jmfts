@@ -319,6 +319,10 @@ class TestFanout:
         "extraction.characters": 40_000,
         "matched.patterns.sheet_count": 6,
         "sheet.measurements.rows": 1_284,
+        # A header at row 1, which is where 8.3 said it always was. `extract:sheet`'s
+        # ceiling is the rows BELOW it, so this is the second half of that arithmetic and
+        # not a decoration: `null` here means no header and no records at all.
+        "sheet.measurements.header_row_number": 1,
         "child_count": 40,
     }
 

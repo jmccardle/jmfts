@@ -139,6 +139,7 @@ def scan_book(args):
                     "non_empty": m.non_empty_cells,
                     "fill_ratio": m.fill_ratio,
                     "header_row": m.header_row.verdict,
+                    "header_row_number": m.header_row.row,
                     "header_col": m.header_col.verdict,
                     "merged": m.merged_cells,
                     # `None` means the sheet never rendered: `measure_sheet` stopped

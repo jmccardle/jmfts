@@ -35,7 +35,7 @@ at the moment they do.
 | `extract:images` | the file node | `children` | `has_images` | — | — |
 | `citation` | the file node | `subtree` | `@page_geometry` | — | `structure:declared`, `structure:inferred` |
 | `extract:facts` | the file node | `self` | `options.facts.enabled`, `has_text_layer` | `char_count < options.facts.min_characters` | `structure:declared`, `structure:inferred`, `structure:conversation` |
-| `embed` | `children` nodes produced by `structure:declared`, `structure:inferred`, `structure:conversation`, `profile:sheet`, `extract:sheet`, usetype `chunk`, `record`, `profile`, `cell` | `self` | — | — | — |
+| `embed` | `children` nodes produced by `structure:declared`, `structure:inferred`, `structure:conversation`, `profile:sheet`, `extract:sheet`, usetype `chunk`, `record`, `profile`, `cell`, `table` | `self` | — | — | — |
 
 ## What each task reads and writes
 
@@ -49,7 +49,7 @@ of the node above (legal only as a read).
 | `derive:rule` | — | `text@self` | `cpu` |
 | `embed` | `text@self` | `embedding@self` | `model` |
 | `extract:facts` | `text@self`, `text@subtree` | — | `llm` |
-| `extract:sheet` | `sheet@self`, `sheet.measurements@self`, `blob@ancestor` | `sheet.shape@self`, `text@subtree`, `record@children`, `cell@subtree` | `cpu` |
+| `extract:sheet` | `sheet@self`, `sheet.measurements@self`, `blob@ancestor` | `sheet.shape@self`, `text@subtree`, `record@children`, `cell@subtree`, `table@children` | `cpu` |
 | `extract:text` | `matched@self`, `blob@self` | `text@self`, `extraction@self` | `cpu` |
 | `fetch:arxiv` | `source@self` | `blob@self`, `file@self` | `cpu` |
 | `fetch:path` | `source@self` | `blob@self`, `file@self` | `cpu` |

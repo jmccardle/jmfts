@@ -314,6 +314,13 @@ register(
     "record too long to embed whole.",
 )
 register(
+    "table",
+    type=TYPE_DICT,
+    store=Store(STORE_EVIDENCE, row="table"),
+    doc="one worksheet rendered whole as a markdown table, on the `table` node "
+    "`extract:sheet` writes for spec 8.4's `small_table`.",
+)
+register(
     "embedding",
     type=TYPE_LIST,
     store=Store(STORE_COLUMN, "embed"),
@@ -431,15 +438,33 @@ register(
     type=TYPE_INT,
     store=Store(STORE_EVIDENCE, "measurements.rows", row="sheet"),
     within="sheet.measurements",
-    doc="how many rows the sheet occupies. `extract:sheet`'s ceiling, less the header.",
+    doc="how many rows the sheet occupies. `extract:sheet`'s ceiling, less the header row "
+    "and the banner above it — which is why the bound reads `header_row_number` too.",
 )
 register(
+    "sheet.measurements.header_row_number",
+    type=TYPE_INT,
+    store=Store(STORE_EVIDENCE, "measurements.header_row_number", row="sheet"),
+    within="sheet.measurements",
+    nullable=True,
+    doc="which row of the first 8 is the header. Null when neither pass found one; "
+    "`extract:sheet`'s ceiling is the rows below it.",
+)
+# A LIST, WHERE 8.7 WRITES ONE STRING AND THE REGISTRY DECLARED ONE. 8.4 says "the first
+# match wins" and this appliance stopped doing that: a sheet with a header row that also
+# renders inside the document window gets a `record` node per row AND one `table` node, and
+# `shape` is what says which representations the sheet actually has. One string could name
+# only one of them, and a reader of the node would then be told something false about the
+# tree under it. `sheet_records.BOTH_SHAPES_BASIS` carries the measurement that argued for
+# it. Empty list where no shape matched, which was `null` before; `shape_decision` holds the
+# reason either way.
+register(
     "sheet.shape",
-    type=TYPE_STR,
+    type=TYPE_LIST,
     store=Store(STORE_EVIDENCE, "shape", row="sheet"),
     within="sheet",
-    nullable=True,
-    doc="spec 8.4's verdict. Null with a `shape_decision` beside it when none was taken.",
+    doc="spec 8.4's verdict, as the list of shapes written. Empty with a `shape_decision` "
+    "beside it when none matched.",
 )
 # 3.2 CITES THIS PAIR AS THE MODEL FOR ITS THIRD STATE: "two keys, never one with a null,
 # because 'could not be placed, because X' and 'is at page 3' are different facts". So it is

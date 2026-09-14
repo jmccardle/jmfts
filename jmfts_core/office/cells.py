@@ -64,11 +64,16 @@ from jmfts_core.office import require_openpyxl
 # `_MARKDOWN_UNSAFE` for the same reason: `render_region` below writes markdown table cells
 # and `sheets._render` already writes them. One escaping rule, in one place — two copies
 # would be free to disagree about whether a pipe closes a cell.
+#
+# `column_index` WAS DEFINED HERE and moved to `sheets` beside its inverse when the header
+# scan's merged-range parser needed it. It is still exported from this module, because that
+# is where every caller of it reaches for it and a name is not worth moving twice.
 from jmfts_core.office.sheets import (
     _MARKDOWN_UNSAFE,
     _S_NS,
     _worksheet_part,
     canonical,
+    column_index,
     column_letter,
 )
 
@@ -336,16 +341,6 @@ def json_value(value: Any) -> Any:
 # ---------------------------------------------------------------------------
 # The standard-library pass: formulas and the quote prefix
 # ---------------------------------------------------------------------------
-
-
-def column_index(reference: str) -> int:
-    """``"A2"`` -> 1, ``"AB17"`` -> 28. The column part of a cell reference."""
-    total = 0
-    for character in reference:
-        if not character.isalpha():
-            break
-        total = total * 26 + (ord(character.upper()) - ord("A") + 1)
-    return total
 
 
 def _quote_prefix_flags(archive: zipfile.ZipFile) -> list:

@@ -126,15 +126,23 @@ class TestShape:
         rows 23 → 29; the bare scalars went 9 → 15 for the same reason, and that count now
         costs a caller nothing, because a bare scalar is a row rather than a word reserved
         out of ``structured_content``.
+
+        THEY MOVED A THIRD TIME, 2026-09-13, and this test is again how anyone knows. The
+        office read path's Block C added two entries, one of them a row: the ``table`` row,
+        for the node 8.4's ``small_table`` shape writes, and the leaf
+        ``sheet.measurements.header_row_number``, which is registered because
+        ``extract:sheet``'s fan-out bound READS it — which is exactly the rule at the top of
+        :mod:`jmfts_core.evidence` for when a leaf earns an entry. So 44 → 46 and 30 → 31,
+        the dicts 15 → 16, and the bare scalars unmoved.
         """
         stored = [
             e for e in REGISTRY.values() if e.store.kind == STORE_EVIDENCE and not e.store.path
         ]
         dicts = [e for e in stored if e.type == TYPE_DICT]
         stated = {
-            "registry entries": (len(REGISTRY), 44),
-            "evidence rows": (len(stored), 30),
-            "rows that are dicts": (len(dicts), 15),
+            "registry entries": (len(REGISTRY), 46),
+            "evidence rows": (len(stored), 31),
+            "rows that are dicts": (len(dicts), 16),
             "rows that are bare scalars": (len(stored) - len(dicts), 15),
         }
         wrong = {k: v for k, v in stated.items() if v[0] != v[1]}

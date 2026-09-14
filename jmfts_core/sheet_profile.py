@@ -30,7 +30,12 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from jmfts_core.office.sheets import SheetMeasurement, TYPE_EMPTY
+from jmfts_core.office.sheets import (
+    HEADER_RULE_ALL_TEXT,
+    NAME_SOURCE_BANNER,
+    SheetMeasurement,
+    TYPE_EMPTY,
+)
 
 # The usetype 8.5 gives the profile node is `USETYPE_SUMMARY`, and it is DEFINED on the
 # model with every other ingest usetype — Part 4's rule table names it and cannot import
@@ -78,6 +83,22 @@ def sheet_evidence_block(
         "interior_cardinality": measurement.interior_cardinality,
         "merged_cells": measurement.merged_cells,
         "rendered_tokens": rendered_tokens,
+        # WHERE the header is, and under which of the two passes. 8.3 defined `header_row`
+        # as a property of row 1 and needed neither; the scan over rows 1-8 makes both a
+        # measurement, and `extract:sheet` reads the number rather than assuming 1.
+        # `null` exactly when the verdict is false.
+        "header_row_number": measurement.header_row.row,
+        "header_row_rule": measurement.header_row.rule,
+        "header_rows_scanned": measurement.header_row.scanned_rows,
+        "header_scan_rows": measurement.header_scan_rows,
+        # The rows above the header, in the author's own words. `SPRINT_0_4_0.md` 4.3 asked
+        # what they are and `office.sheets.BannerRow` is the answer; this is where they are
+        # kept, and `_sheet_sentences` is where they are said out loud.
+        "header_row_banner": [
+            {"row": banner.index, "values": list(banner.values)}
+            for banner in measurement.header_row.banner
+        ],
+        "first_data_row": measurement.header_row.first_data_row,
         # The denominators. 8.3 stores ratios and cardinalities without the counts they
         # were taken over, and a sweep cannot redefine a ratio it cannot see the parts of:
         # an interior cardinality of 3 means one thing in a 2x2 interior and another in a
@@ -105,9 +126,39 @@ def sheet_evidence_block(
         "rendered_unbounded_reason": measurement.rendered_unbounded_reason,
         "rendered_fits_token_window": fits_token,
         "rendered_fits_doc_window": fits_doc,
+        # THE TABLE ITSELF, AND ONLY WHEN IT FITS. `extract:sheet` writes 8.4's
+        # `small_table` node out of this rather than rendering the sheet a second time —
+        # the same rule it already follows for the header verdict and the column labels,
+        # which its own docstring states: a second derivation could disagree with the first,
+        # and then the profile and the nodes would describe different sheets.
+        #
+        # Gated on `fits_doc_window` because that is exactly the population that becomes a
+        # node, and it is what BOUNDS this value: a table over the document window is not
+        # written anywhere, so storing it would be an unbounded string in a JSONB row for
+        # no reader. `rendered_withheld_reason` is the third state — it rendered, it is not
+        # here, and this says why, which is not the same fact as `rendered_unbounded_reason`
+        # (it did not render at all).
+        "rendered_markdown": measurement.rendered_markdown if fits_doc else None,
+        "rendered_withheld_reason": (
+            None
+            if fits_doc or measurement.rendered_markdown is None
+            else (
+                f"the sheet renders to {rendered_tokens} tokens, over the {doc_window}-token "
+                "document window, so no `table` node is written from it and the markdown is "
+                "not kept on this row"
+            )
+        ),
         # The components of each header verdict. See `HeaderEvidence` for why: 8.3's rule
         # as written cannot see the crossing table 8.4's `matrix` shape is for.
-        "header_row_evidence": _evidence(measurement.header_row),
+        #
+        # `header_row_evidence` is the components AT THE ROW THE SCAN CHOSE, and row 1's
+        # where nothing fired — so a reader who knows only 8.3 sees the number 8.3 promised.
+        # `header_row_candidates` is one of these per scanned row, which is the whole input
+        # to both passes and is what a sweep that wants to re-decide replays against.
+        "header_row_evidence": _evidence(measurement.header_row.evidence),
+        "header_row_candidates": [
+            _evidence(candidate) for candidate in measurement.header_row.candidates
+        ],
         "header_col_evidence": _evidence(measurement.header_col),
         # What produced a token count, so two profiles taken under different models are not
         # compared as though they were one measurement.
@@ -139,6 +190,8 @@ def sheet_evidence_block(
                 "rendered_fits_token_window": fits_token,
                 "rendered_fits_doc_window": fits_doc,
                 "header_row": measurement.header_row.verdict,
+                "header_row_number": measurement.header_row.row,
+                "header_row_rule": measurement.header_row.rule,
                 "header_col": measurement.header_col.verdict,
                 "fill_ratio": measurement.fill_ratio,
                 "interior_cardinality": measurement.interior_cardinality,
@@ -172,6 +225,11 @@ def _column(column) -> dict:
         "index": column.index,
         "letter": column.letter,
         "name": column.name,
+        # WHICH RULE NAMED IT, and it is not cosmetic: `sheet_records.header_labels` accepts
+        # only `header_row`, because a banner label names a GROUP of columns and a record key
+        # has to name one. A name with no source beside it would make the two
+        # indistinguishable at the one place the difference matters.
+        "name_source": column.name_source,
         "dominant_type": column.dominant_type,
         "type_counts": column.type_counts,
         "non_empty": column.non_empty,
@@ -336,8 +394,28 @@ def _sheet_sentences(measurement: SheetMeasurement) -> list:
     ]
     if measurement.merged_cells:
         sentences.append(f'It declares {_plural(measurement.merged_cells, "merged cell range")}.')
+    # THE BANNER, SAID OUT LOUD. `SPRINT_0_4_0.md` 4.3 offered "keep them as the sheet
+    # node's own content" as one reading of the rows above the header, and this is it: the
+    # profile node is the only text a header-less sheet produces at all, and the words a
+    # person typed across the top of the sheet are the best text on it. Counted, not
+    # interpreted — 8.5's rule holds, because this quotes cells rather than saying what they
+    # mean.
+    for banner in measurement.header_row.banner:
+        values = [value for value in banner.values if value]
+        if values:
+            sentences.append(f'Above the data, row {banner.index} reads: {"; ".join(values)}.')
     if measurement.header_row.verdict:
-        sentences.append("Its first row holds a distinct text value in every column.")
+        where = (
+            "Its first row"
+            if measurement.header_row.row == 1
+            else f"Its row {measurement.header_row.row}"
+        )
+        rule = (
+            "a distinct text value in every column"
+            if measurement.header_row.rule == HEADER_RULE_ALL_TEXT
+            else "a distinct value in every column"
+        )
+        sentences.append(f"{where} holds {rule}, so it names them.")
     if measurement.header_col.verdict:
         sentences.append(
             "Its first column holds a distinct text value in every row below the first."
@@ -364,7 +442,17 @@ def _sheet_sentences(measurement: SheetMeasurement) -> list:
 
 def _column_sentence(column, *, list_values: bool) -> str:
     """One column, as 8.5's table of permitted factoids allows and no further."""
-    label = f'Column "{column.name}"' if column.name else f"Column {column.letter}"
+    # A BANNER LABEL IS NOT A COLUMN NAME AND THE SENTENCE SAYS SO. The header row names
+    # each column separately; a merged banner names the GROUP the column sits in, so
+    # `Column "2024 Actuals"` would assert something the file does not. Naming the letter and
+    # the banner together is what the file actually declares, and it is still the label an
+    # agent needs to write its next query — which is 8.5's whole purpose for this node.
+    if column.name and column.name_source == NAME_SOURCE_BANNER:
+        label = f'Column {column.letter}, under the banner "{column.name}",'
+    elif column.name:
+        label = f'Column "{column.name}"'
+    else:
+        label = f"Column {column.letter}"
     if column.dominant_type == TYPE_EMPTY:
         return f"{label} holds no value in any row."
 
