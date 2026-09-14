@@ -105,9 +105,12 @@ CREATE INDEX IF NOT EXISTS idx_document_evidence_stale ON document_evidence (nam
 -- ---------------------------------------------------------------------------
 -- The move. Thirty keys out of the column, into rows, and then off the column.
 --
--- ONE OF THE THIRTY MOVES NOTHING AND IS LISTED ANYWAY. `cell` was registered on
--- 2026-09-08, long after this migration, so no database has a node carrying it in
--- `structured_content` and its copy finds zero rows. The list is generated from the
+-- TWO OF THE THIRTY-ONE MOVE NOTHING AND ARE LISTED ANYWAY. `cell` was registered on
+-- 2026-09-08 and `table` on 2026-09-14, both long after this migration, so no database has
+-- a node carrying either in `structured_content` and their copies find zero rows. `table`
+-- was caught by the full suite at 0.6.0's M1 gate and not by the lane that registered it,
+-- which is the reading this paragraph was already written to predict. The list is generated
+-- from the
 -- REGISTRY rather than from what any particular database holds — `test_evidence_rows.py`
 -- enforces that in both directions — because a name absent here is a key this migration
 -- would leave behind on whatever database is migrated next, and "it did not exist when I
@@ -153,6 +156,7 @@ INSERT INTO _evidence_keys (column_key, name) VALUES
     ('source_span', 'source_span'),
     ('speaker', 'speaker'),
     ('structure', 'structure'),
+    ('table', 'table'),
     ('timestamp', 'timestamp'),
     ('turn_index', 'turn_index'),
     ('yield', 'yield');
