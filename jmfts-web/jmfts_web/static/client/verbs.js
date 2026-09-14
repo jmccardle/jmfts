@@ -201,6 +201,17 @@ export class JmftsClient extends JmftsTransport {
   }
 
   /**
+   * The bytes this document was ingested from, exactly as they were received
+   *
+   * `GET /documents/{document_id}/blob` — DocumentService.get_document_blob
+   *
+   * Answers `application/octet-stream`; resolves to a Blob, not JSON.
+   */
+  get_document_blob(args = {}) {
+    return this.call("DocumentService.get_document_blob", args);
+  }
+
+  /**
    * Read a region of a spreadsheet from the sheet node's source workbook
    *
    * `GET /documents/{document_id}/cells` — DocumentService.get_document_cells
@@ -216,6 +227,28 @@ export class JmftsClient extends JmftsTransport {
    */
   get_document_evidence(args = {}) {
     return this.call("DocumentService.get_document_evidence", args);
+  }
+
+  /**
+   * One page of the PDF this node came from, rendered as a PNG
+   *
+   * `GET /documents/{document_id}/image` — DocumentService.get_document_image
+   *
+   * Answers `image/png`; resolves to a Blob, not JSON.
+   */
+  get_document_image(args = {}) {
+    return this.call("DocumentService.get_document_image", args);
+  }
+
+  /**
+   * A rectangle of a page, from this node's own anchor or from explicit bounds
+   *
+   * `GET /documents/{document_id}/region` — DocumentService.get_document_region
+   *
+   * Answers `image/png`; resolves to a Blob, not JSON.
+   */
+  get_document_region(args = {}) {
+    return this.call("DocumentService.get_document_region", args);
   }
 
   /**

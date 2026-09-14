@@ -2878,6 +2878,16 @@ export declare class JmftsClient extends JmftsTransport {
   }): Promise<DocumentResponse>;
 
   /**
+   * The bytes this document was ingested from, exactly as they were received
+   *
+   * `GET /documents/{document_id}/blob` — DocumentService.get_document_blob
+   * RemoteJmftsClient method: `get_document_blob`.
+   */
+  get_document_blob(args: {
+    document_id: number;
+  }): Promise<Blob>;
+
+  /**
    * Read a region of a spreadsheet from the sheet node's source workbook
    *
    * `GET /documents/{document_id}/cells` — DocumentService.get_document_cells
@@ -2897,6 +2907,32 @@ export declare class JmftsClient extends JmftsTransport {
   get_document_evidence(args: {
     document_id: number;
   }): Promise<DocumentEvidenceResponse>;
+
+  /**
+   * One page of the PDF this node came from, rendered as a PNG
+   *
+   * `GET /documents/{document_id}/image` — DocumentService.get_document_image
+   * RemoteJmftsClient method: `get_document_image`.
+   */
+  get_document_image(args: {
+    document_id: number;
+    page?: number | null;
+    dpi?: number;
+  }): Promise<Blob>;
+
+  /**
+   * A rectangle of a page, from this node's own anchor or from explicit bounds
+   *
+   * `GET /documents/{document_id}/region` — DocumentService.get_document_region
+   * RemoteJmftsClient method: `get_document_region`.
+   */
+  get_document_region(args: {
+    document_id: number;
+    anchor?: boolean;
+    page?: number | null;
+    bbox?: string | null;
+    dpi?: number;
+  }): Promise<Blob>;
 
   /**
    * Get token embeddings for a document (for inspection)

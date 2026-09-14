@@ -526,6 +526,30 @@ export const OPERATIONS = Object.freeze(
     ],
     "summary": "Get a document by ID"
   },
+  "DocumentService.get_document_blob": {
+    "op_id": "DocumentService.get_document_blob",
+    "operation_id": "DocumentService_get_document_blob_documents__document_id__blob_get",
+    "python_verb": "get_document_blob",
+    "method": "GET",
+    "path": "/documents/{document_id}/blob",
+    "path_params": [
+      "document_id"
+    ],
+    "path_slash_params": [],
+    "query_params": [],
+    "body_param": null,
+    "body_media_type": null,
+    "form_params": [],
+    "file_params": [],
+    "binary": true,
+    "response_media_type": "application/octet-stream",
+    "success_status": 200,
+    "security_scheme": "JMFTSToken",
+    "tags": [
+      "documents"
+    ],
+    "summary": "The bytes this document was ingested from, exactly as they were received"
+  },
   "DocumentService.get_document_cells": {
     "op_id": "DocumentService.get_document_cells",
     "operation_id": "DocumentService_get_document_cells_documents__document_id__cells_get",
@@ -575,6 +599,62 @@ export const OPERATIONS = Object.freeze(
       "documents"
     ],
     "summary": "Everything the ingest pipeline knows about a document"
+  },
+  "DocumentService.get_document_image": {
+    "op_id": "DocumentService.get_document_image",
+    "operation_id": "DocumentService_get_document_image_documents__document_id__image_get",
+    "python_verb": "get_document_image",
+    "method": "GET",
+    "path": "/documents/{document_id}/image",
+    "path_params": [
+      "document_id"
+    ],
+    "path_slash_params": [],
+    "query_params": [
+      "page",
+      "dpi"
+    ],
+    "body_param": null,
+    "body_media_type": null,
+    "form_params": [],
+    "file_params": [],
+    "binary": true,
+    "response_media_type": "image/png",
+    "success_status": 200,
+    "security_scheme": "JMFTSToken",
+    "tags": [
+      "documents"
+    ],
+    "summary": "One page of the PDF this node came from, rendered as a PNG"
+  },
+  "DocumentService.get_document_region": {
+    "op_id": "DocumentService.get_document_region",
+    "operation_id": "DocumentService_get_document_region_documents__document_id__region_get",
+    "python_verb": "get_document_region",
+    "method": "GET",
+    "path": "/documents/{document_id}/region",
+    "path_params": [
+      "document_id"
+    ],
+    "path_slash_params": [],
+    "query_params": [
+      "anchor",
+      "page",
+      "bbox",
+      "dpi"
+    ],
+    "body_param": null,
+    "body_media_type": null,
+    "form_params": [],
+    "file_params": [],
+    "binary": true,
+    "response_media_type": "image/png",
+    "success_status": 200,
+    "security_scheme": "JMFTSToken",
+    "tags": [
+      "documents"
+    ],
+    "summary": "A rectangle of a page, from this node's own anchor or from explicit bounds"
   },
   "DocumentService.get_document_tokens": {
     "op_id": "DocumentService.get_document_tokens",
