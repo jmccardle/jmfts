@@ -28,6 +28,9 @@ from scripts.generate_client import TARGET, render
 #: instead of a validated type. Named rather than counted, so adding one is a decision
 #: someone writes down. ``test_untyped_verbs_carve_out_only_shrinks`` fails if a name here
 #: gains a response model and is left on the list.
+#:
+#: A BINARY operation is not one of these and is excluded by its ``media_type`` rather than
+#: by name — see the test below.
 UNTYPED_OPERATIONS = frozenset(
     {
         "AccessService.delete_principal",
@@ -86,8 +89,19 @@ def test_operation_method_names_are_unique():
 
 
 def test_untyped_verbs_are_exactly_the_carve_out():
-    """The set of operations returning unvalidated JSON is the one written down above."""
-    actual = {spec.name for spec in REGISTRY if spec.response_model is None}
+    """The set of operations returning unvalidated JSON is the one written down above.
+
+    **A binary operation is excluded by ``media_type``, not by name.** ``@expose`` refuses
+    ``media_type`` alongside ``response_model`` (``registry.py:148``), so every binary route
+    has ``response_model is None`` by construction — but it hands back a validated
+    ``BinaryPayload``, which is the opposite of unvalidated. Listing the three byte routes
+    (``docs/SPRINT_0_6_0.md`` Block F steps 20 to 22) on a carve-out headed "returns parsed
+    JSON" would make one list mean two things, and would then have to grow by a name for
+    every PNG this appliance learns to serve.
+    """
+    actual = {
+        spec.name for spec in REGISTRY if spec.response_model is None and spec.media_type is None
+    }
     assert actual == UNTYPED_OPERATIONS, (
         f"untyped operations changed. Gained: {actual - UNTYPED_OPERATIONS}. "
         f"Lost: {UNTYPED_OPERATIONS - actual}. Declare a response_model, or update the list."

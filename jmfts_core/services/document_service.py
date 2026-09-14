@@ -33,6 +33,16 @@ from sqlalchemy.orm import Session
 
 from jmfts_core.access import can_read, filter_readable, require_edge_write
 from jmfts_core.chunking import ChunkStrategy, chunk_text
+from jmfts_client.contracts.anchor import (
+    ANCHOR_ROW,
+    ANCHOR_UNRESOLVED_ROW,
+    CellsAnchor,
+    PdfAnchor,
+    SpanAnchor,
+    UnknownAnchorKind,
+    parse_anchor,
+)
+from jmfts_client.contracts.binary import BinaryPayload
 from jmfts_client.contracts.document import (
     CellNoteResponse,
     CellRowResponse,
@@ -65,7 +75,7 @@ from jmfts_client.contracts.document import (
 )
 from jmfts_core.embedding import TextTooLongError, get_embedding_service
 from jmfts_core.fact_extraction import extract_facts
-from jmfts_core.models.document import USETYPE_SHEET
+from jmfts_core.models.document import Document, USETYPE_FILE, USETYPE_SHEET
 from jmfts_core.office.cells import (
     CELLS_READ_MAX,
     BadCellRef,
@@ -78,6 +88,15 @@ from jmfts_core.office.cells import (
     used_range,
 )
 from jmfts_core.registry import expose, register_service
+from jmfts_core.rendering import (
+    DPI_DEFAULT,
+    PDF_MEDIA_TYPE,
+    PNG_MEDIA_TYPE,
+    RenderTooLarge,
+    UnreadablePdf,
+    parse_bbox,
+    render_page,
+)
 from jmfts_core.repositories.blob import BlobRepository
 from jmfts_core.repositories.evidence import EvidenceRepository
 from jmfts_core.repositories.search import SearchRepository
@@ -126,6 +145,42 @@ class SheetSourceUnavailable(Exception):
     """
 
 
+class BlobUnavailable(Exception):
+    """There are no stored bytes to serve for this document (→ HTTP 409).
+
+    ``GET /{id}/blob`` when the node never held an upload — it is not a ``file`` node — or
+    held one whose large object has since been unlinked; ``/image`` and ``/region`` when
+    nothing above the node holds one either. 409 for ``SheetSourceUnavailable``'s reason:
+    the document exists, the caller may read it, and what is missing is a state of the tree.
+
+    **Named, and never an empty 200.** ``BlobRepository.find_blobless_documents`` exists
+    because a file node whose bytes never landed is a real state, and a zero-byte body would
+    be indistinguishable from an empty file that really was uploaded.
+    """
+
+
+class NotAPdfSource(Exception):
+    """``/image`` or ``/region`` was pointed at something that is not a PDF (→ HTTP 409).
+
+    The message names what the evidence says the bytes ARE, so the answer is "this is a
+    .docx" rather than "no". Office formats reach the same two verbs through a rendition,
+    which is ``OFFICE_SPEC.md`` Part 11 step 7 and ``docs/SPRINT_0_6_0.md`` Block G — not
+    this step, and a renderer that quietly extracted markdown instead would be the failure
+    step 29 is written to avoid, one route earlier.
+    """
+
+
+class RegionNotAddressable(Exception):
+    """``anchor=true``, and this node's own anchor is not a rectangle on a page (→ HTTP 409).
+
+    Four ways in, and the message says which: there is no ``source_anchor`` row; there is a
+    ``source_anchor.unresolved`` row and it carries the reason; the anchor addresses cells,
+    which are served as cells; or it addresses a character span, which has no geometry at
+    all. 409 and not 404 for ``NotASheetNode``'s reason — the document exists and the caller
+    may read it, it is simply not a thing that has a picture.
+    """
+
+
 # THE SECOND SPELLING OF `USETYPE_SHEET` IS GONE. This module carried its own
 # `USETYPE_SHEET = "sheet"` with a comment saying why: importing it from `sheet_tasks`
 # would pull in `jmfts_core.ingest_tasks`, whose module scope REGISTERS every task handler
@@ -136,10 +191,18 @@ class SheetSourceUnavailable(Exception):
 # already imports that one, and it registers nothing. The test that asserted the two
 # spellings agreed is what the copy cost; the import is the guard now.
 
-#: The evidence row an anchor lives in, spelled here for the reason above (the writer is
-#: :data:`jmfts_core.citation_tasks.ANCHOR_NAME`), and the ``kind`` ``OFFICE_SPEC.md`` Part 5
-#: gives a worksheet region: ``{"kind": "cells", "sheet": "Q3 Pipeline", "ref": "B4:H120"}``.
-ANCHOR_NAME = "source_anchor"
+#: The evidence row an anchor lives in, and the ``kind`` ``OFFICE_SPEC.md`` Part 5 gives a
+#: worksheet region: ``{"kind": "cells", "sheet": "Q3 Pipeline", "ref": "B4:H120"}``.
+#:
+#: THE THIRD SPELLING OF `"source_anchor"` IS GONE TOO, and it went the way `USETYPE_SHEET`
+#: above did. This was a literal, for the reason that paragraph gives — the writer is
+#: :data:`jmfts_core.citation_tasks.ANCHOR_NAME` and importing it would register every task
+#: handler. `jmfts_client.contracts.anchor` (Block F step 17) is now the client-side reader
+#: of the same row, it is a contract package that imports neither the server nor a
+#: framework, and this module already imports contracts. So the import is the guard here as
+#: well; the name is kept because `tests/test_document_cells.py` pins it against the writer's
+#: spelling, which is the check that matters and which the alias does not weaken.
+ANCHOR_NAME = ANCHOR_ROW
 ANCHOR_KIND_CELLS = "cells"
 
 #: What ``ref_source`` reports. Three, because "the caller named this rectangle", "the node
@@ -1391,3 +1454,357 @@ class DocumentService:
             raise LookupError(f"Link {link_id} not found on document {document_id}")
         self.session.commit()
         return {"deleted": True, "id": link_id, "link_type": link_type}
+
+    # -- Bytes out: the file, a page, a rectangle (OFFICE_SPEC.md Part 7) ----------
+    #
+    # `OFFICE_SPEC.md` Part 11 step 3, which that document scheduled BEFORE any office
+    # format is read — "steps 1 to 3 deliver the headline feature end to end, a search
+    # result that can show you the page and the rectangle it came from, using formats JMFTS
+    # already ingests, with no new dependency of any tier" — and which had no code until
+    # now. Steps 1 and 2 shipped in 0.4.0 (`ADVISORY_TASK_TYPES`, and `citation_tasks.py`
+    # writing the anchors these routes read back). `docs/SPRINT_0_6_0.md` Block F steps 20,
+    # 21 and 22.
+    #
+    # These are the FIRST callers of `ExposeSpec.media_type` (`registry.py:95`) and
+    # `wiring.py::_binary_response` outside that mechanism's own tests. Three consequences
+    # worth reading before adding a fourth:
+    #
+    #   * the method returns a `BinaryPayload`, never bare `bytes` — the adapter raises on
+    #     anything else, because FastAPI's encoder would render bytes as base64 in quotes;
+    #   * the media type on the WIRE is the payload's, and the one on the spec is what
+    #     OpenAPI declares. `/blob` serves whatever was uploaded, so it can only declare
+    #     `application/octet-stream`;
+    #   * `download=True` is `/blob`'s alone. A rendered page is derived from a document
+    #     rather than being one, and naming it invites somebody to treat it as the source
+    #     (`jmfts_client/contracts/binary.py`, the `filename` field).
+    #
+    # ACCESS IS THE SUBTREE RBAC EVERY READ HERE USES, and it is applied to the node the
+    # caller named AND to the file node whose bytes are what actually gets served — the
+    # same two checks `get_document_cells` makes, for the same reason: a principal who may
+    # not read the workbook must not learn from a rendering verb that it is there. An
+    # unreadable document is indistinguishable from a missing one.
+
+    def _readable(self, document_id: int) -> Document:
+        """The node, or a 404 that does not say whether it exists."""
+        node = DocumentRepository(self.session).get(document_id)
+        if not node or not can_read(self.session, node):
+            raise LookupError(f"Document {document_id} not found")
+        return node
+
+    def _pdf_bytes(self, node: Document) -> bytes:
+        """The PDF ``node``'s region lives in: its own bytes, or its nearest file node's.
+
+        A chunk is what carries an anchor and a file node is what carries the bytes, so a
+        verb that takes an anchor has to walk from one to the other. ``Document.path`` is
+        ancestor ids root-first and excludes self, so the nearest file node above is the
+        LAST of them that is one — nearest and not first, because a file ingested into a
+        subtree under another file (a conversation attachment, a fetched PDF under a page)
+        would otherwise resolve to the outer one's bytes.
+        """
+        repo = DocumentRepository(self.session)
+        if node.usetype == USETYPE_FILE:
+            file_node = node
+        else:
+            above = [a for a in repo.get_ancestors(node.id) if a.usetype == USETYPE_FILE]
+            if not above:
+                raise BlobUnavailable(
+                    f"Document {node.id} has usetype {node.usetype!r} and no {USETYPE_FILE!r} "
+                    "node above it, so there are no stored bytes anywhere on its path to "
+                    "render a page out of"
+                )
+            file_node = above[-1]
+        # The bytes belong to the file node, so reading them is a read OF the file node.
+        if not can_read(self.session, file_node):
+            raise LookupError(f"Document {node.id} not found")
+
+        blobs = BlobRepository(self.session)
+        if blobs.get(file_node.id) is None:
+            raise BlobUnavailable(
+                f"Document {file_node.id} holds no stored bytes; `find_blobless_documents` "
+                "exists because a file node whose bytes never landed, or whose large object "
+                "was unlinked, is a real state of this tree"
+            )
+
+        # `detected_mime` and NOT the blob row's served `mime_type`, and the difference is
+        # the one `ingest_service.py:773` states: the bytes are evidence and the header is a
+        # claim. A real PDF always detects by its magic bytes (`probe.py:59`), so absent or
+        # different here is evidence that these are not one — and believing a declaration
+        # instead would hand `pymupdf` a `.docx` and turn a clear refusal into a parse error.
+        found = EvidenceRepository(self.session).read(file_node.id, "file") or {}
+        detected = found.get("detected_mime")
+        if detected != PDF_MEDIA_TYPE:
+            raise NotAPdfSource(
+                f"Document {file_node.id} is {detected or 'bytes nothing recognised'} "
+                f"(declared {found.get('declared_mime') or 'nothing'}), not "
+                f"{PDF_MEDIA_TYPE}. Rendering an office format goes through a rendition, "
+                "which is OFFICE_SPEC.md Part 11 step 7 and has no code here yet"
+            )
+
+        # `read_bytes` raises `BlobLeakError` when the row is there and the large object is
+        # not. That is left UNMAPPED and reaches a 500 on purpose: the row asserts the bytes
+        # exist, so its being wrong is a corruption report and not a state to describe.
+        return blobs.read_bytes(file_node.id)
+
+    def _pdf_anchor(self, document_id: int) -> PdfAnchor:
+        """This node's own ``source_anchor``, as a page and a rectangle — or why it is not one.
+
+        ``OFFICE_SPEC.md`` Part 5. The four refusals are four different facts and the caller
+        can act on each: wait for `citation`, read the recorded reason, ask ``/cells``, or
+        highlight the text it is already showing.
+        """
+        evidence = EvidenceRepository(self.session).read_all(document_id)
+        row = evidence.get(ANCHOR_NAME)
+        if row is None:
+            # TWO ROWS, NEVER ONE WITH A NULL (`evidence.py:453`: the unresolved row is
+            # "present exactly when `anchor` is not"). "Nothing has placed this passage" and
+            # "this passage could not be placed, because X" are different answers, and a
+            # verb that gave one message for both would be hiding the second.
+            unresolved = evidence.get(ANCHOR_UNRESOLVED_ROW)
+            if isinstance(unresolved, dict):
+                raise RegionNotAddressable(
+                    f"Document {document_id} has no rectangle: "
+                    f"{unresolved.get('reason')} (code {unresolved.get('code')!r})"
+                )
+            raise RegionNotAddressable(
+                f"Document {document_id} carries no {ANCHOR_NAME!r} evidence row, so it is "
+                "not addressed at any region of its source. `citation` is what writes one "
+                "and it runs over a PDF text layer; name a `page` and a `bbox` to render a "
+                "rectangle this node does not claim"
+            )
+        try:
+            anchor = parse_anchor(row)
+        except UnknownAnchorKind as exc:
+            # The contract raises rather than returning None, and this keeps that: an
+            # anchor nobody can interpret is not a highlight that is merely missing.
+            raise RegionNotAddressable(f"Document {document_id}: {exc}") from exc
+
+        if isinstance(anchor, CellsAnchor):
+            # A SPREADSHEET REGION IS SERVED AS CELLS, NOT AS AN IMAGE. Part 7 gives it its
+            # own verb and `docs/SPRINT_0_6_0.md` step 22 says why: for a sheet, JSON cells
+            # are the better answer than a picture of cells — they are selectable,
+            # summable and diffable, and `/cells` serves formulas beside the values, which
+            # no raster can. 409 is this file's house status for "wrong kind of node"
+            # (`NotASheetNode`), and the message carries the route that does answer, because
+            # an error that names the fix costs the caller one call instead of a search.
+            raise RegionNotAddressable(
+                f"Document {document_id} is addressed at cells {anchor.ref!r} of sheet "
+                f"{anchor.sheet!r}, and a spreadsheet region is served as cells rather than "
+                f"as a picture of cells: GET /documents/{document_id}/cells"
+            )
+        if isinstance(anchor, SpanAnchor):
+            # Same treatment, different absence: a character range in the extracted markdown
+            # has NO geometry to crop to. There is nothing to draw it on until something
+            # paginates the document, which for an office format is a rendition (Part 6).
+            # The feature for this node is highlighting the text a renderer is already
+            # showing, which is IC-9's other surface and not a picture.
+            raise RegionNotAddressable(
+                f"Document {document_id} is addressed at characters "
+                f"{anchor.char_start}-{anchor.char_end} of its extracted markdown, which is "
+                "a range in text and has no rectangle on any page. Nothing has paginated "
+                "this document, so there is no picture of that span to crop"
+            )
+        return anchor
+
+    @expose(
+        "GET",
+        "/documents/{document_id}/blob",
+        # The weaker claim, and deliberately so: this route serves whatever was uploaded, so
+        # its real content type is a property of the row and travels on the payload.
+        media_type="application/octet-stream",
+        errors={LookupError: 404, BlobUnavailable: 409},
+        tags=["documents"],
+        summary="The bytes this document was ingested from, exactly as they were received",
+    )
+    def get_document_blob(self, document_id: int) -> BinaryPayload:
+        """The original uploaded bytes, for re-hosting and for download.
+
+        ``INGEST_SPEC.md`` Part 9 stores them as a Postgres large object and
+        ``jmfts_core/repositories/blob.py`` is the only door to one; until now its three
+        callers were all task handlers and nothing under ``jmfts_core/rest/`` could reach a
+        blob at all. This is the read verb for them.
+
+        **Served as an attachment, with the uploader's own filename.** The reason this route
+        exists is that somebody wants the file back — to re-host it, to open it in the
+        application that wrote it, or to check it against what they sent — and all three
+        want a file on disk rather than a tab full of bytes. The filename comes from the
+        ``file`` evidence block, which is the record of what was received and never changes
+        after upload (spec 3.3).
+
+        **``attachment`` is also the only safe disposition here**, and that is the half that
+        is not a preference. This route serves uploaded bytes under the uploader's own
+        content type, from the appliance's own origin — an ingested ``.html`` or ``.svg``
+        served ``inline`` would execute in it. A browser does not render an attachment, so
+        the one header that makes the route useful is the one that makes it safe, and a
+        future ``?inline=true`` would have to answer this before it could exist.
+
+        The content type is the blob row's ``mime_type``. That is the value
+        ``ingest_service.py:776`` resolved AT UPLOAD from the detection and the declaration,
+        with a comment saying it "decides only what the stored object is served back as" —
+        which is this. ``file.detected_mime`` is the stronger evidence and is what
+        ``/image`` tests against, but it is nullable (``probe.py:271``: both it and
+        ``detected_by`` are None when nothing recognised the bytes) and a payload's media
+        type is not, so serving from it would mean a second resolution rule here, decided
+        with less than the uploader had.
+
+        A document with no blob is a named 409 and never an empty 200 — see
+        :class:`BlobUnavailable`.
+        """
+        node = self._readable(document_id)
+        blobs = BlobRepository(self.session)
+        row = blobs.get(document_id)
+        if row is None:
+            raise BlobUnavailable(
+                f"Document {document_id} has usetype {node.usetype!r} and holds no stored "
+                f"bytes. Only a {USETYPE_FILE!r} node carries an upload, and one whose large "
+                "object has been unlinked carries none either"
+            )
+        found = EvidenceRepository(self.session).read(document_id, "file") or {}
+        return BinaryPayload(
+            content=blobs.read_bytes(document_id),
+            media_type=row.mime_type,
+            filename=found.get("filename"),
+            download=True,
+        )
+
+    @expose(
+        "GET",
+        "/documents/{document_id}/image",
+        media_type=PNG_MEDIA_TYPE,
+        errors={
+            LookupError: 404,
+            BlobUnavailable: 409,
+            NotAPdfSource: 409,
+            RegionNotAddressable: 409,
+            UnreadablePdf: 409,
+            # It is the RESPONSE that would be too large — `TooManyCells`' reasoning above.
+            RenderTooLarge: 413,
+            # `rendering.BadRenderRequest` is a ValueError, so this one entry covers it and
+            # the parameter-combination refusals below without listing two names for 400.
+            ValueError: 400,
+        },
+        tags=["documents"],
+        summary="One page of the PDF this node came from, rendered as a PNG",
+    )
+    def get_document_image(
+        self,
+        document_id: int,
+        *,
+        page: Optional[int] = None,
+        dpi: int = DPI_DEFAULT,
+    ) -> BinaryPayload:
+        """One page as a PNG. ``OFFICE_SPEC.md`` Part 7.
+
+        ``page`` is **0-BASED**, matching ``PdfAnchor.page``, ``page_offsets`` and
+        ``pages_with_tables``. Nothing here adds one: a viewer that labels pages for a human
+        does that, because the record is not what a human reads, and an endpoint that
+        silently offset it would put every stored anchor one page out.
+
+        Omitting ``page`` asks for the page this node is ADDRESSED at, and there are two
+        readings of that:
+
+        1. **A file node is the whole document**, so its first page is page 0. That is the
+           only reading of "a picture of this document" and it hides nothing.
+        2. **Anything else names its page through its own anchor** — a chunk, a section. A
+           node with no anchor gets a 409 that says so rather than page 0, because a picture
+           of the wrong page is the failure Part 5 calls worse than no picture at all.
+
+        ``dpi`` defaults to 150 and is BOUNDED — see :mod:`jmfts_core.rendering` for the two
+        limits and why there are two. Both refuse rather than clamp, and the refusal names
+        the largest density that would fit.
+
+        **No ``highlight`` parameter, and Part 7's table lists one.** The overlay is IC-9 in
+        ``docs/SPRINT_0_6_0.md`` — one client component that takes a ``source_anchor`` and a
+        rendered surface and draws the box, shared by ``pdf-page``, ``image`` and
+        ``sheet-region``. Burning the rectangle into the pixels here would make the page
+        uncacheable per-anchor, make the box unselectable and unadjustable, and give the
+        tree a second place where a rectangle is drawn — which is exactly how the three
+        surfaces end up disagreeing about which corner the origin is in.
+        """
+        node = self._readable(document_id)
+        if page is None:
+            page = 0 if node.usetype == USETYPE_FILE else self._pdf_anchor(document_id).page
+        return BinaryPayload(
+            content=render_page(self._pdf_bytes(node), page=page, dpi=dpi),
+            media_type=PNG_MEDIA_TYPE,
+        )
+
+    @expose(
+        "GET",
+        "/documents/{document_id}/region",
+        media_type=PNG_MEDIA_TYPE,
+        errors={
+            LookupError: 404,
+            BlobUnavailable: 409,
+            NotAPdfSource: 409,
+            RegionNotAddressable: 409,
+            UnreadablePdf: 409,
+            RenderTooLarge: 413,
+            ValueError: 400,
+        },
+        tags=["documents"],
+        summary="A rectangle of a page, from this node's own anchor or from explicit bounds",
+    )
+    def get_document_region(
+        self,
+        document_id: int,
+        *,
+        anchor: bool = False,
+        page: Optional[int] = None,
+        bbox: Optional[str] = None,
+        dpi: int = DPI_DEFAULT,
+    ) -> BinaryPayload:
+        """The picture of the words that matched. ``OFFICE_SPEC.md`` Part 7.
+
+        This is the verb the user story is about: a search result comes back, and the caller
+        wants to see the passage where it sits on the page rather than take the text on
+        trust. Two ways to name the rectangle, and they are mutually exclusive:
+
+        * ``anchor=true`` — the node's OWN ``source_anchor`` evidence row, which is what
+          ``citation`` wrote when it placed this chunk. No coordinates to carry, and it is
+          the form a client has after a search hit.
+        * ``page`` and ``bbox=x0,y0,x1,y1`` — an explicit rectangle in PDF points, in
+          ``pymupdf``'s ``Rect`` order, which is the order a ``source_anchor`` bbox is
+          already in. For a caller that has adjusted a box, or is cropping something no node
+          claims.
+
+        Naming both is a 400 and not a precedence rule. There is no way to tell which was
+        meant, and serving the wrong rectangle confidently is the failure Part 5 says is
+        worse than serving none — the reader cannot tell.
+
+        A rectangle that hangs over the edge of the page is intersected with it; one that
+        misses the page entirely is a 400 naming the media box, because there is no picture
+        of it. An anchor with ``continues`` covers only the page the passage BEGINS on, which
+        is what ``anchor_for_span`` wrote and deliberately so; the overlay is what says
+        "continues on p. 4".
+
+        **The rectangle in points is not returned beside the image**, and Part 7's sketch has
+        it doing so. A ``BinaryPayload`` is bytes and their type, so a second value would
+        need a header or a JSON envelope around a PNG, and neither is a shape this tree has.
+        It is not lost: it is the ``source_anchor`` row that ``GET /documents/{id}/evidence``
+        already serves and that IC-4 puts directly on a search hit, so a caller doing its own
+        rendering has the coordinates before it calls this at all — which is one call earlier
+        than reading them off the response would be.
+        """
+        node = self._readable(document_id)
+        named = page is not None or bbox is not None
+        if anchor and named:
+            raise ValueError(
+                "`anchor=true` asks for this node's own rectangle and `page`/`bbox` names "
+                "another. Pass one or the other: there is no way to tell which was meant, "
+                "and a confident picture of the wrong rectangle is worse than a refusal"
+            )
+        if anchor:
+            found = self._pdf_anchor(document_id)
+            page, box = found.page, found.bbox
+        elif page is not None and bbox is not None:
+            box = parse_bbox(bbox)
+        else:
+            raise ValueError(
+                "name a rectangle with `page` and `bbox=x0,y0,x1,y1` in PDF points, or ask "
+                "for this node's own with `anchor=true`. A `page` with no `bbox` is a whole "
+                "page, and GET /documents/{document_id}/image is the verb that serves one"
+            )
+        return BinaryPayload(
+            content=render_page(self._pdf_bytes(node), page=page, dpi=dpi, clip=box),
+            media_type=PNG_MEDIA_TYPE,
+        )
