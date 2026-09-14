@@ -278,6 +278,27 @@ convert = [
     "unoserver>=3.0",
 ]
 
+# THE BROWSER FRONT END. `docs/SPRINT_0_6_0.md` Block F, and question 4.8 for why it is a
+# distribution rather than a directory in this wheel.
+#
+# `jmfts-web` carries built static files and one module that says where they are. It has NO
+# dependencies of its own, so this extra adds nothing to the environment except the bundle —
+# which is exactly the thing an extra should be able to withhold and could not have, had the
+# files lived under `jmfts_core/`. `Dockerfile.worker` builds a worker that drains the ingest
+# queue and never serves a page.
+#
+# Pinned with `==` for the same reason `jmfts-client` is: three wheels, one number, one tag.
+# The front end is written against this appliance's own route table, so a UI one release
+# behind its server renders controls for operations that have moved. `bump-version.sh`
+# discovers this pin by pattern rather than by list.
+#
+# NOT implied by `dev`. The suite does not open a browser, and `tests/test_web_distribution.py`
+# reads the tree rather than the installed package — so a `dev` that pulled this in would be
+# installing a wheel to test files it does not read.
+web = [
+    "jmfts-web==0.5.1",
+]
+
 # The suite embeds for real — it ingests documents and asserts on the vectors — so dev
 # implies the model stack rather than testing a configuration nobody ships. Three of the
 # four extras are implied for the same reason: the office tests open real packages, the

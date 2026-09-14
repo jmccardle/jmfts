@@ -296,6 +296,37 @@ class SearchResultItem(BaseModel):
     score: float
     method: str
 
+    #: IC-4. Where in the source document this hit came from, verbatim from the node's
+    #: ``source_anchor`` evidence row — a page and a rectangle for a PDF, a worksheet range
+    #: for a spreadsheet. ``jmfts_client.contracts.anchor.parse_anchor`` reads it.
+    #:
+    #: **This is on the hit to remove a round trip from the beeline.** Without it a result
+    #: list that offers "show me where" calls ``GET /documents/{id}/evidence`` once per hit
+    #: before it can draw anything — ten hits, ten calls, to decide whether to render ten
+    #: buttons. ``docs/SPRINT_0_6_0.md`` Block F step 31 is where the three pieces meet.
+    #:
+    #: ``None`` means this node has no anchor, which is the ordinary case for most of the
+    #: corpus: ``citation`` runs only on PDFs today and is advisory
+    #: (``models/task_queue.py:136``), so a document without one is not a document that
+    #: failed.
+    source_anchor: Optional[dict] = Field(
+        default=None,
+        description="The source_anchor evidence row for this node, if it has one.",
+    )
+
+    #: Why this hit has no anchor, when something tried and could not recover one. The
+    #: ``source_anchor.unresolved`` row, "present exactly when `anchor` is not"
+    #: (``jmfts_core/evidence.py:453``).
+    #:
+    #: Both fields are ``None`` for a node nothing ever attempted, and that is the third
+    #: state: no attempt, a failed attempt with a reason, and a recovered anchor. A viewer
+    #: that collapsed the first two would report every un-cited document as a recovery
+    #: failure.
+    source_anchor_unresolved: Optional[dict] = Field(
+        default=None,
+        description="The source_anchor.unresolved row: why no anchor was recovered.",
+    )
+
 
 class SearchResponse(BaseModel):
     """Search response.

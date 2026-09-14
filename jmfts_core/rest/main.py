@@ -183,6 +183,32 @@ app.include_router(build_exposed_router())
 # dependency and its own credential; see jmfts_core/rest/routers/runner.py.
 app.include_router(runner.router)
 
+# The browser front end, when `jmfts[web]` is installed. IC-5, `docs/SPRINT_0_6_0.md` Block F
+# step 19.
+#
+# A SEPARATE DISTRIBUTION, mounted here rather than packaged in this wheel. `jmfts-web`
+# carries built static files and one module that says where they are; it has no dependencies
+# and imports nothing from this package. `Dockerfile.worker` builds a worker that drains the
+# ingest queue and never serves a page, and this is what keeps it from carrying a UI.
+#
+# The import is guarded and a missing package is SILENT, which is the one place in this file
+# that is true. Fail Early is about not hiding a problem, and a base install with no front end
+# has no problem: `jmfts[web]` is the request for one, and not making it is an answer. A
+# bundle that is installed but damaged is a different case and `static_dir()` raises for it —
+# that failure reaches the boot log rather than being swallowed here.
+#
+# `/app` is mounted AFTER every API route, so a future route can never be shadowed by a file
+# with a matching name. StaticFiles with `html=True` serves `index.html` for the directory
+# itself, which is what makes `/app/` work without a redirect.
+try:
+    import jmfts_web
+except ImportError:
+    pass
+else:
+    from fastapi.staticfiles import StaticFiles
+
+    app.mount("/app", StaticFiles(directory=jmfts_web.static_dir(), html=True), name="web")
+
 
 # The generated `security` block, corrected to match the gate that actually runs.
 #

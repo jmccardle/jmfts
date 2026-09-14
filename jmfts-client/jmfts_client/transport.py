@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import json
 from typing import Any, Mapping, Optional
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import httpx
 from pydantic import BaseModel
 
+from jmfts_client.contracts.binary import BinaryPayload
 from jmfts_client.contracts.upload import UploadedFile
 from jmfts_client.errors import JmftsTransportError, exception_for
 
@@ -118,10 +119,57 @@ class _VerbTransport:
         if resp.status_code >= 400:
             raise exception_for(resp.status_code, _detail_of(resp), url)
 
+        if response is BinaryPayload:
+            # Before the 204 check below, deliberately: a zero-byte document is a real
+            # answer for this family of routes, and returning None for it would make an
+            # empty file indistinguishable from a route that declined to send one.
+            return _binary_payload(resp)
+
         if resp.status_code == 204 or not resp.content:
             return None
         payload = resp.json()
         return _validate(payload, response)
+
+
+def _binary_payload(resp: httpx.Response) -> BinaryPayload:
+    """Rebuild the server's :class:`BinaryPayload` from the response it became.
+
+    The mirror of ``jmfts_core.rest.wiring._binary_response``, so that a caller holding a
+    payload cannot tell which client produced it. Three fields are read back off the wire
+    and the fourth is derived:
+
+    * ``media_type`` from ``Content-Type``, with the charset parameter dropped — the type
+      is what these bytes ARE and a charset is a claim about decoding them.
+    * ``download`` from whether ``Content-Disposition`` says ``attachment``.
+    * ``filename`` from ``filename*`` when present and from ``filename`` otherwise. The
+      starred form is preferred because it is the one that survived a non-ASCII name.
+
+    A response carrying no ``Content-Type`` at all raises rather than being labelled: these
+    routes exist so that a caller knows what it received, and guessing defeats them.
+    """
+    content_type = resp.headers.get("content-type")
+    if not content_type:
+        raise JmftsTransportError(
+            f"{resp.request.method} {resp.request.url} returned a binary body with no "
+            "Content-Type, so what it holds cannot be established."
+        )
+    media_type = content_type.split(";", 1)[0].strip()
+
+    disposition = resp.headers.get("content-disposition", "")
+    download = disposition.split(";", 1)[0].strip().lower() == "attachment"
+
+    filename: Optional[str] = None
+    for part in disposition.split(";")[1:]:
+        key, _, value = part.strip().partition("=")
+        if key.lower() == "filename*" and value.upper().startswith("UTF-8''"):
+            filename = unquote(value[len("UTF-8''") :])
+            break
+        if key.lower() == "filename" and filename is None:
+            filename = value.strip('"')
+
+    return BinaryPayload(
+        content=resp.content, media_type=media_type, filename=filename, download=download
+    )
 
 
 def _fill_path(template: str, values: Mapping[str, Any]) -> str:

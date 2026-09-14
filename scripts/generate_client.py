@@ -197,6 +197,12 @@ def _has_file_part(route: APIRoute) -> bool:
 
 def _response_text(spec: Any, imports: set[str]) -> tuple[str, str]:
     """Return ``(return_annotation, response_argument)`` for one operation."""
+    if spec.media_type:
+        # A binary operation has no response_model by construction — ``@expose`` refuses
+        # the pair — so this branch comes first and the None below means "JSON, unmodelled"
+        # rather than "nothing came back".
+        imports.add("from jmfts_client.contracts.binary import BinaryPayload")
+        return "BinaryPayload", "BinaryPayload"
     model = spec.response_model
     if model is None:
         return "Any", "None"
@@ -220,7 +226,13 @@ def _docstring(spec: Any, route: APIRoute) -> list[str]:
         for status in sorted(by_status):
             names = ", ".join(sorted(by_status[status]))
             lines.append(f"Raises on {status} (server: {names}).")
-    if spec.response_model is None:
+    if spec.media_type:
+        lines.append("")
+        lines.append(
+            f"Returns a ``BinaryPayload``; the route declares ``{spec.media_type}`` and the "
+            "payload carries what actually arrived."
+        )
+    elif spec.response_model is None:
         lines.append("")
         lines.append("The route declares no response model, so the parsed JSON is returned.")
     return lines

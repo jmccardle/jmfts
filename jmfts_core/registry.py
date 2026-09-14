@@ -76,6 +76,23 @@ class ExposeSpec:
     tags: Optional[list[str]] = None
     summary: Optional[str] = None
     status_code: Optional[int] = None  # non-200 success status (e.g. 201); None = FastAPI default
+    #: The content type this operation's 200 carries, when it is not JSON. Setting it makes
+    #: the operation BINARY: the method returns a
+    #: :class:`~jmfts_client.contracts.binary.BinaryPayload` and the adapter turns that into
+    #: a ``Response`` instead of serialising through a ``response_model``.
+    #:
+    #: This is what OpenAPI declares, which for a route serving stored uploads can only be
+    #: ``application/octet-stream`` — the real type is per-document and travels on the
+    #: payload. See that class's docstring for why the two are separate.
+    #:
+    #: **Why this is on the spec at all**, rather than a hand-written router beside
+    #: ``rest/routers/runner.py``: a route outside the registry is a route the generated
+    #: client cannot call and ``tests/test_api_parity.py`` has to carve out by name. The
+    #: tree met this once before and declined it for a good reason that does not generalise
+    #: — ``GET /rdf/turtle`` returns Turtle inside JSON because an export is bounded and the
+    #: counts beside it are load-bearing (``services/rdf_service.py:19``). A PNG has no
+    #: counts to carry.
+    media_type: Optional[str] = None
     service_cls: Optional[type] = None  # filled in by ``register_service``
 
     @property
@@ -115,13 +132,25 @@ def expose(
     tags: Optional[list[str]] = None,
     summary: Optional[str] = None,
     status_code: Optional[int] = None,
+    media_type: Optional[str] = None,
 ) -> Callable:
     """Mark a service method as an exposed operation.
 
     Attaches an :class:`ExposeSpec` to the function; ``register_service`` (applied to
     the owning class) links it to its class and adds it to :data:`REGISTRY`. The method
     itself is returned unchanged, so in-process callers see a plain method.
+
+    ``media_type`` makes the operation binary — see :attr:`ExposeSpec.media_type`. It is
+    mutually exclusive with ``response_model`` and the contradiction raises HERE, at import
+    time, rather than producing an OpenAPI document that promises JSON and a route that
+    sends bytes.
     """
+    if media_type is not None and response_model is not None:
+        raise ValueError(
+            f"@expose({method} {path}) declares both media_type={media_type!r} and "
+            f"response_model={response_model!r}. A binary operation returns a BinaryPayload "
+            "and has no response model; pick one."
+        )
 
     def decorator(func: Callable) -> Callable:
         func.__jmfts_expose__ = ExposeSpec(
@@ -133,6 +162,7 @@ def expose(
             tags=tags,
             summary=summary or (func.__doc__ or "").strip().split("\n", 1)[0] or None,
             status_code=status_code,
+            media_type=media_type,
         )
         return func
 
