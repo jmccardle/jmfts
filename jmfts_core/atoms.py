@@ -184,6 +184,16 @@ EV_CELL = "cell"
 #: workbook.
 EV_TABLE = "table"
 
+#: the ``column_links`` evidence row on a WORKBOOK's file node — ``INGEST_SPEC.md`` 8.6's
+#: proposals: the columns of two different sheets whose value sets nest, with the counts
+#: they were found by and Part 7.6's review payload on each one.
+#:
+#: A SEPARATE NAME FROM :data:`EV_SHEET` and from :data:`EV_STRUCTURE`, because it is
+#: neither. It is not a rung — no boundary is drawn and no node is written — and it is not
+#: about one sheet: the whole point of 8.6 is that the pair spans two of them, so a block
+#: on either sheet node would have to be written twice and could disagree with itself.
+EV_COLUMN_LINKS = "column_links"
+
 #: The vectors: ``Document.embed``, and the token rows when they were asked for. Not a
 #: an evidence row — it is columns and a table — but it is evidence in exactly
 #: the sense that matters here, because ``structure:semantic`` cannot run without it.
@@ -220,6 +230,7 @@ EVIDENCE: frozenset[str] = frozenset(
         EV_RECORD,
         EV_CELL,
         EV_TABLE,
+        EV_COLUMN_LINKS,
         EV_EMBEDDING,
         EV_EFFECTIVE_CONTENT,
         EV_SOURCE_SPAN,

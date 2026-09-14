@@ -57,6 +57,7 @@ of the node above (legal only as a read).
 | `index:bm25` | `text@self`, `text@subtree` | — | `cpu` |
 | `probe` | `file@self`, `blob@self` | `matched@self` | `cpu` |
 | `profile:sheet` | `sheet@self`, `blob@ancestor` | `sheet.measurements@self`, `profile@children`, `text@children` | `cpu` |
+| `propose:links` | `sheet.measurements@children` | `column_links@self` | `cpu` |
 | `structure:conversation` | `matched@self`, `blob@self`, `text@self` | `structure@self`, `structure@subtree`, `text@subtree` | `cpu` |
 | `structure:declared` | `text@self`, `extraction@self`, `matched@self` | `structure@self`, `structure@subtree`, `text@subtree`, `source_span@subtree` | `cpu` |
 | `structure:inferred` | `text@self`, `extraction@self`, `matched@self` | `structure@self`, `structure@subtree`, `text@subtree`, `source_span@subtree` | `cpu` |
@@ -74,7 +75,7 @@ per-document planner asks for them: the upload path enqueues `probe` and whichev
 `fetch:*` the entry point names, the settling walk asks for the rollups, and the rest are
 operations a caller invokes directly.
 
-`derive:rule`, `fetch:arxiv`, `fetch:path`, `fetch:url`, `index:bm25`, `probe`, `structure:semantic`, `summarize`, `summarize:llm`, `summarize:tree`, `validate:shape`
+`derive:rule`, `fetch:arxiv`, `fetch:path`, `fetch:url`, `index:bm25`, `probe`, `propose:links`, `structure:semantic`, `summarize`, `summarize:llm`, `summarize:tree`, `validate:shape`
 
 ## Retrieval visibility
 

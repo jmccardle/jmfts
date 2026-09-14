@@ -321,6 +321,13 @@ register(
     "`extract:sheet` writes for spec 8.4's `small_table`.",
 )
 register(
+    "column_links",
+    type=TYPE_DICT,
+    store=Store(STORE_EVIDENCE, row="column_links"),
+    doc="spec 8.6's proposals on a workbook's file node: the columns of two sheets whose "
+    "value sets nest, the counts they were found by, and a review payload each.",
+)
+register(
     "embedding",
     type=TYPE_LIST,
     store=Store(STORE_COLUMN, "embed"),
