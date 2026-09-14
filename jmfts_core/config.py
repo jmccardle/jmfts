@@ -215,7 +215,23 @@ class Settings(BaseSettings):
     # 018 mints the first one and it is created by the handler that adds this line. From
     # here on a default-filtered search will not return a derived-tree ROOT, which is a
     # contentless container whose only matchable text is the word "Derived".
-    bm25_exclude_usetypes: list[str] = ["entity", "entities", "summary", "derived"]
+    # `cell` IS IN THE BM25 LIST AND NOT IN THE SEARCH ONE, and that asymmetry is the whole
+    # of `SPRINT_0_6_0.md` question 4.3's answer. A `cell` node exists only for a row too
+    # long to embed whole (`sheet_tasks._write_cells`) and carries one column's share of
+    # that row's prose — "Designator: R59.", five tokens. Step 7 made a workbook's `record`
+    # nodes reachable by BM25, and admitting their split siblings as well would put a
+    # population of five-token documents into an inverted index whose `avg_doc_length` the
+    # length normalisation is computed from, moving every score in the index they join.
+    # `STRESS_CORPUS.md` 4.4d measured that effect once already in the direction nobody
+    # chose: 2,323 spreadsheet rows at 24.7 tokens took `universal`'s mean from ~155 to
+    # 145.3. The vector path is untouched — a split row's columns are embedded and answer
+    # vector and MaxSim search — so this declines their postings and not the nodes.
+    #
+    # WHAT IT COSTS, stated because it is a real hole and not a free choice: a row too long
+    # to embed is in the index only through whatever of its columns were long enough to be
+    # chunked into `chunk` pieces. Its SHORT values are in no index. 4.3 names that case —
+    # "a search for a distinctive single value in a wide row" — and holds it open.
+    bm25_exclude_usetypes: list[str] = ["entity", "entities", "summary", "derived", "cell"]
     search_exclude_usetypes: list[str] = ["entity", "entities", "summary", "derived"]
 
     # LLM endpoint (any OpenAI-compatible server: llama-server, vLLM, Ollama, ensonet, or

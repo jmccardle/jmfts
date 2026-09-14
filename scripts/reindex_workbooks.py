@@ -4,7 +4,14 @@
 ``docs/STRESS_CORPUS.md`` 4.4: no ``index:bm25`` task was ever enqueued for an xlsx, so
 every spreadsheet in a corpus is absent from its own index and from ``universal``. That is
 a scheduling defect and it is not fixed here — this script fixes the CORPUS, not the
-pipeline. A workbook uploaded after this runs is unindexed again.
+pipeline.
+
+**THE PIPELINE IS FIXED NOW** (``SPRINT_0_6_0.md`` Block B step 7): ``index:bm25`` is a rule
+at the settling boundary rather than a ``TASK_ROWS`` row, so a workbook uploaded after that
+lands joins its covering indexes on its own. ``docs/MEASURE_BM25_BOUNDARY.md`` §5.5 is why
+this script stays anyway — it repairs a corpus ingested BEFORE that, and the boundary rule
+does not fire retroactively over a tree that has already settled. Re-ingesting is the other
+way to get the same postings and it costs every embedding again.
 
 Why it needs no pipeline fix to be correct: the defect is one of ORDER, and an already
 ingested workbook has no order left. Its tree is complete on disk, so walking it now and

@@ -211,10 +211,14 @@ class TestTheTwoUnknownPolicies:
     def test_a_docx_with_a_text_layer_still_ingests(self):
         """The regression this phase came closest to shipping. Flattening the two fields
         into one expression empties every .docx."""
+        # `index:bm25` was the third name here until `SPRINT_0_6_0.md` Block B step 7 took
+        # it out of `TASK_ROWS` and gave it to `IngestRollupPlanner`. `explain_plan` reads
+        # that table and nothing else, so a rollup rung is not in the answer — see
+        # `jmfts_core.index_tasks` for what that costs and `SPRINT_JOBS.md` Phase 7 for
+        # where it ends. What this test is about is untouched: the two `.docx` fields.
         assert _eligible("docx", {HAS_TEXT_LAYER: True}) == [
             TASK_EXTRACT_TEXT,
             TASK_STRUCTURE_INFERRED,
-            "index:bm25",
         ]
 
 

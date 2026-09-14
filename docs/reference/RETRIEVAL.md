@@ -51,6 +51,6 @@ Pass an explicit `weights` map to control this, or `{}` for equal-weight RRF.
 ## Exclusion has two layers
 
 `exclude_types` is a search-time filter and is reported in `applied.exclude_types`. BM25
-also excludes at INDEX time — `entity`, `entities`, `summary`, `derived` are never
+also excludes at INDEX time — `entity`, `entities`, `summary`, `derived`, `cell` are never
 written to an inverted index at all — so no search argument brings them back to the bm25
 leg. Re-indexing does.

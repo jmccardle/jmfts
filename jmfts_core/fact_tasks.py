@@ -4,8 +4,13 @@ The other half of 11.1's ``summarize / extract_facts`` parity row: path A ran fa
 extraction as a pipeline stage and path B had nothing. This is the task, and it calls the
 same :func:`jmfts_core.fact_extraction.extract_facts` the stage did, over the same tree.
 
-**A ``TASK_ROWS`` row, not the rollup planner, and the reason is different from
-``index:bm25``'s.** ``ingest_tasks.plan_after_probe``'s docstring has said since it was
+**A ``TASK_ROWS`` row, not the rollup planner — AND ``index:bm25`` STOPPED BEING ONE, which
+is what makes this worth restating.** The two were the same shape until ``SPRINT_0_6_0.md``
+Block B step 7, and ``tests/test_atom_declarations.py`` recorded both as the same
+divergence: each consumes ``text@subtree``, and ``SPRINT_JOBS.md`` 2.2 routes ``@subtree``
+to the settling walk. That entry is deleted for ``index:bm25`` and kept for this one, and the
+two bullets below are the whole of the difference.
+``ingest_tasks.plan_after_probe``'s docstring has said since it was
 written that facts "belong to rollup (5.4) and are the settling walk's business". Two
 things about the work say otherwise:
 

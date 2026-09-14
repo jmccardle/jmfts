@@ -57,7 +57,6 @@ from jmfts_core.ingest_tasks import (
     TASK_CITATION,
     TASK_EXTRACT_FACTS,
     TASK_STRUCTURE_CONVERSATION,
-    TASK_INDEX_BM25,
     TASK_EXTRACT_SHEET,
     TASK_PROFILE_SHEET,
     TASK_ROWS,
@@ -153,18 +152,19 @@ EXPECTED_DIVERGENCE: dict[str, tuple[frozenset[str], str]] = {
         "and becomes a rule that fires when the file node is evaluated (14.1). That is a "
         "behaviour change and it belongs to Phase 3.",
     ),
-    TASK_INDEX_BM25: (
-        frozenset({TASK_STRUCTURE_DECLARED, TASK_STRUCTURE_INFERRED, TASK_STRUCTURE_CONVERSATION}),
-        "the same divergence as `citation` above, for the same reason: it consumes "
-        "`text@subtree`, the two rungs produce it at `@subtree`, and 2.2 makes `@subtree` "
-        "evidence the settling walk's dependency rather than a within-node edge. "
-        "INGEST_SPEC.md 11.5 in fact describes this task AS a rollup task, so the day "
-        "Phase 3 moves it under the walk, the spec and the implementation converge rather "
-        "than diverge.",
-    ),
+    # `index:bm25` WAS THE SECOND ENTRY AND IS GONE, WHICH IS THE POINT OF THE LIST.
+    # It read: "the same divergence as `citation` above ... INGEST_SPEC.md 11.5 in fact
+    # describes this task AS a rollup task, so the day Phase 3 moves it under the walk, the
+    # spec and the implementation converge rather than diverge." `SPRINT_0_6_0.md` Block B
+    # step 7 is that day — the task is planned by `IngestRollupPlanner` at the settling
+    # boundary now, so it is not in `_file_node_batch()` at all and there is no ordering
+    # left to diverge. `test_every_expected_divergence_still_diverges` is what would have
+    # failed had the entry been carried, which is the property this comment is standing in
+    # for: the prediction was recorded before the move and the move deleted it.
     TASK_EXTRACT_FACTS: (
         frozenset({TASK_STRUCTURE_DECLARED, TASK_STRUCTURE_INFERRED, TASK_STRUCTURE_CONVERSATION}),
-        "the third instance of the same divergence: it consumes `text@subtree`, the two "
+        "the second instance of the same divergence — it was the third until `index:bm25` "
+        "resolved its own: it consumes `text@subtree`, the two "
         "rungs produce it at `@subtree`, and 2.2 makes `@subtree` evidence the settling "
         "walk's dependency rather than a within-node edge. Unlike the other two, this one "
         "must NOT move under the walk when Phase 3 lands — `jmfts_core.fact_tasks` gives "

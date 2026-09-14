@@ -558,6 +558,11 @@ class TestPipelineRunEndpoint:
         posted with no parent has neither. It is findable by vector search and not by BM25
         until an operator indexes something above it — 1.3's stated default, arrived at
         rather than worked around.
+
+        THE STAGE IS NOW ABSENT WHERE IT USED TO BE `skipped`. `SPRINT_0_6_0.md` Block B
+        step 7 made `index:bm25` a rollup rule, and `IngestRollupPlanner` does not enqueue
+        a task whose only possible outcome is `skipped`. The 0-result search below is the
+        assertion that matters and it is unchanged.
         """
         unique_term = "zygomorphicFlowerSymmetry"
         resp = client_with_db.post(
@@ -574,7 +579,7 @@ class TestPipelineRunEndpoint:
         )
         assert resp.status_code == 200
         index_stage = [s for s in resp.json()["stages"] if s["stage"] == "index:bm25"]
-        assert [s["status"] for s in index_stage] == ["skipped"]
+        assert index_stage == []
 
         search_resp = client_with_db.post(
             "/search/bm25",

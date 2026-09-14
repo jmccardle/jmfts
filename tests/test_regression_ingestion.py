@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
+from sqlalchemy import select
 from sqlalchemy import text as sa_text
 
 from jmfts_client.contracts.ingest import IngestRequest
@@ -27,6 +28,7 @@ try:
     from jmfts_core.database import get_engine
     from jmfts_core.repositories.document import DocumentRepository
     from jmfts_core.repositories.search import SearchRepository
+    from jmfts_core.models.search_index import SearchIndexEntry
     from jmfts_core.embedding import EmbeddingResult, TokenEmbeddingResult
 
     _engine = get_engine()
@@ -249,6 +251,10 @@ class TestBM25MembershipFollowsTheTree:
     node's ``path`` instead and joins every index whose registered root is the node or one
     of its ancestors.
 
+    IT IS A ROLLUP RULE AND NOT A ``TASK_ROWS`` ROW SINCE ``SPRINT_0_6_0.md`` Block B step
+    7 (``jmfts_core.index_tasks``), which changes when it fires and not what it joins.
+    Everything below is about what it joins.
+
     So a file uploaded into a folder somebody has indexed joins that index, and a file
     uploaded anywhere else joins nothing. The second half is the deliberate part: the
     document is findable by vector search and not by BM25 until an operator indexes
@@ -256,9 +262,19 @@ class TestBM25MembershipFollowsTheTree:
     subtree "does not appear in BM25 results by default").
     """
 
-    def test_an_ingest_with_no_indexed_ancestor_joins_nothing_and_says_so(
-        self, db_session, mock_embedding
-    ):
+    def test_an_ingest_with_no_indexed_ancestor_joins_nothing(self, db_session, mock_embedding):
+        """AND NO LONGER "SAYS SO", WHICH IS A LOSS AND IS RECORDED RATHER THAN HIDDEN.
+
+        Until ``SPRINT_0_6_0.md`` Block B step 7 this ingest produced an ``index:bm25``
+        attempt with ``status='skipped'``, a reason, and the ``candidate_roots`` it had
+        looked for. The task is planned by ``IngestRollupPlanner`` now, and the planner
+        refuses to enqueue a row whose only possible outcome is ``skipped`` — its
+        ``summarize:tree`` rung says so in those words, and offering one per settling
+        boundary on an unindexed corpus is what Option I's anti-join exists to avoid
+        (``docs/MEASURE_BM25_BOUNDARY.md`` §2.6). So the trace is gone and the guarantee is
+        not: nothing joins any index, and the question the trace answered is one query
+        against ``search_index_members``.
+        """
         content = (
             "PostgreSQL vector search with pgvector extension is powerful. "
             "It supports HNSW and IVFFlat index types for similarity search. "
@@ -267,15 +283,20 @@ class TestBM25MembershipFollowsTheTree:
 
         result = _ingest(db_session, content, "raw", title="BM25 Membership Test")
 
-        stage = [s for s in result.stages if s.stage == TASK_INDEX_BM25]
-        assert len(stage) == 1, [s.stage for s in result.stages]
-        # Skipped, with the reason and the roots it looked for. Silence would be the same
-        # response as "indexed nothing because there was nothing to index".
-        assert stage[0].status == "skipped"
-        assert stage[0].error is None
-        detail = _attempt_detail(db_session, result.source_document_id, TASK_INDEX_BM25)
-        assert detail["reason"]
-        assert detail["candidate_roots"] == [result.source_document_id]
+        assert [s for s in result.stages if s.stage == TASK_INDEX_BM25] == []
+        subtree = {
+            d.id for d in DocumentRepository(db_session).get_subtree(result.source_document_id)
+        }
+        entries = (
+            db_session.execute(
+                select(SearchIndexEntry.document_id).where(
+                    SearchIndexEntry.document_id.in_(subtree)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert entries == []
         assert TaskQueueRepository(db_session).unfinished_tasks_for(result.source_document_id) == []
 
     def test_an_ingest_under_an_indexed_ancestor_joins_that_index_and_is_findable(

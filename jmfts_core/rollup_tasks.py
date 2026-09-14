@@ -84,9 +84,11 @@ from jmfts_core.derived_roots import (
 from jmfts_core.embedder import get_embedder
 from jmfts_core.embedding import get_embedding_service
 from jmfts_core.entity_roots import ENTITIES_ROOT_USETYPE
+from jmfts_core.index_tasks import PARAM_OUTSTANDING, outstanding_by_index
 from jmfts_core.ingest_options import resolve_options
 from jmfts_core.ingest_tasks import (
     OPTIONS_KEY,
+    TASK_INDEX_BM25,
     TASK_STRUCTURE_SEMANTIC,
     TASK_SUMMARIZE,
     TASK_SUMMARIZE_LLM,
@@ -186,10 +188,11 @@ class IngestRollupPlanner:
     summarize of that root's whole contents — which is why, until it was checked, a derived
     root could not be a parent for anything a rollup did not create.
 
-    **THREE RUNGS, IN ORDER, ONE PER VISIT.** ``structure:semantic`` while the node is too
+    **FOUR RUNGS, IN ORDER, ONE PER VISIT.** ``index:bm25`` first where a covering index is
+    behind, then ``structure:semantic`` while the node is too
     wide, then ``summarize`` for its ``effective_content``, then ``summarize:tree`` to hang
-    that summary in the derived tree (``SPRINT_0_5_0.md`` Block C step 11). The third is
-    gated on the EVIDENCE rather than on the attempt, unlike the two above it: a
+    that summary in the derived tree (``SPRINT_0_5_0.md`` Block C step 11). The fourth is
+    gated on the EVIDENCE rather than on the attempt, unlike the three above it: a
     ``summarize`` that reported ``skipped`` is attempted and wrote no summary, so a queue
     row asking to hang one could only ever report ``skipped`` in turn — and a plan that
     claims work where there is none is the thing 11.2 refuses for ``EXPLAIN``.
@@ -229,6 +232,27 @@ class IngestRollupPlanner:
         options = rollup_options(session, node)
         attempted = TaskQueueRepository(session).attempted_fingerprints(node.id)
 
+        # THE FIRST RUNG, AND THE ONLY ONE THAT NEEDS NEITHER A MODEL NOR AN LLM.
+        # `SPRINT_0_6_0.md` Block B step 7 moved `index:bm25` out of `TASK_ROWS` and to
+        # here; `jmfts_core.index_tasks` carries the argument and
+        # `docs/MEASURE_BM25_BOUNDARY.md` §5.2 the measurements. It is offered FIRST because
+        # BM25 is the retrieval method that needs no GPU and no endpoint, and ordering it
+        # behind `summarize` would make full-text availability wait on an LLM call that has
+        # nothing to do with it.
+        #
+        # Offered only when the anti-join finds rows, which is what keeps it from being a
+        # task per boundary on a corpus nobody has indexed: a node no index covers, or one
+        # whose covering indexes are already current, returns nothing here and the visit
+        # costs one query. That query is the same one the handler runs, and the count it
+        # returns is the params — 6.1's diff keys on `(task, param_fingerprint)`, and a
+        # sheet settling adds no CHILD to the file node while changing this by hundreds, so
+        # `child_count` cannot stand in for it the way it does for the three rungs below.
+        outstanding = sum(len(ids) for ids in outstanding_by_index(session, node).values())
+        if outstanding:
+            spec = _index_bm25_spec(outstanding)
+            if (TASK_INDEX_BM25, param_fingerprint(spec.params)) not in attempted:
+                return (spec,)
+
         if len(children) > options["max_children"]:
             spec = _segment_spec(children, options)
             if (TASK_STRUCTURE_SEMANTIC, param_fingerprint(spec.params)) not in attempted:
@@ -252,6 +276,27 @@ class IngestRollupPlanner:
         if (TASK_SUMMARIZE_TREE, param_fingerprint(spec.params)) not in attempted:
             return (spec,)
         return ()
+
+
+def _index_bm25_spec(outstanding: int) -> TaskSpec:
+    """``self``, and it is a statement about the search tables rather than about any node.
+
+    The task writes no document row at all — the entries, the postings and the term
+    statistics live in ``search_index_entries``, ``search_term_postings`` and
+    ``search_term_stats``. ``subtree`` would reserve every node below this one and block
+    each ``embed`` under it for the duration while buying nothing, which is the reservation
+    the deleted ``TASK_ROWS`` row also declined and for the same reason.
+
+    ``outstanding`` and no options key: this task takes no parameters. What decides whether
+    it needs to run again is how much of the tree a covering index is missing, which is
+    exactly what the number measures — and unlike ``child_count`` it moves when work
+    appears below a node whose own child set did not change.
+    """
+    return TaskSpec(
+        task_type=TASK_INDEX_BM25,
+        write_mode=WRITE_SELF,
+        params={PARAM_OUTSTANDING: outstanding},
+    )
 
 
 def _segment_spec(children: Sequence[int], options: dict) -> TaskSpec:

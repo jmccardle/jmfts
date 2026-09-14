@@ -43,7 +43,6 @@ from jmfts_core.ingest_tasks import (
     TASK_EXTRACT_IMAGES,
     TASK_EXTRACT_TABLES,
     TASK_EXTRACT_TEXT,
-    TASK_INDEX_BM25,
     TASK_OCR,
     TASK_PROBE,
     TASK_ROWS,
@@ -195,11 +194,15 @@ class TestEnqueueConditions:
         plan = plan_after_probe("pdf", {"has_text_layer": True, "has_outline": True})
 
         names = [spec.task_type for spec in plan.eligible]
+        # `index:bm25` WAS THE FOURTH NAME AND IS NOT IN THIS TABLE ANY MORE.
+        # `SPRINT_0_6_0.md` Block B step 7 moved it to the settling boundary, because the
+        # row's `after_any` could name only rungs that run on THIS node and a workbook's
+        # leaves are written one rung further down (`jmfts_core.index_tasks`). `probe` no
+        # longer enqueues it; `tests/test_workbook_bm25.py` is where it is asserted now.
         assert names == [
             TASK_EXTRACT_TEXT,
             TASK_STRUCTURE_DECLARED,
             TASK_CITATION,
-            TASK_INDEX_BM25,
         ]
         after = dict((s.task_type, s.after) for s in plan.eligible)
         # 5.5's within-node ordering: structure:declared depends on extract:text.
@@ -208,8 +211,6 @@ class TestEnqueueConditions:
         # came out eligible, so the queue gates it on THAT row being completed. Naming both
         # rungs in `after` would name two rows that can never both fire.
         assert after[TASK_CITATION] == (TASK_STRUCTURE_DECLARED,)
-        # INGEST_SPEC.md 11.5's row reads the same `after_any` and collapses the same way.
-        assert after[TASK_INDEX_BM25] == (TASK_STRUCTURE_DECLARED,)
 
     def test_citation_follows_whichever_structure_rung_ran(self):
         inferred = plan_after_probe("pdf", {"has_text_layer": True})
@@ -524,10 +525,10 @@ class TestWorkerDrainsTheQueue:
             TASK_PROBE,
             TASK_EXTRACT_TEXT,
             TASK_STRUCTURE_DECLARED,
-            # These two are the file node's post-structuring pair, and they come out in
-            # `TASK_ROWS` order because the claim orders by `created_at` and probe enqueued
-            # the whole batch at once. OFFICE_SPEC.md Part 5 first, INGEST_SPEC.md 11.5
-            # second.
+            # The file node's one post-structuring task. It was a PAIR — `index:bm25`
+            # came second, in `TASK_ROWS` order — until `SPRINT_0_6_0.md` Block B step 7
+            # moved that one to the settling boundary, where this drain's `NO_ROLLUP`
+            # planner never asks for it.
             #
             # Citation's `subtree` reservation conflicts with every `embed` under this
             # node, so under a CONCURRENT fleet it is the last of the file's own tasks to
@@ -535,7 +536,6 @@ class TestWorkerDrainsTheQueue:
             # moment citation is offered and it goes first — which is why the order here is
             # the table's and not the reservation's.
             TASK_CITATION,
-            TASK_INDEX_BM25,
         ]
 
         chunks = (
@@ -548,7 +548,7 @@ class TestWorkerDrainsTheQueue:
             .all()
         )
         assert chunks, "the declared rung wrote no chunks"
-        assert ran == 5 + len(chunks)  # probe, extract:text, the rung, index:bm25, citation
+        assert ran == 4 + len(chunks)  # probe, extract:text, the rung, citation
         for chunk in chunks:
             assert [e["task"] for e in evidence(chunk)["attempts"]] == [TASK_EMBED]
             assert chunk.embed is not None, "the embed task did not write a vector"
@@ -592,7 +592,6 @@ class TestWorkerDrainsTheQueue:
             TASK_EXTRACT_TEXT,
             TASK_STRUCTURE_DECLARED,
             TASK_CITATION,
-            TASK_INDEX_BM25,
         }
         # The ids are the queue's own, and citation's row must be gated on the rung that
         # wrote the chunks rather than merely enqueued after it.
