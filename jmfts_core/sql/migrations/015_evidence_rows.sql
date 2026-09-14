@@ -105,11 +105,16 @@ CREATE INDEX IF NOT EXISTS idx_document_evidence_stale ON document_evidence (nam
 -- ---------------------------------------------------------------------------
 -- The move. Thirty keys out of the column, into rows, and then off the column.
 --
--- TWO OF THE THIRTY-ONE MOVE NOTHING AND ARE LISTED ANYWAY. `cell` was registered on
--- 2026-09-08 and `table` on 2026-09-14, both long after this migration, so no database has
--- a node carrying either in `structured_content` and their copies find zero rows. `table`
+-- FOUR OF THE THIRTY-THREE MOVE NOTHING AND ARE LISTED ANYWAY. `cell` was registered on
+-- 2026-09-08, `table` on 2026-09-14, and `rendition` and `conversion` the same day
+-- (`OFFICE_SPEC.md` Part 6, Block G step 32) — all long after this migration, so no database
+-- has a node carrying any of them in `structured_content` and their copies find zero rows.
+-- `table`
 -- was caught by the full suite at 0.6.0's M1 gate and not by the lane that registered it,
--- which is the reading this paragraph was already written to predict. The list is generated
+-- which is the reading this paragraph was already written to predict. The two office rows
+-- were caught INSIDE their lane instead, which is the same reading with the opposite sign:
+-- the audit is what makes registering a row and forgetting this list a red test rather than
+-- a key left behind on the next database migrated. The list is generated
 -- from the
 -- REGISTRY rather than from what any particular database holds — `test_evidence_rows.py`
 -- enforces that in both directions — because a name absent here is a key this migration
@@ -136,6 +141,7 @@ INSERT INTO _evidence_keys (column_key, name) VALUES
     ('cells', 'cells'),
     ('chunk_index', 'chunk_index'),
     ('conversation_id', 'conversation_id'),
+    ('conversion', 'conversion'),
     ('effective_content', 'effective_content'),
     ('extraction', 'extraction'),
     ('file', 'file'),
@@ -145,6 +151,7 @@ INSERT INTO _evidence_keys (column_key, name) VALUES
     ('part_index', 'part_index'),
     ('profile', 'profile'),
     ('record', 'record'),
+    ('rendition', 'rendition'),
     ('row_index', 'row_index'),
     ('rung', 'rung'),
     ('section_level', 'section_level'),
