@@ -1,24 +1,32 @@
-"""The nine renderers, and the three surfaces one anchor has to land on identically.
+"""The five renderers, and the figures a view builds out of bytes it already fetched.
 
 ``docs/SPRINT_0_6_0.md`` Block F step 29. ``tests/test_web_views.py`` holds the two contracts
 this step is written against — IC-8's bijection between ``RENDERERS`` and the registrations,
-and IC-9's overlay over synthetic surfaces — and this file holds the renderers themselves:
-what they draw, what they ask the appliance for, and what they do instead of drawing when they
-cannot.
+and IC-9's overlay over synthetic surfaces — and this file holds what step 29 actually built:
+the two renderers step 25 shipped unfinished, and the library a view composes to put a page, a
+crop or a grid of cells on the screen with the passage boxed on it.
+
+**A renderer draws CONTENT; a view draws SOURCE.** ``render()`` is synchronous, takes a string
+and holds no client, so it cannot fetch a page image — and it should not, because the byte
+routes need a bearer token and putting a second holder of that token inside library code makes
+step 23's "a view that shows something the log has no call for computed it client-side"
+unreadable. So the page, the crop and the grid are ``render/surfaces.js`` and
+``render/sheet.js`` functions that take a Blob or a response the VIEW obtained. Every test
+below hands them one.
 
 Four properties are worth naming, because each is a defect this sprint was written against,
 caught one layer down:
 
-* **A renderer that cannot get its bytes says so in the failure's own words.** Not a blank
-  frame, which is indistinguishable from a document with nothing in it, and never
-  ``JSON.stringify(error)``, which is ``{}`` for every Error there is.
-* **A picture of the wrong page is worse than no picture** (``OFFICE_SPEC.md`` Part 5), so the
-  page number is decided once, on this side, and sent explicitly on every call.
+* **The origin corner is declared, never passed.** Writing the overlay once does not help if
+  three callers each choose a corner, which is what was happening before this library existed.
+* **A picture of the wrong page is worse than no picture** (``OFFICE_SPEC.md`` Part 5), so
+  ``pageFor`` refuses rather than defaulting to page 0, and the view sends its answer
+  explicitly so the server never takes the same decision twice.
 * **What is withheld is said with the real numbers.** A sheet region larger than the grid this
-  renderer will paint carries a sentence naming how many of its rows are on screen.
-* **The office renderer names the absence before it draws.** It reads a named evidence row and
-  states which representation the reader is looking at; it never calls a route that would
-  refuse and substitutes the answer.
+  library will paint carries a sentence naming how many of its rows are on screen.
+* **Which representation is on the page is stated from a named row.** ``sourceNotice`` reads
+  whether ``file.rendition_ref`` is present and says so; nothing catches a failed call and
+  substitutes extracted text for a picture.
 
 These need no database and no browser. Where ``node`` is on PATH they execute the bundle's ES
 modules against the same stubbed DOM ``tests/test_web_views.py`` uses, plus the two things a
@@ -521,114 +529,96 @@ def test_one_anchor_lands_in_one_place_on_all_three_real_surfaces(tmp_path):
     assert result["refusals"]["no cells"][0] == "SurfaceError"
 
 
-# ------------------------------------------------------------------ the four that see the file
+# ------------------------------------------------- the figures a view builds from its bytes
 
-VISUAL_HARNESS = textwrap.dedent("""
-    import { install, deep as serialize } from "./dom.mjs";
-    import { installObjectUrls } from "./dom.mjs";
+FIGURE_HARNESS = textwrap.dedent("""
+    import { install, deep as serialize, installObjectUrls } from "./dom.mjs";
     install();
     const held = installObjectUrls();
-    const { render } = await import("%(static)s/render/renderers.js");
+    const surfaces = await import("%(static)s/render/surfaces.js");
+    const { gridFigure } = await import("%(static)s/render/sheet.js");
 
     const PNG = Uint8Array.from(atob("%(png)s"), (c) => c.charCodeAt(0));
     const CELLS = %(cells)s;
     const EVIDENCE = %(evidence)s;
-    const calls = [];
-    const client = {
-      get_document_evidence: async (args) => {
-        calls.push(["evidence", args]);
-        return { document_id: args.document_id, evidence: EVIDENCE[args.document_id] ?? {} };
-      },
-      get_document_image: async (args) => {
-        calls.push(["image", args]);
-        return new Blob([PNG], { type: "image/png" });
-      },
-      get_document_region: async (args) => {
-        calls.push(["region", args]);
-        return new Blob([PNG], { type: "image/png" });
-      },
-      get_document_cells: async (args) => {
-        calls.push(["cells", args]);
-        return CELLS[args.ref ?? ""];
-      },
-      get_document_blob: async (args) => {
-        calls.push(["blob", args]);
-        return new Blob([PNG], { type: "application/vnd.openxmlformats-officedocument" });
-      },
-      get_document_image_failing: null,
-    };
+    const page = () => new Blob([PNG], { type: "image/png" });
 
-    const presentation = (renderer, config = {}) => ({
-      renderer, child_handling: "collapsed", link_handling: "hidden", renderer_config: config,
-    });
-
-    const out = { cases: {} };
-    async function draw(label, content, name, doc, context, config = {}) {
-      const before = calls.length;
-      const element = render(content, presentation(name, config), doc, { client, ...context });
-      const immediate = serialize(element);
-      const ready = await element.ready;
-      out.cases[label] = {
-        immediate,
-        tree: serialize(element),
-        ready: ready.status,
-        error: ready.error ? ready.error.message : null,
-        value: ready.status === "drawn" ? JSON.parse(JSON.stringify(ready.value ?? null)) : null,
-        calls: calls.slice(before),
-        surface: element.surface ? { ...element.surface(), cellRect: undefined } : null,
+    const out = { figures: {}, pages: {}, refusals: {}, notices: {} };
+    const record = async (label, build) => {
+      const figure = await build();
+      out.figures[label] = {
+        tree: serialize(figure),
+        surface: figure.surface ? { ...figure.surface(), cellRect: undefined } : null,
+        highlight: figure.highlight ?? null,
       };
-      return element;
-    }
-
-    const chunk = { id: 7, title: "A chunk", usetype: "chunk" };
-    const file = { id: 1, title: "The report", usetype: "file" };
-    const sheet = { id: 9, title: "Q3 Pipeline", usetype: "sheet" };
-
-    await draw("page", "", "pdf-page", chunk, {});
-    await draw("page_of_file", "", "pdf-page", file, {});
-    await draw("page_given", "", "pdf-page", chunk, { page: 5, dpi: 200 });
-    await draw("page_hit", "", "pdf-page", chunk, {
-      evidence: { anchor: %(pdf)s, unresolved: null },
-    });
-    await draw("page_unresolved", "", "pdf-page", { id: 8, usetype: "chunk" }, {});
-    await draw("page_unresolved_named", "", "pdf-page", { id: 8, usetype: "chunk" }, { page: 4 });
-    await draw("page_none", "", "pdf-page", { id: 10, usetype: "chunk" }, {});
-    await draw("region", "", "image", chunk, {});
-    await draw("region_none", "", "image", { id: 10, usetype: "chunk" }, {});
-    await draw("cells", "", "sheet-region", sheet, {});
-    await draw("cells_boxed", "", "sheet-region", sheet, {
-      evidence: { anchor: { kind: "cells", sheet: "Q3 Pipeline", ref: "C5:D6" }, unresolved: null },
-    });
-    await draw("cells_off_region", "", "sheet-region", sheet, {
-      evidence: { anchor: { kind: "cells", sheet: "Q3 Pipeline", ref: "Z900" }, unresolved: null },
-    });
-    await draw("cells_wrong_kind", "", "sheet-region", sheet, {
-      evidence: { anchor: %(pdf)s, unresolved: null },
-    });
-    await draw(
-      "cells_huge", "", "sheet-region", { id: 11, usetype: "sheet" }, {}, { ref: "A1:B900" });
-    const office = await draw("office", "# Heading\\n\\ntext", "office", file, {});
-    out.cases.office.downloadBefore = calls.filter((c) => c[0] === "blob").length;
-    await office.downloadOriginal();
-    out.cases.office.afterDownload = serialize(office);
-    out.cases.office.downloadAfter = calls.filter((c) => c[0] === "blob").length;
-
-    // The appliance refuses, and what the reader sees is the refusal's own words.
-    const broken = {
-      ...client,
-      get_document_image: async () => {
-        const error = new Error("GET /documents/7/image - HTTP 409: these bytes are a .docx");
-        error.name = "JmftsHttpError";
-        throw error;
-      },
+      return figure;
     };
-    const failing = render("", presentation("pdf-page"), chunk, { client: broken });
-    const outcome = await failing.ready;
-    out.failure = {
-      tree: serialize(failing),
-      status: outcome.status,
-      message: outcome.error.message,
+
+    // What a view does: read the evidence it fetched, decide the page, send it, draw the box.
+    const anchored = surfaces.anchorPair(EVIDENCE["7"]);
+    const unresolved = surfaces.anchorPair(EVIDENCE["8"]);
+    const bare = surfaces.anchorPair(EVIDENCE["10"]);
+
+    await record("page", () => surfaces.pageFigure({
+      blob: page(), page: surfaces.pageFor({ id: 7, usetype: "chunk" }, anchored),
+      dpi: 150, evidence: anchored, label: "A chunk",
+    }));
+    await record("page_unresolved", () => surfaces.pageFigure({
+      blob: page(), page: 4, dpi: 150, evidence: unresolved, label: "A chunk",
+    }));
+    await record("page_elsewhere", () => surfaces.pageFigure({
+      blob: page(), page: 9, dpi: 150, evidence: anchored, label: "A chunk",
+    }));
+    await record("page_none", () => surfaces.pageFigure({
+      blob: page(), page: 0, dpi: 150, evidence: bare, label: "The report",
+    }));
+    await record("region", () => surfaces.regionFigure({
+      blob: page(), dpi: 150, anchor: anchored.anchor, label: "A chunk",
+    }));
+    await record("cells", () => gridFigure(CELLS[""], null));
+    await record("cells_boxed", () => gridFigure(CELLS[""], {
+      anchor: { kind: "cells", sheet: "Q3 Pipeline", ref: "C5:D6" }, unresolved: null,
+    }));
+    await record("cells_off_region", () => gridFigure(CELLS[""], {
+      anchor: { kind: "cells", sheet: "Q3 Pipeline", ref: "Z900" }, unresolved: null,
+    }));
+    await record("cells_huge", () => gridFigure(CELLS["A1:B900"], null));
+
+    // `pageFor`, which is the one decision this side takes that the server would also take.
+    const ask = (label, document_, evidence, named) => {
+      try { out.pages[label] = surfaces.pageFor(document_, evidence, named); }
+      catch (error) { out.pages[label] = [error.name, error.message]; }
     };
+    ask("anchor", { id: 7, usetype: "chunk" }, anchored, undefined);
+    ask("file", { id: 1, usetype: "file" }, bare, undefined);
+    ask("named", { id: 7, usetype: "chunk" }, anchored, 5);
+    ask("unresolved", { id: 8, usetype: "chunk" }, unresolved, undefined);
+    ask("nothing", { id: 10, usetype: "chunk" }, bare, undefined);
+    ask("not a page", { id: 1, usetype: "file" }, bare, -2);
+
+    // The sentence that says which representation of a document is on the page.
+    const file = EVIDENCE["1"].evidence.file;
+    out.notices.extracted = serialize(surfaces.sourceNotice({
+      rendition: Object.prototype.hasOwnProperty.call(file, "rendition_ref"),
+      filename: file.filename, mime: file.detected_mime,
+    }));
+    out.notices.rendition = serialize(surfaces.sourceNotice({
+      rendition: true, filename: file.filename, mime: file.detected_mime,
+    }));
+
+    // The original bytes, once a view has asked for them.
+    const original = new Blob([PNG], { type: "application/vnd.openxmlformats-officedocument" });
+    out.notices.download = serialize(surfaces.downloadLink(original, "report.docx"));
+
+    const refuse = (label, fn) => {
+      try { fn(); out.refusals[label] = null; }
+      catch (error) { out.refusals[label] = [error.name, error.message]; }
+    };
+    refuse("pdf anchor on a grid", () =>
+      gridFigure(CELLS[""], { anchor: %(pdf)s, unresolved: null }));
+    refuse("not a picture", () => surfaces.pngSize(new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7, 8])));
+    out.errorWords = surfaces.messageOf(new Error("HTTP 409: these bytes are a .docx"));
+    out.blobWords = surfaces.describeBlob(original);
     out.held = held.size;
     console.log(JSON.stringify(out));
     """)
@@ -654,9 +644,9 @@ CELLS_RESPONSE = {
     "cell_count": 12,
 }
 
-#: A region larger than the grid this renderer will paint. `GET /documents/{id}/cells` bounds a
+#: A region larger than the grid this library will paint. `GET /documents/{id}/cells` bounds a
 #: region at 50,000 cells, which for two columns is 25,000 rows — enough table to stop a
-#: browser — so the renderer paints `GRID_ROWS_MAX` of them and says which.
+#: browser — so it paints `GRID_ROWS_MAX` of them and says which.
 BIG_CELLS_RESPONSE = {
     "document_id": 11,
     "sheet": "Ledger",
@@ -670,28 +660,37 @@ BIG_CELLS_RESPONSE = {
     "cell_count": 1800,
 }
 
-#: Three nodes' evidence: one with an anchor, one with the reason there is none, one with
-#: neither. Those are three different answers and the renderers have to keep them apart.
+#: Three nodes' evidence as `GET /documents/{id}/evidence` answers it: one with an anchor, one
+#: with the reason there is none, one with neither. Those are three different answers and
+#: `anchorPair` has to keep them apart.
 EVIDENCE_ROWS = {
-    "7": {"source_anchor": PDF_ANCHOR},
+    "7": {"document_id": 7, "evidence": {"source_anchor": PDF_ANCHOR}},
     "8": {
-        "source_anchor.unresolved": {
-            "code": "ambiguous_match",
-            "reason": "the chunk's text appears twice on page 4",
-        }
+        "document_id": 8,
+        "evidence": {
+            "source_anchor.unresolved": {
+                "code": "ambiguous_match",
+                "reason": "the chunk's text appears twice on page 4",
+            }
+        },
     },
-    "10": {},
-    "1": {"file": {"filename": "report.docx", "detected_mime": "application/vnd.ms-word"}},
+    "10": {"document_id": 10, "evidence": {}},
+    "1": {
+        "document_id": 1,
+        "evidence": {
+            "file": {"filename": "report.docx", "detected_mime": "application/vnd.ms-word"}
+        },
+    },
 }
 
 
 @pytest.fixture(scope="module")
-def visual(tmp_path_factory):
+def figures(tmp_path_factory):
     if NODE is None:
         pytest.skip("no JavaScript runtime on PATH")
     return _node(
-        tmp_path_factory.mktemp("visual"),
-        VISUAL_HARNESS,
+        tmp_path_factory.mktemp("figures"),
+        FIGURE_HARNESS,
         png=base64.b64encode(png_bytes(*PAGE_PIXELS)).decode(),
         cells=json.dumps({"": CELLS_RESPONSE, "A1:B900": BIG_CELLS_RESPONSE}),
         evidence=json.dumps(EVIDENCE_ROWS),
@@ -699,146 +698,133 @@ def visual(tmp_path_factory):
     )
 
 
-def test_the_page_renderer_decides_the_page_here_and_sends_it(visual):
-    """``pdf-page``: the page, the box, and one decision about which page.
+def test_a_page_figure_is_the_page_with_the_passage_boxed_on_it(figures):
+    """The beeline's picture, built out of bytes the view fetched.
 
-    ``get_document_image`` will decide an omitted ``page`` itself — 0 for a file node, the
-    node's own anchor otherwise — and this renderer applies the same rule. That is a copy, and
-    the copy is then made harmless by always sending the answer: the server never takes the
-    decision, so the two cannot disagree. It is not avoidable, either. A PNG carries no page
-    number and ``BinaryPayload`` is bytes and their type, so a page that has to SAY which page
-    it is showing has to work it out.
+    The scale is the page's own: the PNG declares 1224x1584 and the view asked for 150 dpi, so
+    the page is 587.52x760.32 points and a rectangle at 72 points from the left is 12.2549% of
+    the way across — however wide the browser happens to draw it, which is why the box is
+    positioned as a fraction rather than in pixels.
     """
-    page = visual["cases"]["page"]
-    assert page["ready"] == "drawn"
-    assert page["calls"] == [
-        ["evidence", {"document_id": 7}],
-        ["image", {"document_id": 7, "page": 3, "dpi": 150}],
-    ]
+    page = figures["figures"]["page"]
     assert page["surface"]["kind"] == "pdf-page"
     assert page["surface"]["page"] == 3
+    assert page["surface"]["originCorner"] == "top-left"
     assert page["surface"]["source"] == pytest.approx({"width": 587.52, "height": 760.32})
+    assert page["highlight"]["status"] == "box"
 
-    # A file node is the whole document, so its first page is page 0 — and it needs no anchor
-    # to say so, which is the one case where the evidence read is pure cost.
-    assert visual["cases"]["page_of_file"]["calls"][1][1]["page"] == 0
+    picture = _find(page["tree"], "render-picture")[0]
+    assert picture["attrs"]["src"].startswith("blob:")
+    assert picture["attrs"]["width"] == "1224"
+    assert "page 4" in picture["attrs"]["alt"]
 
-    # A caller that names a page and a density gets them, and they are what goes on the wire.
-    # The evidence read still happens, because the anchor is what the BOX needs and naming a
-    # page says nothing about where the passage is on it.
-    assert visual["cases"]["page_given"]["calls"] == [
-        ["evidence", {"document_id": 7}],
-        ["image", {"document_id": 7, "page": 5, "dpi": 200}],
-    ]
-
-    # A hit already carries its anchor (IC-4), so showing where it came from costs one call
-    # and not two. That is the round trip step 18's second half was written to remove.
-    assert [call[0] for call in visual["cases"]["page_hit"]["calls"]] == ["image"]
-
-
-def test_the_page_renderer_draws_the_box_and_says_why_when_it_cannot(visual):
-    """The three answers a highlight has, each reaching the page as itself."""
-    box = _find(visual["cases"]["page"]["tree"], "overlay-box")
+    box = _find(page["tree"], "overlay-box")
     assert len(box) == 1
-    placed = _style(box[0])
-    # 150 dpi, so a point is 25/12 pixels: 72 pt from the left of a 612 pt page is 150 of 1224
-    # pixels, which is 12.2549% however wide the browser draws it.
-    assert placed == pytest.approx(
+    assert _style(box[0]) == pytest.approx(
         {"left": 12.2549, "top": 15.5724, "width": 79.6569, "height": 19.0052}, abs=1e-4
     )
+    assert _find(page["tree"], "render-caption")[0]["text"] == "Page 4, rendered at 150 dpi."
 
-    caption = _find(visual["cases"]["page"]["tree"], "render-caption")[0]["text"]
-    assert caption == "Page 4, rendered at 150 dpi."
 
-    # "No rectangle was recorded" and "the rectangle could not be recovered, and here is the
-    # reason" are different facts — `evidence.py:453` keeps them in different rows and the page
-    # keeps them in different sentences. The reason is carried through VERBATIM, because it is
-    # a sentence written for a human and re-wording it would replace it with a shrug.
-    #
-    # An unresolved anchor on a chunk takes the PAGE with it: the same row that would have said
-    # where on the page the passage is, is the row that says which page. So there is no picture
-    # to show and the reason is what the reader gets — this is the one place the recorded
-    # reason does duty as a render failure, and it says which failure it is.
-    unresolved = visual["cases"]["page_unresolved"]
-    assert unresolved["ready"] == "failed"
-    assert "the chunk's text appears twice on page 4" in unresolved["error"]
-    assert "ambiguous_match" in unresolved["error"]
+def test_a_page_with_no_box_says_which_absence_it_is(figures):
+    """Three answers where a viewer might expect one, each reaching the page as itself.
+
+    "No rectangle was recorded" and "the rectangle could not be recovered, and here is the
+    reason" are different facts — ``evidence.py:453`` keeps them in different rows and the page
+    keeps them in different sentences. The reason is carried through VERBATIM, because it is a
+    sentence written for a human at ``citation_tasks.py:284`` and re-wording it would replace
+    an explanation with a shrug. A passage on another page gets neither: it gets its page
+    number, and never the starting page's rectangle drawn on this one.
+    """
+    unresolved = figures["figures"]["page_unresolved"]
+    assert unresolved["highlight"]["status"] == "unresolved"
     assert not _find(unresolved["tree"], "overlay-box")
-
-    # Name the page and there IS a picture, with the same reason beside it saying why nothing
-    # is boxed on it. A rendered page and an unrecoverable rectangle are not the same absence.
-    named = visual["cases"]["page_unresolved_named"]
-    assert named["ready"] == "drawn"
-    assert named["calls"][-1] == ["image", {"document_id": 8, "page": 4, "dpi": 150}]
-    assert not _find(named["tree"], "overlay-box")
-    notice = _find(named["tree"], "overlay-notice")[0]["text"]
+    notice = _find(unresolved["tree"], "overlay-notice")[0]["text"]
     assert "the chunk's text appears twice on page 4" in notice
     assert "ambiguous_match" in notice
 
-    # A chunk with no anchor and no reason cannot name a page at all, and a picture of the
-    # wrong page is what OFFICE_SPEC.md Part 5 calls worse than no picture. So it refuses, and
-    # the refusal is on the page rather than a blank frame.
-    none = visual["cases"]["page_none"]
-    assert none["ready"] == "failed"
-    assert "no pdf anchor" in none["error"]
-    assert _find(none["tree"], "bad render-status render-status-failed")[0]["text"] == none["error"]
+    elsewhere = figures["figures"]["page_elsewhere"]
+    assert elsewhere["highlight"] == {"status": "elsewhere", "page": 3}
+    assert not _find(elsewhere["tree"], "overlay-box")
+    assert "This passage is on page 4." in _find(elsewhere["tree"], "overlay-notice")[0]["text"]
+
+    # Nothing recorded and nothing lost: a page, no box, and no sentence either, because there
+    # is genuinely nothing to explain.
+    none = figures["figures"]["page_none"]
+    assert none["highlight"] == {"status": "none"}
+    assert not _find(none["tree"], "overlay-box")
+    assert not _find(none["tree"], "overlay-notice")
 
 
-def test_the_region_renderer_crops_the_rectangle_and_draws_no_box_on_it(visual):
-    """``image``: the picture of the words that matched, and the box that must not be drawn.
+def test_which_page_is_decided_here_and_refused_rather_than_defaulted(figures):
+    """``pageFor``, which is the one decision this side takes that the server would also take.
+
+    ``get_document_image`` decides an omitted ``page`` the same way — 0 for a file node, the
+    node's own anchor otherwise. This exists because a PNG carries no page number and
+    ``BinaryPayload`` is bytes and their type, so a view that has to SAY which page it is
+    showing has to work it out. The duplication is then made harmless the other way: the view
+    sends the answer as ``?page=``, so the server never takes the decision and the two cannot
+    disagree.
+
+    What it must never do is fall back to page 0. A picture of the wrong page is what
+    ``OFFICE_SPEC.md`` Part 5 calls worse than no picture at all, because the reader cannot
+    tell — so both no-page cases refuse, and each says which one it is.
+    """
+    pages = figures["pages"]
+    assert pages["anchor"] == 3
+    assert pages["file"] == 0
+    assert pages["named"] == 5
+
+    assert pages["unresolved"][0] == "SurfaceError"
+    assert "the chunk's text appears twice on page 4" in pages["unresolved"][1]
+    assert pages["nothing"][0] == "SurfaceError"
+    assert "no pdf anchor" in pages["nothing"][1]
+    assert "worse than no picture" in pages["nothing"][1]
+    assert pages["not a page"][0] == "SurfaceError"
+
+
+def test_a_region_figure_is_the_rectangle_and_draws_no_box_on_itself(figures):
+    """The picture of the words that matched, and the box that must not be drawn.
 
     The crop IS the anchor's rectangle, so a box would cover the whole picture — and it would
     cover it in the wrong PLACE, because the anchor's coordinates are the page's and this
     surface's are the crop's. The two differ by the crop's origin, ``toPixels()`` has no offset
     for that, and a box 15% to the right of where it belongs is exactly the confidently-wrong
-    rectangle this contract exists to make impossible. So the caption states the page and the
+    rectangle this contract exists to make impossible. The caption states the page and the
     rectangle in points instead.
     """
-    region = visual["cases"]["region"]
-    assert region["ready"] == "drawn"
-    assert region["calls"] == [
-        ["evidence", {"document_id": 7}],
-        ["region", {"document_id": 7, "anchor": True, "dpi": 150}],
-    ]
+    region = figures["figures"]["region"]
+    assert region["surface"]["kind"] == "image"
+    assert "page" not in region["surface"]
     assert not _find(region["tree"], "overlay-box")
+
     caption = _find(region["tree"], "render-caption")[0]["text"]
     assert "page 4, [72, 118.4, 540, 262.9] in points" in caption
     assert "no box to draw on it" in caption
 
-    # The surface is real even though nothing is drawn on it: it is the space a query-time
-    # `search_for` within this node would produce coordinates in, which the sprint plan defers
-    # by name rather than leaves out by accident.
-    assert region["surface"]["kind"] == "image"
-    assert "page" not in region["surface"]
 
-    # And a node with no rectangle at all is a refusal, not an empty picture.
-    assert visual["cases"]["region_none"]["ready"] == "failed"
-    assert "no source_anchor row" in visual["cases"]["region_none"]["error"]
+def test_a_grid_figure_paints_cells_and_places_a_cells_anchor_on_them(figures):
+    """Cells, not a picture of cells, with the same overlay over them.
 
-
-def test_the_sheet_renderer_paints_cells_and_places_a_cells_anchor_on_them(visual):
-    """``sheet-region``: cells, not a picture of cells, with the same overlay over them."""
-    cells = visual["cases"]["cells"]
-    assert cells["ready"] == "drawn"
-    assert cells["calls"] == [["cells", {"document_id": 9}]], (
-        "omitting `ref` asks for the node's own region, and which region that is is the "
-        "server's decision (`_cells_bounds`); this renderer prints the answer rather than "
-        "reproducing the rule"
-    )
-
+    ``OFFICE_SPEC.md`` Part 7: "a page image of a spreadsheet answers a different question and
+    is rarely the one asked". So the surface a ``cells`` anchor lands on is a table, and it
+    goes through the same ``toPixels`` a rendered page does — which is the whole of IC-9's
+    claim, here over a surface whose unit is one cell rather than one point.
+    """
+    cells = figures["figures"]["cells"]
     grid = _find(cells["tree"], "render-sheet-grid")[0]
+
     # Four rows of the region plus the header of column letters, and every row is painted —
     # including row 6, which the response does not carry. A grid with a row missing is not
     # linear, and the overlay's transform is.
     assert [row["children"][0]["text"] for row in grid["children"][1:]] == ["4", "5", "6", "7"]
-    assert [cell["text"] for cell in grid["children"][1]["children"]] == ["4", "Region", "Q3", "Q4"]
-    assert [cell["text"] for cell in grid["children"][2]["children"]] == ["5", "North", "1200", ""]
-    assert [cell["text"] for cell in grid["children"][3]["children"]] == ["6", "", "", ""]
+    assert [c["text"] for c in grid["children"][1]["children"]] == ["4", "Region", "Q3", "Q4"]
+    assert [c["text"] for c in grid["children"][2]["children"]] == ["5", "North", "1200", ""]
+    assert [c["text"] for c in grid["children"][3]["children"]] == ["6", "", "", ""]
 
-    # A formula is marked and carries its own text, which is the thing a reader of a
-    # spreadsheet actually wants to see behind a number.
-    formula = _find(cells["tree"], "render-sheet-formula")[0]
-    assert formula["attrs"]["title"] == "=SUM(C5:C6)"
+    # A formula is marked and carries its own text, which is what a reader of a spreadsheet
+    # actually wants to see behind a number.
+    assert _find(cells["tree"], "render-sheet-formula")[0]["attrs"]["title"] == "=SUM(C5:C6)"
 
     caption = _find(cells["tree"], "render-sheet-caption")[0]["text"]
     assert "Q3 Pipeline" in caption and "B4:D7" in caption
@@ -846,121 +832,91 @@ def test_the_sheet_renderer_paints_cells_and_places_a_cells_anchor_on_them(visua
 
     # The surface counts the gutter column and the header row, because they are part of the
     # grid a box is positioned in — and `cellRect` adds the same one, so a caller never sees it.
-    assert visual["cases"]["cells"]["surface"]["source"] == {"width": 4, "height": 5}
-    boxed = visual["cases"]["cells_boxed"]
+    assert cells["surface"]["source"] == {"width": 4, "height": 5}
+    assert cells["surface"]["originCorner"] == "top-left"
+
+    boxed = figures["figures"]["cells_boxed"]
     box = _find(boxed["tree"], "overlay-box")
     assert len(box) == 1
-    placed = _style(box[0])
     # C5:D6 is columns 2 and 3 of four (after the gutter) and rows 2 and 3 of five (after the
     # header): left 2/4, top 2/5, width 2/4, height 2/5.
-    assert placed == pytest.approx({"left": 50.0, "top": 40.0, "width": 50.0, "height": 40.0})
+    assert _style(box[0]) == pytest.approx(
+        {"left": 50.0, "top": 40.0, "width": 50.0, "height": 40.0}
+    )
 
 
-def test_the_sheet_renderer_says_what_it_did_not_paint_and_refuses_what_it_cannot(visual):
+def test_the_grid_says_what_it_did_not_paint_and_refuses_what_it_cannot(figures):
     """Two absences that are not the same absence, and neither is a blank grid.
 
     A region bigger than ``GRID_ROWS_MAX`` is a VIEWPORT rather than a truncated answer: the
-    response holds every row, this renderer paints two hundred of them, and the caption says so
+    response holds every row, this library paints two hundred of them, and the caption says so
     with the real numbers. A silent cut would be indistinguishable from a region that ends
     there, which is the same defect class as a missing field rendered as the word "none".
 
-    An anchor naming a cell below the fold then answers "outside the region shown here" — which
-    is true of this surface and reads correctly beside that caption. And a PDF anchor on a grid
-    is refused outright, because a grid declares no page and overlay.js will not draw a page's
+    An anchor naming a cell below the fold then answers "outside the region shown here" — true
+    of this surface, and it reads correctly beside that caption. And a PDF anchor on a grid is
+    refused outright, because a grid declares no page and overlay.js will not draw a page's
     rectangle on whatever surface happens to be up.
     """
-    huge = visual["cases"]["cells_huge"]
-    assert huge["ready"] == "drawn"
+    huge = figures["figures"]["cells_huge"]
     grid = _find(huge["tree"], "render-sheet-grid")[0]
     assert len(grid["children"]) == 201, "the header row plus GRID_ROWS_MAX rows"
     caption = _find(huge["tree"], "render-sheet-caption")[0]["text"]
     assert "Showing rows 1 to 200 — 200 of the region's 900 rows" in caption
     assert "The response carries all 900" in caption
 
-    off = visual["cases"]["cells_off_region"]
-    assert off["ready"] == "drawn"
+    off = figures["figures"]["cells_off_region"]
     assert not _find(off["tree"], "overlay-box")
     assert "outside the region shown here" in _find(off["tree"], "overlay-notice")[0]["text"]
 
-    wrong = visual["cases"]["cells_wrong_kind"]
-    assert wrong["ready"] == "failed"
-    assert "must declare which 0-based page it shows" in wrong["error"]
+    wrong = figures["refusals"]["pdf anchor on a grid"]
+    assert wrong[0] == "OverlayError"
+    assert "must declare which 0-based page it shows" in wrong[1]
 
 
-def test_the_office_renderer_names_the_absence_before_it_draws(visual):
-    """The question step 29's brief asks out loud, answered in the markup.
+def test_the_page_says_which_representation_of_a_document_it_is_showing(figures):
+    """Step 29's brief calls this a fallback; it is a statement, and here is the difference.
 
-    A fallback in the anti-pattern sense catches a failure and substitutes a result, so that a
-    caller cannot tell the substitute from the real thing. This renderer does not do that, and
-    the structure is the argument: it never calls ``/image`` on a ``.docx`` and handles the
-    409. ``NotAPdfSource`` is a real answer about a real deployment, and swallowing it is the
-    failure ``document_service.py`` names at that class — "a renderer that quietly extracted
-    markdown instead would be the failure step 29 is written to avoid, one route earlier".
+    A fallback in the anti-pattern sense CATCHES a failure and substitutes a result, so that a
+    reader cannot tell the substitute from the real thing. Nothing here does that: no call is
+    made to a route that would refuse, and no exception is recovered from. What is read is a
+    named row — ``file.rendition_ref``, which ``OFFICE_SPEC.md`` Part 6 names — and BOTH
+    answers are sentences on the page, written before anything is drawn.
 
-    What it does instead is ask which representations exist and say which one is on screen.
-    The markdown is not a substitute for the document: it is the document as this appliance
-    read it — the text that was chunked, embedded and indexed, and the thing a search hit is a
-    hit ON. The page a rendition would give does not exist, because nothing in this tree writes
-    one, and the notice says that with the name of the step that will.
+    The markdown is not a substitute for the document either. It is the document as this
+    appliance read it: the text that was chunked, embedded and indexed, and the thing a search
+    hit is a hit ON. The page a rendition would give does not exist, because nothing in this
+    tree writes one, and the sentence says that and names the step that will.
     """
-    office = visual["cases"]["office"]
-    assert office["ready"] == "drawn"
-    assert [call[0] for call in office["calls"]] == ["evidence"], (
-        "the office renderer must not call a route it knows will refuse and then recover from "
-        "the refusal; it reads the evidence and says what it found"
-    )
-    assert office["value"] == {"rendition": False, "filename": "report.docx"}
+    extracted = figures["notices"]["extracted"]["text"]
+    assert "NOT a rendered page" in extracted
+    assert "file.rendition_ref" in extracted
+    assert "render:pdf" in extracted and "Block G step 32" in extracted
+    assert "report.docx, application/vnd.ms-word" in extracted
 
-    notice = _find(office["tree"], "render-notice")[0]["text"]
-    assert "NOT a rendered page" in notice
-    assert "file.rendition_ref" in notice
-    assert "render:pdf" in notice
-    assert "Block G step 32" in notice
-
-    # The markdown itself is rendered by the same renderer the `markdown` value gets, so an
-    # office document's headings are headings.
-    assert _find(office["tree"], "render-md-heading")[0]["text"] == "Heading"
-    assert "report.docx, application/vnd.ms-word" in office["tree"]["text"]
+    # The other answer is a sentence too, rather than the absence of one.
+    held = figures["notices"]["rendition"]["text"]
+    assert "holds a rendition" in held and "Block G step 33" in held
 
 
-def test_the_original_bytes_are_fetched_when_they_are_asked_for(visual):
-    """``/blob`` is the whole upload, so the page offers it rather than pulling it down.
+def test_bytes_and_failures_are_each_drawn_as_themselves(figures):
+    """Never ``JSON.stringify``, which is ``{}`` for a Blob and for every Error there is.
 
-    An office document is megabytes and most of them are never downloaded. The control is a
-    named function on the figure as well as a click handler, which is what lets a test drive it
-    without a browser — and what makes "it did not fetch until it was asked" checkable rather
-    than asserted.
+    A reader about to download a file is being told its size, and a reader whose page did not
+    load is being told why. Both of those are objects that flatten to nothing, and a page that
+    printed the flattening would reproduce the capability table's defect — absent drawn
+    identically to empty — in a new place.
     """
-    office = visual["cases"]["office"]
-    assert office["downloadBefore"] == 0
-    assert office["downloadAfter"] == 1
+    assert re.fullmatch(
+        r"\d[\d,]* bytes of application/vnd\.openxmlformats-officedocument",
+        figures["blobWords"],
+    ), figures["blobWords"]
+    assert figures["errorWords"] == "HTTP 409: these bytes are a .docx"
 
-    ready = _find(office["afterDownload"], "render-download-ready")[0]
-    assert ready["attrs"]["download"] == "report.docx"
-    assert ready["attrs"]["href"].startswith("blob:")
-    # A Blob drawn as itself. `JSON.stringify(blob)` is `{}`, which would render the size of
-    # the file a reader is about to download as nothing at all.
-    assert re.search(r"\d[\d,]* bytes of application/vnd\.", ready["text"]), ready["text"]
+    save = figures["notices"]["download"]
+    assert save["attrs"]["download"] == "report.docx"
+    assert save["attrs"]["href"].startswith("blob:")
+    assert re.search(r"Save report\.docx — \d[\d,]* bytes of ", save["text"]), save["text"]
 
-
-def test_a_renderer_that_cannot_get_its_bytes_puts_the_failure_on_the_page(visual):
-    """Never a blank frame, and never ``{}``.
-
-    A renderer that drew nothing on an error would be indistinguishable from a document with
-    nothing in it, which is this sprint's theme one layer down — "a check that is absent, and
-    an absence that looks like an answer". The failure's own message goes on the page, and
-    ``ready`` RESOLVES rather than rejecting: the reader can already see what happened, so a
-    rejection would be a second channel for the same fact and an unhandled rejection in a view
-    that did not await.
-    """
-    failure = visual["failure"]
-    assert failure["status"] == "failed"
-    assert "HTTP 409" in failure["message"] and ".docx" in failure["message"]
-    shown = _find(failure["tree"], "bad render-status render-status-failed")
-    assert len(shown) == 1
-    assert shown[0]["text"] == failure["message"]
-    assert not _find(failure["tree"], "overlay-box")
-
-    # Every object URL this harness made was revoked on `load`, except the ones whose picture
-    # never loaded — the stub fires no events, so this is the count of pictures, not a leak.
-    assert visual["held"] >= 1
+    assert figures["refusals"]["not a picture"][0] == "SurfaceError"
+    assert "image/png" in figures["refusals"]["not a picture"][1]

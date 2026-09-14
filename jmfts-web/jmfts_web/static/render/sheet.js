@@ -20,7 +20,7 @@
 // into that list and never a base-26 conversion. The only thing read out of the string is
 // where the letters stop and the digits start, which is not a grammar.
 
-import { gridSurface } from "./surfaces.js";
+import { drawHighlight, gridSurface, highlightNotice } from "./surfaces.js";
 
 /** The cells response did not describe a region this module can draw. */
 export class SheetError extends Error {
@@ -183,6 +183,31 @@ export function renderCells(cells) {
   figure.append(scroller);
   figure.surface = surface;
   figure.overlayContainer = positioned;
+  return figure;
+}
+
+/**
+ * The grid with a passage boxed on it, for a view that has both the cells and the anchor.
+ *
+ * The sheet half of `surfaces.pageFigure`, and it takes what the view already fetched: a
+ * `DocumentCellsResponse` from `GET /documents/{id}/cells`, and the anchor pair. Nothing here
+ * calls anything.
+ *
+ * A `cells` anchor only. A pdf anchor on this surface is refused by `highlight()` itself —
+ * a grid declares no page, and a page's rectangle drawn on whatever surface happens to be up
+ * is the confidently-wrong box the whole contract is shaped against.
+ */
+export function gridFigure(cells, evidence) {
+  const figure = renderCells(cells);
+  if (!evidence) return figure;
+  const found = drawHighlight(figure.overlayContainer, evidence, figure.surface());
+  const notice = highlightNotice(found);
+  if (notice) {
+    const line = el("p", "overlay-notice");
+    line.textContent = notice;
+    figure.append(line);
+  }
+  figure.highlight = found;
   return figure;
 }
 
