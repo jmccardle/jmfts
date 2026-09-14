@@ -44,10 +44,13 @@ import inspect
 import typing
 from typing import Callable
 
-from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile
+from urllib.parse import quote
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Response, UploadFile
 from fastapi.routing import APIRoute
 from sqlalchemy.orm import Session
 
+from jmfts_client.contracts.binary import BinaryPayload
 from jmfts_client.contracts.rdf import TurtleDocument
 from jmfts_client.contracts.upload import UploadedFile
 from jmfts_core.database import get_db
@@ -58,6 +61,58 @@ from jmfts_core.registry import REGISTRY, ExposeSpec
 #: the bytes stored in ``ontologies.source_turtle`` are the bytes that were POSTed, with no
 #: escaping step in between.
 _TURTLE_BODY = typing.Annotated[str, Body(media_type="text/turtle")]
+
+#: What OpenAPI says about a binary 200. FastAPI builds a response schema from
+#: ``response_model``, and a binary operation has none; without this the document declares an
+#: empty body for a route that sends a PNG, and the generated TypeScript client would render
+#: a JSON-parsing call for it.
+_BINARY_SCHEMA = {"schema": {"type": "string", "format": "binary"}}
+
+
+def _content_disposition(payload: BinaryPayload) -> str:
+    """``Content-Disposition`` for one payload, with the filename encoded both ways.
+
+    RFC 6266 §4.3: ``filename`` carries an ASCII form for agents that read only that, and
+    ``filename*`` carries the real one as RFC 5987 percent-encoded UTF-8. Both are sent
+    because the corpus holds filenames that are neither ASCII nor safe to drop — a
+    ``.docx`` named in Japanese is a real document, and serving it as ``download`` would be
+    losing the user's own name for their own file.
+
+    Non-ASCII characters are replaced in the plain form rather than stripped, so the
+    fallback keeps the name's shape and length instead of collapsing to something that
+    could collide with another document's fallback.
+    """
+    kind = "attachment" if payload.download else "inline"
+    name = payload.filename
+    if not name:
+        return kind
+    # Quotes and control characters would terminate the header value early.
+    plain = "".join(c if 32 <= ord(c) < 127 and c not in '"\\' else "_" for c in name)
+    return f"{kind}; filename=\"{plain}\"; filename*=UTF-8''{quote(name, safe='')}"
+
+
+def _binary_response(result: object, spec_name: str) -> Response:
+    """Turn a service method's :class:`BinaryPayload` into the HTTP response.
+
+    The ``media_type`` that goes on the wire is the PAYLOAD's, not the spec's. A route
+    serving stored uploads cannot know its own content type in advance; the spec's value is
+    what the OpenAPI document declares and is deliberately the weaker claim.
+
+    A binary operation that returns anything else raises rather than serialising. That is
+    the Fail Early case this whole path is built for: a method that forgot to wrap its bytes
+    would otherwise reach FastAPI's JSON encoder, which renders ``bytes`` as a base64 string
+    inside quotes and produces a 200 nobody can read as an image.
+    """
+    if not isinstance(result, BinaryPayload):
+        raise TypeError(
+            f"{spec_name} declares a media_type, so it must return a BinaryPayload; "
+            f"it returned {type(result).__name__}."
+        )
+    return Response(
+        content=result.content,
+        media_type=result.media_type,
+        headers={"Content-Disposition": _content_disposition(result)},
+    )
 
 
 def _status_for(exc: Exception, error_map: dict[type, int]) -> int | None:
@@ -119,6 +174,18 @@ def _make_endpoint(spec: ExposeSpec) -> Callable:
     error_map = spec.effective_errors
     service_cls = spec.service_cls
     func = spec.func
+    # Identity for a JSON operation, so the common path pays nothing and there is one
+    # return statement per endpoint rather than a branch inside each.
+    spec_name = spec.name
+    if spec.media_type:
+
+        def _finish(result):
+            return _binary_response(result, spec_name)
+
+    else:
+
+        def _finish(result):
+            return result
 
     def _to_http(exc: Exception) -> HTTPException:
         """Translate a domain exception into the mapped HTTPException, or re-raise.
@@ -152,7 +219,7 @@ def _make_endpoint(spec: ExposeSpec) -> Callable:
                 )
             service = service_cls(db)
             try:
-                return await func(service, **kwargs)
+                return _finish(await func(service, **kwargs))
             except Exception as exc:  # noqa: BLE001 — deliberate domain→HTTP boundary
                 raise _to_http(exc)
 
@@ -171,7 +238,7 @@ def _make_endpoint(spec: ExposeSpec) -> Callable:
                 )
             service = service_cls(db)
             try:
-                return func(service, **kwargs)
+                return _finish(func(service, **kwargs))
             except Exception as exc:  # noqa: BLE001 — deliberate domain→HTTP boundary
                 raise _to_http(exc)
 
@@ -193,6 +260,14 @@ def build_exposed_router() -> APIRouter:
     """
     router = APIRouter()
     for spec in REGISTRY:
+        extra: dict = {}
+        if spec.media_type:
+            # ``response_class`` stops FastAPI wrapping the returned Response in a
+            # JSONResponse, and ``responses`` is what puts the content type in the document.
+            # ``@expose`` refuses media_type alongside response_model, so the None below is
+            # a fact about the spec rather than a branch.
+            extra["response_class"] = Response
+            extra["responses"] = {200: {"content": {spec.media_type: _BINARY_SCHEMA}}}
         router.add_api_route(
             spec.path,
             _make_endpoint(spec),
@@ -202,6 +277,7 @@ def build_exposed_router() -> APIRouter:
             tags=spec.tags,
             summary=spec.summary,
             name=spec.name,
+            **extra,
         )
     return router
 
