@@ -1,0 +1,63 @@
+/* The document detail view's own styling. Loaded by `views/document.js`, by nothing else.
+ *
+ * docs/SPRINT_0_6_0.md Block F step 28, and `views/tree.css`'s header gives the rule both
+ * files are here under.
+ *
+ * THE GRID THAT WAS HERE HAS GONE TO `render/sheet.js`, and with it the one number this file
+ * could get wrong. A sheet region is drawn on a fixed pitch so that the overlay's linear
+ * transform lands on the right cells, and that pitch is now declared in the markup the grid is
+ * built from — so the surface knows its own extent without measuring a layout, and without a
+ * constant in one file having to agree with a rule in another.
+ */
+
+.view-document .doc-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.view-document .doc-crumbs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  margin: 0 0 12px;
+}
+.view-document .doc-panel {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px;
+  margin: 8px 0 0;
+}
+
+/* The control beside a highlight that is not a box: "Show page 4". The SENTENCE is
+ * `render/surfaces.js`'s — one wording, in one place — and this is the route to it, which only
+ * a view can know. */
+.view-document .doc-jump {
+  display: inline-block;
+  margin: 4px 0 0;
+  font-size: 0.9em;
+}
+
+.view-document .doc-stub {
+  border-bottom: 1px solid var(--line);
+  padding: 6px 0;
+}
+.view-document .doc-stub p {
+  margin: 2px 0 0;
+  color: var(--dim);
+  font-size: 0.9em;
+}
+.view-document .doc-form {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.view-document .doc-form input {
+  padding: 5px 7px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+}

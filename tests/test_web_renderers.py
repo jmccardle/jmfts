@@ -79,18 +79,23 @@ RENDER_DOM = DOM_STUB + textwrap.dedent("""
       };
     }
 
-    /** Object URLs, and a record of which are still held, so a leak is visible to a test. */
+    /** Object URLs, and a record of which are still held, so a leak is visible to a test.
+     *
+     * ADDED TO the platform's URL rather than replacing it. `new URL(path, import.meta.url)`
+     * is how every view in this bundle resolves its own stylesheet — `shell/shell.css:4` is
+     * the rule and five views follow it — so a stub that shadowed the constructor made any
+     * view that BOTH holds bytes and links a stylesheet impossible to mount. The document
+     * detail view is the first of those, and it found this.
+     */
     export function installObjectUrls() {
       const held = new Map();
       let next = 0;
-      globalThis.URL = {
-        createObjectURL(blob) {
-          const url = `blob:jmfts/${next += 1}`;
-          held.set(url, blob);
-          return url;
-        },
-        revokeObjectURL(url) { held.delete(url); },
+      globalThis.URL.createObjectURL = (blob) => {
+        const url = `blob:jmfts/${next += 1}`;
+        held.set(url, blob);
+        return url;
       };
+      globalThis.URL.revokeObjectURL = (url) => held.delete(url);
       return held;
     }
     """)
