@@ -24,3 +24,4 @@
 // moves is a line deleted and a line appended, in one commit, by one branch.
 
 import "../views/capabilities.js";
+import "../views/log.js";

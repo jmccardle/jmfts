@@ -1,0 +1,86 @@
+/* The call log's own stylesheet, linked by `views/log.js` and by nothing else.
+ *
+ * docs/SPRINT_0_6_0.md Block F step 30. It is a FILE rather than a hunk appended to
+ * `shell/shell.css` for the reason that stylesheet gives at its own line 4: "a view that needs
+ * styling of its own adds it from its own module rather than a second <link> here". Five F3
+ * worktrees each adding a rule to one stylesheet is the same conflict IC-7 removed from the
+ * router, and it would have been reintroduced here for the sake of thirty lines.
+ *
+ * It draws with the shell's variables and adds no colours of its own, so the two halves of a
+ * page cannot end up in different palettes. Same origin, no font host, no url() to anywhere:
+ * `tests/test_ts_client_codegen.py::test_nothing_in_the_bundle_loads_from_the_network` reads
+ * this file with the rest of the bundle.
+ */
+
+.view-log .log-tally {
+  margin: 0 0 12px;
+}
+
+.view-log .log-rows {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.view-log .log-call {
+  border-bottom: 1px solid var(--line);
+}
+.view-log .log-call:last-child {
+  border-bottom: 0;
+}
+
+/* The summary is the scan line: one call per row, and the row reads left to right the way the
+ * request did — verb and path first, outcome and cost after it, the operation id last because
+ * it is what you look up rather than what you read. */
+.view-log .log-call > summary {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.view-log .log-call > summary:hover {
+  background: var(--soft);
+}
+.view-log .log-op {
+  flex: 1 1 22rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.view-log .log-status {
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+.view-log .log-ms {
+  font-variant-numeric: tabular-nums;
+}
+.view-log .log-id {
+  font-size: 0.85em;
+}
+
+.view-log .log-body {
+  padding: 4px 10px 14px;
+  background: var(--soft);
+}
+.view-log .log-body h3 {
+  margin: 12px 0 4px;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--dim);
+  font-weight: 600;
+}
+.view-log .log-body h4 {
+  margin: 8px 0 2px;
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+/* A preview is capped at PREVIEW_CHARACTERS, which is still taller than a row ought to be when
+ * a reader has three of them open; the box scrolls rather than the page growing by a screen. */
+.view-log .log-body pre.copy {
+  max-height: 22rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
