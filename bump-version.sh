@@ -6,16 +6,19 @@
 # projects release the same way and this repo now has the same problem: one number written
 # in more than one place, and no way to notice a missed copy until a wheel is on PyPI.
 #
-# THE TWO DISTRIBUTIONS RELEASE IN LOCKSTEP: one number, two wheels. That is a decision,
-# and it is the reason this script takes a single argument. `jmfts-client` is GENERATED
-# from the server's exposed surface and shipped from this tree, so the pair is one product
-# with one release; versioning them apart bought nothing and cost a tag namespace, a
-# matrix filter in publish.yml, and a version check that could not be written honestly.
+# THE THREE DISTRIBUTIONS RELEASE IN LOCKSTEP: one number, three wheels. That is a
+# decision, and it is the reason this script takes a single argument. `jmfts-client` is
+# GENERATED from the server's exposed surface and `jmfts-web` is WRITTEN against it, so the
+# three are one product with one release; versioning them apart bought nothing and cost a
+# tag namespace, a matrix filter in publish.yml, and a version check that could not be
+# written honestly.
 #
-# The three places the number lives:
+# The five places the number lives:
 #   * jmfts_core/__init__.py            __version__  — the server wheel's version
 #   * jmfts-client/…/__init__.py        __version__  — the client wheel's version
+#   * jmfts-web/jmfts_web/__init__.py   __version__  — the front end wheel's version
 #   * pyproject.toml                    the `jmfts-client==<version>` pin
+#   * pyproject.toml                    the `jmfts-web==<version>` pin, in the `web` extra
 #
 # Both pyproject.toml files read their `__version__` through [tool.setuptools.dynamic], so
 # those two literals ARE the wheels' versions. NEVER add a `version = "..."` literal to a
@@ -36,7 +39,7 @@ cd "$(dirname "$0")"
 
 usage() {
     echo "usage: ./bump-version.sh <version>      e.g. ./bump-version.sh 0.2.0" >&2
-    echo "       sets both distribution versions and the in-repo pin." >&2
+    echo "       sets all three distribution versions and both in-repo pins." >&2
     echo "       Edits files only — no commit, no tag, no push." >&2
 }
 
@@ -90,14 +93,19 @@ fi
 VERSION_FILES=(
     "jmfts_core/__init__.py"
     "jmfts-client/jmfts_client/__init__.py"
+    "jmfts-web/jmfts_web/__init__.py"
 )
 
-# The pin, by contrast, is DISCOVERED. There is one today. A second — a future
-# distribution in this tree, or a `jmfts-client[vectors]` pin beside the plain one — must
-# be bumped too, and a hardcoded list of one would miss it silently, which is the exact
-# failure this script exists to prevent.
+# The pins, by contrast, are DISCOVERED. There are two today — `jmfts-client` in the base
+# dependencies and `jmfts-web` in the `web` extra — and this pattern found the second one
+# the day it was added without anybody editing this script, which is the property it was
+# written for. A hardcoded list would have missed it silently.
+#
+# The name alternation is deliberate and is NOT `jmfts-[a-z]+`: a pin on some future
+# third-party package beginning `jmfts-` is not necessarily part of this lockstep, and a
+# pattern that swept it up would rewrite a version this repository does not own.
 PIN_FILES=(pyproject.toml)
-PIN_PATTERN='"jmfts-client(\[[a-z,]+\])?==[^"]+"'
+PIN_PATTERN='"jmfts-(client|web)(\[[a-z,]+\])?==[^"]+"'
 
 # -- record the "before" ---------------------------------------------------
 #
@@ -132,7 +140,7 @@ done
 
 # The extras bracket, where present, is part of the requirement name and must survive:
 # "jmfts-client[vectors]==0.2.0", not "jmfts-client==0.2.0".
-sed -i -E "s/(\"jmfts-client(\[[a-z,]+\])?)==[^\"]+\"/\1==$NEW\"/g" "${PIN_FILES[@]}"
+sed -i -E "s/(\"jmfts-(client|web)(\[[a-z,]+\])?)==[^\"]+\"/\1==$NEW\"/g" "${PIN_FILES[@]}"
 
 # -- verify ----------------------------------------------------------------
 #

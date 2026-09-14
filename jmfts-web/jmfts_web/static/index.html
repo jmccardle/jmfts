@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JMFTS</title>
+<!--
+  docs/SPRINT_0_6_0.md Block F step 19. This is the capability landing, and it is the whole
+  front end until step 24 adds the shell and the view registry.
+
+  It is not a placeholder. It is the smallest document that proves the path end to end: the
+  mount serves it, it is same-origin so it needs no CORS entry, it takes a token and keeps it
+  out of the URL, and it renders an answer from the live appliance. Everything after it is
+  more views, not a different arrangement.
+
+  No build step, no framework, no CDN. Step 24 introduces a source tree and a build; a page
+  that needs neither should not wait for them.
+-->
+<style>
+  :root { color-scheme: light dark; --fg: #16181d; --bg: #fbfbfa; --dim: #6a6f7a;
+          --line: #dcdde1; --accent: #1f5fa8; --bad: #a8321f; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e6e7ea; --bg: #16181d; --dim: #9aa0ad; --line: #2e3239;
+            --accent: #79aef0; --bad: #f0897a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 0 16px 64px; background: var(--bg); color: var(--fg);
+         font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 62rem; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin: 32px 0 4px; font-weight: 650; }
+  h2 { font-size: .82rem; text-transform: uppercase; letter-spacing: .07em;
+       color: var(--dim); margin: 28px 0 8px; font-weight: 600; }
+  p.lede { color: var(--dim); margin: 0 0 24px; }
+  code, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+                font-size: .92em; }
+  form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+         border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
+  input[type=password] { flex: 1 1 20rem; min-width: 0; padding: 6px 8px;
+    border: 1px solid var(--line); border-radius: 4px; background: var(--bg);
+    color: var(--fg); font-family: ui-monospace, Menlo, Consolas, monospace; }
+  button { padding: 6px 14px; border: 1px solid var(--accent); border-radius: 4px;
+    background: var(--accent); color: #fff; cursor: pointer; font: inherit; }
+  button.ghost { background: transparent; color: var(--accent); }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { text-align: left; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--line);
+           vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; width: 14rem; }
+  .pill { display: inline-block; padding: 1px 7px; margin: 0 4px 4px 0; border-radius: 10px;
+          border: 1px solid var(--line); font-size: .85em; }
+  .pill.on { border-color: var(--accent); color: var(--accent); }
+  .bad { color: var(--bad); }
+  .dim { color: var(--dim); }
+  #log { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  #log div { padding: 5px 10px; border-bottom: 1px solid var(--line); }
+  #log div:last-child { border-bottom: 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>JMFTS</h1>
+  <p class="lede">
+    Matryoshka embeddings, ColBERT-style late interaction, and BM25 over PostgreSQL.
+    This page reports what this appliance accepts, indexes and retrieves — read from
+    <code>/capabilities</code>, which makes no network call of its own.
+  </p>
+
+  <form id="auth" autocomplete="off">
+    <input type="password" id="token" placeholder="JMFTS_API_TOKEN" aria-label="API token">
+    <button type="submit">Connect</button>
+    <button type="button" class="ghost" id="forget">Forget</button>
+    <span id="status" class="dim"></span>
+  </form>
+
+  <div id="out"></div>
+
+  <h2>Calls this page made</h2>
+  <div id="log"><div class="dim">Nothing yet.</div></div>
+</main>
+
+<script>
+// The token lives in sessionStorage, not localStorage and never in the URL: a tab that is
+// closed has forgotten it, and a pasted address does not carry a credential.
+const KEY = "jmfts.token";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, c => (
+  {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+// Every request goes through here, and every request is logged. Step 23 replaces this with
+// a generated client emitting the same event shape; the property worth keeping from the
+// first day is that a view cannot call the API without the log seeing it.
+const calls = [];
+async function api(path) {
+  const started = performance.now();
+  const token = sessionStorage.getItem(KEY);
+  const headers = token ? { Authorization: "Bearer " + token } : {};
+  let status = 0, body = null, error = null;
+  try {
+    const resp = await fetch(path, { headers });
+    status = resp.status;
+    body = resp.headers.get("content-type")?.includes("json")
+      ? await resp.json() : await resp.text();
+  } catch (e) {
+    error = String(e);
+  }
+  calls.unshift({ path, status, ms: Math.round(performance.now() - started), error });
+  renderLog();
+  if (error) throw new Error(error);
+  if (status >= 400) throw new Error("HTTP " + status + " on " + path);
+  return body;
+}
+
+function renderLog() {
+  $("log").innerHTML = calls.length === 0
+    ? '<div class="dim">Nothing yet.</div>'
+    : calls.map(c => `<div class="mono">GET ${esc(c.path)} &rarr; ${
+        c.error ? '<span class="bad">' + esc(c.error) + "</span>"
+                : (c.status >= 400 ? '<span class="bad">' + c.status + "</span>" : c.status)
+      } <span class="dim">${c.ms} ms</span></div>`).join("");
+}
+
+const pills = (items, live) => (items || []).length === 0
+  ? '<span class="dim">none</span>'
+  : items.map(i => `<span class="pill${live && live.includes(i) ? " on" : ""}">${esc(i)}</span>`)
+         .join("");
+
+function render(cap) {
+  const e = cap.extras || {};
+  const installed = Object.keys(e).filter(k => e[k]?.installed ?? e[k]);
+  const rows = [
+    ["Version", esc(cap.version ?? "unknown")],
+    ["Extras", pills(Object.keys(e), installed)],
+    ["Can produce a vector", cap.embedding?.local_model_available
+        ? "yes, in this process"
+        : (cap.embedding?.runner_url
+            ? "yes, via " + esc(cap.embedding.runner_url)
+            : '<span class="bad">no — neither a local model nor a runner</span>')],
+    ["Formats identified", pills(cap.formats)],
+    ["Ingest entry points", pills(cap.ingest?.usetypes)],
+    ["Retrieval methods", pills(cap.retrieval?.methods)],
+    ["Held out of every result", pills(cap.retrieval?.excluded_usetypes)],
+  ];
+  $("out").innerHTML = "<h2>This appliance</h2><table>" + rows.map(
+    ([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("") + "</table>";
+}
+
+async function load() {
+  $("out").innerHTML = "";
+  try {
+    await api("/health");
+  } catch {
+    $("status").innerHTML = '<span class="bad">the appliance is not answering</span>';
+    return;
+  }
+  try {
+    render(await api("/capabilities?corpus=true"));
+    $("status").textContent = "connected";
+  } catch (err) {
+    // 401 here means the token is wrong or absent, and saying so is the whole job: the
+    // failure a reader needs to tell apart is "no credential" from "nothing is running",
+    // and /health above has already answered the second.
+    $("status").innerHTML = '<span class="bad">' + esc(err.message) +
+      " &mdash; check the token</span>";
+  }
+}
+
+$("auth").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const value = $("token").value.trim();
+  if (value) sessionStorage.setItem(KEY, value);
+  $("token").value = "";
+  load();
+});
+$("forget").addEventListener("click", () => {
+  sessionStorage.removeItem(KEY);
+  $("status").textContent = "token forgotten";
+  $("out").innerHTML = "";
+});
+
+if (sessionStorage.getItem(KEY)) load();
+else $("status").textContent = "a token is needed for everything except /health";
+</script>
+</body>
+</html>

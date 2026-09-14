@@ -115,6 +115,17 @@ jobs:
           - name: jmfts-client
             path: jmfts-client
             version_file: jmfts-client/jmfts_client/__init__.py
+          # Added 2026-09-13, `docs/SPRINT_0_6_0.md` Block F step 19. It carries the browser
+          # front end and has no dependencies, so it is the cheapest of the three to build
+          # and the one whose absence from an appliance is a deployment choice.
+          #
+          # THIS NAME HAS NEVER BEEN PUBLISHED, so read the pending-publisher note at the
+          # top of this file before the first release that includes it: one hand upload with
+          # an account-scoped token is required, and a hand upload does not consume the
+          # pending row. That is what made 0.2.1 fail with `invalid-pending-publisher`.
+          - name: jmfts-web
+            path: jmfts-web
+            version_file: jmfts-web/jmfts_web/__init__.py
 
     steps:
       - uses: actions/checkout@v4

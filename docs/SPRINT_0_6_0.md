@@ -394,6 +394,19 @@ extra names them, so `jmfts[web]` would be decoration. `jmfts-web` holds the bun
 Cost, stated: a third version in `bump-version.sh`, a step in `docs/RELEASING.md`, a third
 case in `.github/workflows/publish.yml`. Part 4 question 4.8.
 
+**One of those three could not be paid, and it is worth recording where it stopped.**
+`bump-version.sh` and `publish.yml` are both in this repository and both were updated on
+2026-09-13. `docs/RELEASING.md` is **not in this tree** — it is held back, and it is not in
+Block E step 4's publish list either, which names `INGEST_SPEC.md`, `SPRINT_JOBS.md` and
+`OFFICE_SPEC.md`. So the release runbook still describes two distributions and still carries
+a step 3, "Replace the public tree", for a copy that stopped running at 0.5.1.
+
+That is a defect in the runbook and it predates this sprint; step 19 only made it visible by
+being the first change that needed to edit it. It is not a step here because the file cannot
+be edited from the repository the work happens in, which is the held-back-documents cost
+arriving in a concrete place rather than as a count of dangling citations. Part 4
+question 4.10.
+
 #### Phase F1 — bytes out, and the transport in
 
 | Step | What | Contract | Size |
@@ -854,3 +867,37 @@ container name, so parallel worktrees can each hold a database without colliding
 `ruff check jmfts_core jmfts-client tests` run before every merge**, because `.githooks/pre-commit`
 and `.github/workflows/ci.yml` run the same three paths and the three cannot be allowed to
 disagree. `jmfts-web/` is outside that gate and carries its own.
+
+### 4.10 `docs/RELEASING.md` describes a release that no longer happens
+
+Found while doing step 19, on 2026-09-13, and it is not that step's to fix.
+
+The runbook is held back, so it is not in this repository and cannot be edited from it. Read
+from the internal history at `oldmaster` it still says "**The two distributions release in
+lockstep: one number, two wheels, one tag**" at its step 1, and still carries a step 3,
+"Replace the public tree", for the squash-and-copy that stopped running when development moved
+here at 0.5.1. Step 19 adds a third distribution, so both statements are now wrong in a way
+that would mislead somebody cutting 0.6.0.
+
+It is cited 11 times from shipped files and it is **not** in Block E step 4's list, which
+names `INGEST_SPEC.md`, `SPRINT_JOBS.md` and `OFFICE_SPEC.md` — the three with 387 citations
+between them. `RELEASING.md` was left out because it is process rather than specification, and
+that reasoning held right up until the process itself became something a contributor in this
+repository has to follow and cannot read.
+
+What the answer changes: whether cutting 0.6.0 means following a document that describes a
+different repository layout. Three candidates.
+
+* **Publish it, as part of step 4.** One more name on the list, and it becomes editable by
+  whoever is doing the release. It carries a "two repositories" section describing an internal
+  remote, which is the review pass's job to catch — the pass is already defined as reading for
+  exactly that.
+* **Rewrite it here as a new file** and leave the old one internal. Cleanest content, and it
+  splits a document that is cited by anchor from the anchors, which is the thing `CLAUDE.md`
+  says not to do.
+* **Leave it, and correct it in the internal tree by hand at release time.** Free, and it is
+  how this defect got here.
+
+**Absent an answer, the first**, because the argument that kept it internal — process, not
+specification — stopped being true when the process moved. A runbook nobody following it can
+open is not being held back, it is being lost.
