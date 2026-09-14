@@ -116,7 +116,7 @@ from PyPI and shadows the checkout you meant to work in.
 
 ### Reading and driving the API
 
-`/docs` is Swagger UI over the live route table — 115 operations, grouped by tag, with the
+`/docs` is Swagger UI over the live route table — 118 operations, grouped by tag, with the
 request and response schemas. `/redoc` is the same document laid out for reading, and
 `/openapi.json` is the document itself.
 

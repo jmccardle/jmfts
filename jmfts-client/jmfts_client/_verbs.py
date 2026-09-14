@@ -22,6 +22,7 @@ from jmfts_client.contracts.access import PrincipalResponse
 from jmfts_client.contracts.access import TokenCreate
 from jmfts_client.contracts.access import TokenMintResponse
 from jmfts_client.contracts.access import TokenResponse
+from jmfts_client.contracts.binary import BinaryPayload
 from jmfts_client.contracts.conversation import ConversationIngestRequest
 from jmfts_client.contracts.conversation import ConversationIngestResponse
 from jmfts_client.contracts.document import ChunkRequest
@@ -513,6 +514,26 @@ class _GeneratedVerbs(_VerbTransport):
             response=DocumentResponse,
         )
 
+    def get_document_blob(
+        self,
+        document_id: int,
+    ) -> BinaryPayload:
+        """The bytes this document was ingested from, exactly as they were received
+
+        ``GET /documents/{document_id}/blob`` — DocumentService.get_document_blob
+
+        Raises on 404 (server: LookupError).
+        Raises on 409 (server: BlobUnavailable).
+
+        Returns a ``BinaryPayload``; the route declares ``application/octet-stream`` and the payload carries what actually arrived.
+        """
+        return self._call(
+            "GET",
+            "/documents/{document_id}/blob",
+            path={"document_id": document_id},
+            response=BinaryPayload,
+        )
+
     def get_document_cells(
         self,
         document_id: int,
@@ -551,6 +572,60 @@ class _GeneratedVerbs(_VerbTransport):
             "/documents/{document_id}/evidence",
             path={"document_id": document_id},
             response=DocumentEvidenceResponse,
+        )
+
+    def get_document_image(
+        self,
+        document_id: int,
+        *,
+        page: Optional[int] = None,
+        dpi: int = 150,
+    ) -> BinaryPayload:
+        """One page of the PDF this node came from, rendered as a PNG
+
+        ``GET /documents/{document_id}/image`` — DocumentService.get_document_image
+
+        Raises on 400 (server: ValueError).
+        Raises on 404 (server: LookupError).
+        Raises on 409 (server: BlobUnavailable, NotAPdfSource, RegionNotAddressable, UnreadablePdf).
+        Raises on 413 (server: RenderTooLarge).
+
+        Returns a ``BinaryPayload``; the route declares ``image/png`` and the payload carries what actually arrived.
+        """
+        return self._call(
+            "GET",
+            "/documents/{document_id}/image",
+            path={"document_id": document_id},
+            query={"page": page, "dpi": dpi},
+            response=BinaryPayload,
+        )
+
+    def get_document_region(
+        self,
+        document_id: int,
+        *,
+        anchor: bool = False,
+        page: Optional[int] = None,
+        bbox: Optional[str] = None,
+        dpi: int = 150,
+    ) -> BinaryPayload:
+        """A rectangle of a page, from this node's own anchor or from explicit bounds
+
+        ``GET /documents/{document_id}/region`` — DocumentService.get_document_region
+
+        Raises on 400 (server: ValueError).
+        Raises on 404 (server: LookupError).
+        Raises on 409 (server: BlobUnavailable, NotAPdfSource, RegionNotAddressable, UnreadablePdf).
+        Raises on 413 (server: RenderTooLarge).
+
+        Returns a ``BinaryPayload``; the route declares ``image/png`` and the payload carries what actually arrived.
+        """
+        return self._call(
+            "GET",
+            "/documents/{document_id}/region",
+            path={"document_id": document_id},
+            query={"anchor": anchor, "page": page, "bbox": bbox, "dpi": dpi},
+            response=BinaryPayload,
         )
 
     def get_document_tokens(
