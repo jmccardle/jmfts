@@ -1119,6 +1119,17 @@ class TestProfileSheetTask:
         measured boolean rather than one of the four thresholds. So the assertion moves to
         what THIS pass produced, which the attempt log keeps separate, plus the branch
         inputs 6.2 asks for, which outlive the verdict written over them.
+
+        **IT ALSO ASSERTED `shape_decision["reason"]` AND THAT WAS NEVER THIS PASS'S
+        FIELD.** `extract:sheet` overwrites `reason` with its own, which is the correct
+        behaviour of a task that DID decide; the assertion passed only because the string
+        that task used to write (`SHAPE_BASIS`) happened to cite 8.8 as well. Block C step
+        12 gave it a second string — `BOTH_SHAPES_BASIS`, for a sheet that matched both
+        shapes — and that one does not cite 8.8, because emitting both is a decision about
+        a measured boolean and a token count and has nothing to do with the thresholds 8.8
+        leaves unset. What this pass owns and nothing overwrites is `spec`, and its own
+        attempt detail; those are what is asserted now. A test that reads the next task's
+        field to make a claim about this one is a test that was passing by coincidence.
         """
         node = _ingest(db_session, workbook_bytes)
 
@@ -1129,12 +1140,13 @@ class TestProfileSheetTask:
                 if entry["task"] == TASK_PROFILE_SHEET
             )
             # 8.7 makes the rung a function of the shape, so a pass that chose no shape
-            # claims no rung either.
+            # claims no rung either. This is the profile pass's OWN record, in 5.6's
+            # append-only log, which is what keeps the two passes separate.
             assert attempt["rung"] is None
             assert "8.8" in attempt["detail"]["no_rung"]
 
             decision = evidence(sheet)["sheet"]["shape_decision"]
-            assert "8.8" in decision["reason"]
+            assert decision["spec"] == "INGEST_SPEC.md 8.4, 8.8"
             # Present whatever the verdict came out as. What 6.2 asks for is that the
             # values the branch READS survive, so that moving a threshold is a query over
             # stored profiles rather than a re-ingest.

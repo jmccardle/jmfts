@@ -54,9 +54,14 @@ plus the any-type second pass           54.4%             54.8%
 ======================================  ================  =============
 
 ``extract:sheet`` fires on nothing else, so those are the sheets that produce record nodes
-at all. See :data:`HEADER_SCAN_ROWS` for why eight rows, :func:`_header_scan` for why two
-passes rather than one relaxed rule, and :class:`HeaderRowScan` for what the rows above the
-header are (``SPRINT_0_4_0.md`` open question 4.3, answered there).
+at all. The three readings were REPRODUCED from the stored scans on 2026-09-13 —
+``python -m scripts.header_rules --report datasets/header_rules_{fuse,git}.jsonl`` — and
+come back exactly: 7,277 and 3,068 sheets at row 1, 13,852 and 3,869 over rows 1-8, 16,573
+and 4,745 with the second pass.
+
+See :data:`HEADER_SCAN_ROWS` for why eight rows, :func:`_header_scan` for why two passes
+rather than one relaxed rule, and :class:`HeaderRowScan` for what the rows above the header
+are (``SPRINT_0_4_0.md`` open question 4.3, answered there).
 """
 
 from __future__ import annotations
@@ -634,6 +639,17 @@ def _header_scan(candidates: Sequence[HeaderEvidence]) -> HeaderRowScan:
     admit more sheets, it admits them sooner, and that moves the outcome from "no records"
     to "wrong records". Running the strict rule over all eight rows first is what buys the
     admissions without the reordering.
+
+    **WHAT THE ORDERING IS WORTH ON THIS CORPUS IS 0.3%, AND THAT IS A CORRECTION TO THE
+    ARGUMENT ABOVE RATHER THAN A REASON TO DROP IT.** The 38.9% reading is about the PREFIX
+    rule, which is not the one that shipped. Replaying the two orderings of the rule that
+    did — over the same scans, 2026-09-13 — an interleaved pass picks an earlier row than
+    two passes on 97 of 30,448 FUSE sheets and 23 of 8,652 git sheets, and on those it names
+    5.0 and 1.8 columns against two passes' 5.0 and 1.8. So the two orderings are all but
+    indistinguishable HERE. They are kept apart because the failure they differ on is the
+    expensive one — a data row taken for a header writes wrong records rather than none —
+    and because the corpus that would show it is the one Part 3's procurement item is for:
+    real Excel-saved workbooks, which these two corpora are mostly not.
 
     Two other relaxations were measured and are NOT here: naming every present cell fires on
     95.2% of FUSE sheets and admits a merged banner with holes in it as a field list, and a

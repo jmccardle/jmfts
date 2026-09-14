@@ -59,6 +59,7 @@ from jmfts_core.models.document import (
     USETYPE_SECTION,
     USETYPE_SHEET,
     USETYPE_PROFILE,
+    USETYPE_TABLE,
 )
 from jmfts_core.repositories.document import DocumentRepository
 from jmfts_core.repositories.task_queue import TaskQueueRepository
@@ -136,20 +137,26 @@ class TestTheScopeVocabulary:
         assert not scope.matches(TASK_STRUCTURE_DECLARED, None)
 
     def test_both_halves_are_disjunctions(self):
-        """`embed` is one row over five rules and four leaf kinds, and `Scope`'s docstring
+        """`embed` is one row over five rules and five leaf kinds, and `Scope`'s docstring
         argues why: five near-identical rows is the copy-drift `DECLARED_STRUCTURE` refuses
         for thirteen formats.
 
         FOUR AND NOT THREE since `cell` joined on 2026-09-08 — a spreadsheet row too long to
         embed becomes a container over its columns, and each column is a leaf carrying its
-        own text (`sheet_records.plan_record`). The cross-product widens and still costs
-        nothing: `profile:sheet` writes no cell, and a row only fires for a child that
-        exists.
+        own text (`sheet_records.plan_record`). FIVE AND NOT FOUR since `table` joined with
+        Block C step 11: 8.4's `small_table` writes one node holding a whole worksheet, and
+        it is the one leaf here whose text routinely does NOT fit the token/maxsim window —
+        52.0% of open-web sheets render inside 8192 tokens and not inside 512, which is why
+        `sheet_tasks._write_table` sets `with_tokens` false on its queue row rather than the
+        row naming a second value. The cross-product widens each time and still costs
+        nothing: `profile:sheet` writes no cell and no table, and a row only fires for a
+        child that exists.
         """
         scope = _row(TASK_EMBED).scope
-        assert len(scope.produced_by) == 5 and len(scope.usetypes) == 4
+        assert len(scope.produced_by) == 5 and len(scope.usetypes) == 5
         assert scope.matches(TASK_STRUCTURE_CONVERSATION, USETYPE_CHUNK)
         assert scope.matches(TASK_EXTRACT_SHEET, USETYPE_RECORD)
+        assert scope.matches(TASK_EXTRACT_SHEET, USETYPE_TABLE)
         assert scope.matches(TASK_PROFILE_SHEET, USETYPE_PROFILE)
 
     def test_a_scope_prints_as_something_a_person_can_read(self):
