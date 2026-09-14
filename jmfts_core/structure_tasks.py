@@ -366,6 +366,24 @@ def _extract_html(data: bytes) -> Extracted:
 #: ``extract:text`` says so by name rather than assuming one reader is the general case.
 #:
 #: HTML is NOT a key here, and cannot be: 11.3 measured that nothing in the bytes separates
+def _addressable(meta: dict) -> dict:
+    """How many emitted blocks an office reader could address, out of how many there were.
+
+    In the DETAIL and not in the record, and the block map itself is in neither. Part 5's
+    source anchors are recovered by ``anchor:source``, which re-opens the package the way
+    ``citation`` re-parses a PDF — thousands of addresses in the ``extraction`` row would be
+    loaded on every read of the node for the sake of one task. What belongs on the attempt
+    is the PAIR, because it is the reading Part 10 needs: a document whose blocks are all
+    addressed and one whose blocks are mostly headings this reader invented will anchor very
+    differently, and the difference is visible here before any chunk exists.
+    """
+    blocks = meta.get("source_blocks") or []
+    return {
+        "source_blocks": len(blocks),
+        "addressed_blocks": sum(1 for block in blocks if "path" in block),
+    }
+
+
 def _extract_docx(data: bytes) -> Extracted:
     """A WordprocessingML document, as markdown. ``INGEST_SPEC.md`` Part 10 step 6.
 
@@ -385,6 +403,7 @@ def _extract_docx(data: bytes) -> Extracted:
             "list_item_count": meta["list_item_count"],
             "table_count": meta["table_count"],
             "markdown_chars": meta["characters"],
+            **_addressable(meta),
         },
     )
 
@@ -415,6 +434,7 @@ def _extract_pptx(data: bytes) -> Extracted:
             # section title the author wrote and one derived from the slide's first line.
             "promoted_title_count": meta["promoted_title_count"],
             "markdown_chars": meta["characters"],
+            **_addressable(meta),
         },
     )
 
