@@ -54,6 +54,7 @@ from jmfts_core.atoms import (
 )
 from jmfts_core.ingest_options import ROLLUP_PARAMS, STRUCTURE_CHUNK_PARAMS
 from jmfts_core.ingest_tasks import (
+    TASK_ANCHOR_SOURCE,
     TASK_CITATION,
     TASK_EXTRACT_FACTS,
     TASK_STRUCTURE_CONVERSATION,
@@ -152,6 +153,15 @@ EXPECTED_DIVERGENCE: dict[str, tuple[frozenset[str], str]] = {
         "and becomes a rule that fires when the file node is evaluated (14.1). That is a "
         "behaviour change and it belongs to Phase 3.",
     ),
+    TASK_ANCHOR_SOURCE: (
+        frozenset({TASK_STRUCTURE_DECLARED, TASK_STRUCTURE_INFERRED}),
+        "the same divergence as `citation` above and for the same reason, because it is "
+        "the same declaration: `OFFICE_SPEC.md` Part 11 step 9's task consumes "
+        "`source_span@subtree`, the two rungs produce it at `@subtree`, and 2.2 makes that "
+        "the settling walk's dependency rather than a within-node edge. Not a second "
+        "finding — it is one finding about one pair of tasks that write one evidence row "
+        "by two routes, and Phase 3 resolves both of them at once.",
+    ),
     # `index:bm25` WAS THE SECOND ENTRY AND IS GONE, WHICH IS THE POINT OF THE LIST.
     # It read: "the same divergence as `citation` above ... INGEST_SPEC.md 11.5 in fact
     # describes this task AS a rollup task, so the day Phase 3 moves it under the walk, the
@@ -181,7 +191,7 @@ class TestRegistryAndDeclarations:
         # second path would be the one that skips the declaration.
         assert set(TASK_HANDLERS) == set(ATOMS)
 
-    def test_twenty_one_atoms_ship(self):
+    def test_twenty_two_atoms_ship(self):
         # SPRINT_JOBS.md Part 2 counted twelve, and an earlier draft said "about fifteen".
         # The number is pinned so that adding a handler is a decision about the design
         # rather than a line that slips in — which is what it was: the thirteenth is
@@ -214,7 +224,18 @@ class TestRegistryAndDeclarations:
         #   before this sprint in everything but name: `IngestRollupPlanner` enqueued it at
         #   settle time and `commit 232cf4f` gave the summary its own node. Registering it
         #   is what makes `EXPLAIN` able to see it.
-        assert len(ATOMS) == 21
+        #
+        # THE TWENTY-SECOND ARRIVED 2026-09-14 with `SPRINT_0_6_0.md` Block G step 34:
+        # `anchor:source`, `OFFICE_SPEC.md` Part 11 step 9. It is the one addition so far
+        # that declares exactly what an existing atom declares — same `consumes`, same
+        # `produces`, same write mode as `citation` — and it is a separate atom anyway,
+        # because Part 5's "Two anchors, not one" makes the recovery METHOD the thing that
+        # differs: an address into the source package is exact and computable from the
+        # uploaded bytes, a rectangle on a rendered page is approximate and can fail
+        # outright. A document reaches exactly one of the two, its format decides which, and
+        # one atom over both would have had to declare a dependency on a rendition that a
+        # `.pdf` never has.
+        assert len(ATOMS) == 22
 
     def test_every_evidence_name_is_written_by_something(self):
         # An atom waiting on evidence nothing produces would never be schedulable, and the

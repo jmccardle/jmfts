@@ -133,7 +133,12 @@ TASK_REAPABLE_STATUSES: tuple[str, ...] = (TASK_CLAIMED, TASK_RUNNING)
 #: Spelled as a literal rather than imported from :mod:`jmfts_core.ingest_tasks`, which is
 #: where every task NAME is spelled: that module imports this one, so the dependency cannot
 #: run the other way. ``tests/test_citation_task.py`` pins the two spellings together.
-ADVISORY_TASK_TYPES: frozenset[str] = frozenset({"citation"})
+#: ``anchor:source`` joined it with ``OFFICE_SPEC.md`` Part 11 step 9, and it is the same
+#: judgement about a different anchor: an office chunk whose element could not be addressed
+#: is a chunk, it retrieves as it always did, and the handler records the reason on it. What
+#: would NOT qualify is the reading that makes them one task — a rung that both extracted an
+#: office document and anchored it could not fail one half without failing the other.
+ADVISORY_TASK_TYPES: frozenset[str] = frozenset({"citation", "anchor:source"})
 
 #: Declared write modes, spec 5.3. See ``TaskQueueRepository.claim_next`` for the
 #: conflict matrix these drive.

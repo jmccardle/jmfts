@@ -221,7 +221,13 @@ class TestShape:
         # never one with a null" is why both statements are true at once.
         assert get("source_anchor.unresolved").store.row == "source_anchor.unresolved"
         assert get("source_anchor.unresolved").within == "source_anchor"
-        assert producers("source_anchor.unresolved") == {"citation"}
+        # TWO PRODUCERS SINCE `SPRINT_0_6_0.md` BLOCK G STEP 34, and the pair is the shape
+        # of `OFFICE_SPEC.md` Part 5 rather than a duplication: `citation` recovers a
+        # rectangle from a PDF's own geometry and `anchor:source` an element of an OOXML
+        # package, a document reaches exactly one of them, and both write this row when they
+        # cannot. One name, two routes to it, which is what `producers` returning a SET is
+        # for.
+        assert producers("source_anchor.unresolved") == {"citation", "anchor:source"}
 
 
 # ---------------------------------------------------------------------------

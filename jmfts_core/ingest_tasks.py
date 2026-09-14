@@ -166,6 +166,23 @@ TASK_EXTRACT_SHEET = "extract:sheet"
 #: two spellings together.
 TASK_CITATION = "citation"
 
+#: ``OFFICE_SPEC.md`` Part 5's OTHER anchor, and Part 11 step 9. It puts the part and the
+#: XPath of the element a chunk came from on every chunk under an office file node
+#: (:func:`jmfts_core.citation_tasks.run_anchor_source`).
+#:
+#: **TWO ANCHORS, TWO TASKS, BECAUSE THEY FAIL DIFFERENTLY.** Part 5's "Two anchors, not
+#: one" is the whole reason this is not another format in :data:`TASK_CITATION`'s reader
+#: table: an address into the SOURCE package is exact, permanent and computable from the
+#: bytes that were uploaded, while a rectangle on a rendered page is approximate, depends on
+#: which LibreOffice paginated the file, and can fail to be computed at all. For a source
+#: PDF the two are the same object, which is why ``citation`` alone covers it and why this
+#: row's sentinel has no ``pdf`` entry.
+#:
+#: Advisory, for the reason ``citation`` is and by the same rule — a chunk with no anchor is
+#: a chunk, and the absence is recorded on it. The spelling is pinned to
+#: :data:`~jmfts_core.models.task_queue.ADVISORY_TASK_TYPES` by ``tests/test_office_anchors.py``.
+TASK_ANCHOR_SOURCE = "anchor:source"
+
 #: ``INGEST_SPEC.md`` 11.5 — put this file's subtree into every BM25 index whose root is
 #: the file node or one of its ancestors. The last row of 11.1's parity table, and the one
 #: that ``SPRINT_JOBS.md`` 15.4 S5 could not leave open: ``POST /ingest`` used to index its
@@ -687,6 +704,30 @@ PAGE_GEOMETRY_PATTERN: dict[str, str] = {
 #: a page geometry", resolved through the dict above.
 PAGE_GEOMETRY = "@page_geometry"
 
+#: Which pattern, per format, means "this file's own package can address the region a chunk
+#: came from". ``OFFICE_SPEC.md`` Part 5's SOURCE anchor, which is a different fact from the
+#: dict above and therefore a different sentinel.
+#:
+#: THE TWO DICTS ARE DISJOINT AND THAT IS THE DESIGN, not an oversight to be tidied up by
+#: merging them. A ``.docx`` has no pages until Word or LibreOffice paginates it, so it can
+#: never satisfy :data:`PAGE_GEOMETRY_PATTERN`; a PDF has no OOXML part to name an element
+#: in, so it can never satisfy this one. Each format reaches an anchor by the one route its
+#: bytes support, and a format that reached both would be one whose two anchors could
+#: disagree — which is the state Part 5 keeps them in separate rows to prevent.
+#:
+#: ``has_text_layer`` for both entries, and it is the right condition rather than a
+#: convenient one: ``probe`` measures it for ``docx`` from ``word/document.xml`` and for
+#: ``pptx`` from the slides, so it is exactly "there is authored text in this package", and
+#: a package with none has no block for an address to point at.
+SOURCE_ADDRESS_PATTERN: dict[str, str] = {
+    "docx": HAS_TEXT_LAYER,
+    "pptx": HAS_TEXT_LAYER,
+}
+
+#: Stands in a row's ``requires``/``forbids`` for "whatever pattern says THIS format's own
+#: package can address a region", resolved through the dict above.
+SOURCE_ADDRESS = "@source_address"
+
 #: Which pattern, per format, means "this file's own container names a list of sheets".
 #: ``INGEST_SPEC.md`` 8.1's condition, and a third per-format dict rather than a reuse of
 #: :data:`DECLARED_STRUCTURE_PATTERN` because the two answer different questions. That one
@@ -727,6 +768,7 @@ CONVERSATION = "@conversation"
 SENTINEL_PATTERNS: dict[str, dict[str, str]] = {
     DECLARED_STRUCTURE: DECLARED_STRUCTURE_PATTERN,
     PAGE_GEOMETRY: PAGE_GEOMETRY_PATTERN,
+    SOURCE_ADDRESS: SOURCE_ADDRESS_PATTERN,
     SHEET_LIST: SHEET_LIST_PATTERN,
     CONVERSATION: CONVERSATION_PATTERN,
 }
@@ -1162,6 +1204,20 @@ TASK_ROWS: tuple[TaskRow, ...] = (
         after_any=(TASK_STRUCTURE_DECLARED, TASK_STRUCTURE_INFERRED),
         requires=(PAGE_GEOMETRY,),
     ),
+    # OFFICE_SPEC.md Part 5's source anchor, Part 11 step 9. The row above and this one are
+    # the same shape over disjoint formats — see `SOURCE_ADDRESS_PATTERN` for why the two
+    # sentinels may not be merged — and `subtree` for the same reason, word for word: the
+    # chunks it annotates are grandchildren under a titled section and children under an
+    # untitled one, and the same deck routinely has both.
+    #
+    # NOT ordered against `citation`. Neither row can be eligible for a format the other is,
+    # so an `after` naming it would order this row behind something that is never there.
+    TaskRow(
+        TASK_ANCHOR_SOURCE,
+        write_mode=WRITE_SUBTREE,
+        after_any=(TASK_STRUCTURE_DECLARED, TASK_STRUCTURE_INFERRED),
+        requires=(SOURCE_ADDRESS,),
+    ),
     # INGEST_SPEC.md 11.5's `index:bm25` WAS A ROW HERE AND IS NOT ONE ANY MORE
     # (`SPRINT_0_6_0.md` Block B step 7). It read:
     #
@@ -1461,6 +1517,17 @@ def _no_page_geometry_reason(fmt: str) -> str:
     return f"format {fmt!r} carries no page geometry a citation rectangle could address"
 
 
+def _no_source_address_reason(fmt: str) -> str:
+    """Why a row requiring :data:`SOURCE_ADDRESS` can never fire for this format.
+
+    :data:`SOURCE_ADDRESS_PATTERN` has no entry, so nothing in this format's bytes names a
+    part and an element an anchor could point into. For ``pdf`` that is not a gap: its
+    source anchor is a rectangle and ``citation`` writes it, because for a source PDF Part
+    5's two anchors are the same object.
+    """
+    return f"format {fmt!r} names no package element a source anchor could address"
+
+
 def _no_conversation_reason(fmt: str) -> str:
     """Why a row requiring :data:`CONVERSATION` can never fire for this format.
 
@@ -1487,6 +1554,7 @@ def _no_sheet_list_reason(fmt: str) -> str:
 SENTINEL_REASONS: dict[str, Callable[[str], str]] = {
     DECLARED_STRUCTURE: _no_declared_structure_reason,
     PAGE_GEOMETRY: _no_page_geometry_reason,
+    SOURCE_ADDRESS: _no_source_address_reason,
     SHEET_LIST: _no_sheet_list_reason,
     CONVERSATION: _no_conversation_reason,
 }

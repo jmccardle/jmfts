@@ -1,9 +1,21 @@
-"""``citation`` — the page and the rectangle a chunk came from. ``OFFICE_SPEC.md`` Part 5.
+"""Where a chunk came from. ``OFFICE_SPEC.md`` Part 5, and BOTH of the tasks that write it.
 
 An **anchor** is a stable address of a region of the source document, recorded on the node
 that region produced. It is the ``source_anchor`` evidence row, and for a PDF it is::
 
     {"kind": "pdf", "page": 3, "bbox": [72.0, 118.4, 540.0, 262.9]}
+
+and for an office package, since Part 11 step 9, it is::
+
+    {"kind": "ooxml", "part": "word/document.xml", "path": "/w:document/w:body/w:p[42]"}
+
+TWO TASKS AND ONE ROW. ``citation`` writes the first and ``anchor:source`` the second, and
+a document reaches exactly one of them: a PDF has pages and no package, an office file has a
+package and — until something paginates it — no pages. That is Part 5's "Two anchors, not
+one" read from the ingest side, and the anchor it does NOT cover is the third: a rectangle
+recovered by searching a RENDITION of an office file, which is approximate, version
+dependent, and must be recorded under a key of its own so that "recovered" and "exact" stay
+distinguishable. Part 11 step 8 is where that one lands, and nothing here writes it.
 
 ``page`` is 0-based, matching ``page_offsets`` and ``pages_with_tables`` in the same
 extraction record; ``bbox`` is ``[x0, y0, x1, y1]`` in PDF points, which is what
@@ -44,7 +56,7 @@ with the text the chunks were cut from.
 from __future__ import annotations
 
 from bisect import bisect_right
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -57,18 +69,44 @@ from jmfts_core.atoms import (
     EV_SOURCE_SPAN,
     EV_TEXT,
 )
-from jmfts_core.ingest_tasks import TASK_CITATION, TaskOutcome, register_task_handler
+from jmfts_core.ingest_tasks import (
+    TASK_ANCHOR_SOURCE,
+    TASK_CITATION,
+    TaskOutcome,
+    register_task_handler,
+)
 from jmfts_core.models.document import Document, USETYPE_CHUNK
 from jmfts_core.models.task_queue import WRITE_SUBTREE, TaskQueue
+
+# The office readers, at module scope and safe there: `jmfts_core.office.extract` imports
+# python-docx and python-pptx inside its functions, behind the `require_*` guards, so this
+# costs a base install nothing. `structure_tasks` imports the same two names the same way.
+from jmfts_core.office.extract import docx_to_markdown, pptx_to_markdown
 from jmfts_core.pdf_extraction import pdf_to_markdown
 from jmfts_core.repositories.blob import BlobRepository
 from jmfts_core.repositories.evidence import EvidenceRepository
-from jmfts_core.structure_tasks import EXTRACTION_PDF_TEXT_LAYER
+from jmfts_core.structure_tasks import (
+    EXTRACTION_DOCX_BODY,
+    EXTRACTION_PDF_TEXT_LAYER,
+    EXTRACTION_PPTX_SLIDES,
+)
 
 #: ``anchor.kind`` for a rectangle on a PDF page. An open string for the same reason
-#: ``usetype`` is (spec Part 9) — ``ooxml`` and ``cells`` are the other two Part 5 names,
-#: and neither is this appliance's business yet.
+#: ``usetype`` is (spec Part 9) — ``cells`` is the third Part 5 name and belongs to the
+#: sheet tasks.
 ANCHOR_KIND_PDF = "pdf"
+
+#: ``anchor.kind`` for an element of an OOXML package: ``{"kind": "ooxml", "part":
+#: "word/document.xml", "path": "/w:document/w:body/w:p[42]"}``, Part 5's second example.
+#:
+#: **THIS IS THE SOURCE ANCHOR AND NOT A SUBSTITUTE FOR A RECTANGLE.** Part 5's "Two
+#: anchors, not one" says why they are different objects: this one is exact and permanent
+#: and addresses the bytes that were uploaded; a rectangle on a page of a rendition is
+#: approximate, depends on which LibreOffice paginated the file, and can fail to be computed
+#: at all. Part 11 step 8 is where the second one arrives, and it must be recorded
+#: SEPARATELY — "storing both under one key would make a recovered rectangle
+#: indistinguishable from an exact one".
+ANCHOR_KIND_OOXML = "ooxml"
 
 #: Where the anchor lives on a chunk node, and where the reason lives when there is none.
 #: TWO KEYS, NEVER ONE WITH A NULL: "this passage is at page 3, rectangle R" and "this
@@ -93,16 +131,52 @@ UNRESOLVED_NO_SPAN = "no_source_span"
 #: code to look at if it ever appears in quantity.
 UNRESOLVED_NO_BLOCK = "no_overlapping_block"
 
+#: The chunk's span lands only in text the READER wrote. A ``# Slide 7`` heading for a slide
+#: that named itself nothing, or the ``## Notes`` label above a notes section: real text in
+#: the markdown, produced by no element of the package. Distinct from
+#: :data:`UNRESOLVED_NO_BLOCK`, which says the span overlaps no measured block at all — this
+#: one says the blocks are there and none of them has an address.
+UNRESOLVED_NO_ELEMENT = "no_addressable_element"
+
 UNRESOLVED_REASON: dict[str, str] = {
     UNRESOLVED_NO_SPAN: (
         "the chunk carries no verified `source_span`, so there is no character range in "
-        "the extracted markdown to invert back into a rectangle"
+        "the extracted markdown to invert back into a source address"
     ),
     UNRESOLVED_NO_BLOCK: (
         "the chunk's `source_span` overlaps none of the text blocks the extraction "
-        "measured, so no rectangle on any page accounts for it"
+        "measured, so nothing in the source accounts for it"
+    ),
+    UNRESOLVED_NO_ELEMENT: (
+        "the chunk covers only text the reader wrote — a slide heading it chose, a `Notes` "
+        "label — which no element of the package produced, so there is nothing in the "
+        "source to address"
     ),
 }
+
+
+def overlapping_blocks(
+    blocks: Sequence[dict], starts: Sequence[int], start: int, end: int
+) -> list[dict]:
+    """The blocks the markdown range ``[start, end)`` touches, in document order.
+
+    Shared by both anchor handlers because the arithmetic is the same arithmetic — a block
+    map is a block map whether its entries carry a rectangle or an XPath, and two copies of
+    a half-open overlap test are two chances to disagree about a chunk that begins exactly
+    where a block ends. What differs between the two callers is what they build from the
+    result, which is where the formats genuinely differ.
+    """
+    # `bisect_right` finds the first block starting after `start`; the block before it is
+    # the one that may CONTAIN `start`, which is the common case for a chunk cut out of the
+    # middle of a paragraph.
+    index = max(bisect_right(starts, start) - 1, 0)
+    found: list[dict] = []
+    while index < len(blocks) and blocks[index]["start"] < end:
+        block = blocks[index]
+        if min(end, block["end"]) > max(start, block["start"]):
+            found.append(block)
+        index += 1
+    return found
 
 
 def anchor_for_span(
@@ -133,17 +207,7 @@ def anchor_for_span(
     anchoring them silently would make a partial rectangle indistinguishable from a complete
     one — which is the distinction the rest of Part 5 is most careful about.
     """
-    # `bisect_right` finds the first block starting after `start`; the block before it is
-    # the one that may CONTAIN `start`, which is the common case for a chunk cut out of the
-    # middle of a paragraph.
-    index = max(bisect_right(starts, start) - 1, 0)
-    overlapping: list[dict] = []
-    while index < len(blocks) and blocks[index]["start"] < end:
-        block = blocks[index]
-        if min(end, block["end"]) > max(start, block["start"]):
-            overlapping.append(block)
-        index += 1
-
+    overlapping = overlapping_blocks(blocks, starts, start, end)
     if not overlapping:
         return None, UNRESOLVED_NO_BLOCK
 
@@ -302,5 +366,237 @@ def run_citation(session: Session, task: TaskQueue) -> TaskOutcome:
             "pages_anchored": len(pages),
             "text_blocks": len(blocks),
             "page_count": meta["page_count"],
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# The SOURCE anchor, for an office package — OFFICE_SPEC.md Part 5, Part 11 step 9
+# ---------------------------------------------------------------------------
+
+#: extraction source -> the reader whose ``source_blocks`` this handler inverts. The keys
+#: are the same constants ``structure_tasks`` dispatches its structure rungs on, so a format
+#: that grows a reader and forgets this table gets a named refusal rather than no anchors.
+OOXML_READERS: dict[str, Callable[[bytes], tuple[str, dict]]] = {
+    EXTRACTION_DOCX_BODY: docx_to_markdown,
+    EXTRACTION_PPTX_SLIDES: pptx_to_markdown,
+}
+
+
+def anchor_for_ooxml_span(
+    blocks: Sequence[dict], starts: Sequence[int], start: int, end: int
+) -> tuple[Optional[dict], Optional[str]]:
+    """``(anchor, unresolved_code)`` for the markdown range ``[start, end)`` in a package.
+
+    ``blocks`` is an office reader's ``source_blocks`` — one entry per emitted markdown
+    block, in document order, carrying ``start``/``end`` and, for a block some element
+    produced, the ``part`` and ``path`` of that element.
+
+    THE PATH IS THE FIRST ADDRESSED BLOCK THE PASSAGE TOUCHES, which is the rule
+    :func:`anchor_for_span` applies to pages and for the same reason: the reader who clicks
+    a citation wants to be taken to where the passage starts. A chunk packs to a token
+    budget and knows nothing about paragraph boundaries, so covering several elements is
+    ordinary rather than a failure — and saying so is what keeps a partial address
+    distinguishable from a whole one:
+
+    * ``through`` is the last addressed block in the SAME part, present only when the
+      passage runs past its first element. ``path`` and ``through`` together bound the run
+      of that part's elements the passage occupies.
+    * ``continues`` is the further parts, in order, for a passage that leaves the one it
+      began in — a chunk that runs from a slide into its speaker notes, which are a
+      different part of the package. The analogue of a PDF anchor's further pages.
+
+    A block the reader wrote — a ``Slide N`` heading, a ``Notes`` label — carries no path,
+    and a passage made only of those resolves to :data:`UNRESOLVED_NO_ELEMENT` rather than
+    to the nearest real element. That is the Part 5 rule this function exists to keep: an
+    address that is probably right is worse than a recorded absence, because everything
+    downstream would draw it either way.
+    """
+    overlapping = overlapping_blocks(blocks, starts, start, end)
+    if not overlapping:
+        return None, UNRESOLVED_NO_BLOCK
+
+    addressed = [block for block in overlapping if block.get("path")]
+    if not addressed:
+        return None, UNRESOLVED_NO_ELEMENT
+
+    first = addressed[0]
+    anchor = {"kind": ANCHOR_KIND_OOXML, "part": first["part"], "path": first["path"]}
+    if "slide" in first:
+        anchor["slide"] = first["slide"]
+
+    same_part = [block for block in addressed if block["part"] == first["part"]]
+    if same_part[-1]["path"] != first["path"]:
+        anchor["through"] = same_part[-1]["path"]
+
+    continues: list[str] = []
+    for block in addressed:
+        if block["part"] != first["part"] and block["part"] not in continues:
+            continues.append(block["part"])
+    if continues:
+        anchor["continues"] = continues
+    return anchor, None
+
+
+def shift_for_removed(text: str, blocks: Sequence[dict], removed: str) -> tuple[str, list[dict]]:
+    """``(text, blocks)`` with every ``removed`` character gone and every offset moved with it.
+
+    ``extract:text`` strips NUL from a reader's output before it writes the node's content
+    (``structure_tasks._without_nul``), and stripping DELETES characters — so a block map
+    measured against the unstripped markdown is wrong by however many were removed above
+    each block. It is the hazard ``pdf_extraction`` documents at its own offset computation,
+    met here from the other side: this handler re-runs the reader and therefore sees the
+    unstripped text, while the chunks were cut from the stripped one.
+
+    Re-deriving the offsets rather than refusing the document, because the arithmetic is
+    exact: the removed positions are known and counting how many precede an offset is a
+    bisect. Refusing would throw away every address in a document over a padding artefact
+    that was never part of it.
+    """
+    if removed not in text:
+        return text, list(blocks)
+    positions = [index for index, char in enumerate(text) if char == removed]
+    moved = [
+        {
+            **block,
+            "start": block["start"] - bisect_right(positions, block["start"] - 1),
+            "end": block["end"] - bisect_right(positions, block["end"] - 1),
+        }
+        for block in blocks
+    ]
+    return text.replace(removed, ""), moved
+
+
+# `consumes` and `produces` are `citation`'s, exactly, and the identity is the point: the
+# two tasks write the same evidence about the same nodes and differ only in how they recover
+# it. So `EXPECTED_DIVERGENCE` in `tests/test_atom_declarations.py` carries the same entry
+# for this task as for that one — `source_span@subtree` is a settling-walk dependency rather
+# than a within-node edge (SPRINT_JOBS.md 2.2, 14.1) — and it is not a second finding.
+@register_task_handler(
+    TASK_ANCHOR_SOURCE,
+    consumes=(
+        f"{EV_EXTRACTION}@self",
+        f"{EV_TEXT}@self",
+        f"{EV_BLOB}@self",
+        f"{EV_SOURCE_SPAN}@subtree",
+    ),
+    produces=(f"{EV_SOURCE_ANCHOR}@subtree",),
+    write_mode=WRITE_SUBTREE,
+    cost_class=COST_CPU,
+)
+def run_anchor_source(session: Session, task: TaskQueue) -> TaskOutcome:
+    """Put the part and the element a passage came from on every chunk under this file node.
+
+    The same shape as :func:`run_citation` and for the same reasons — the bytes are re-read
+    and re-extracted rather than a block map being persisted on the node, and the result is
+    compared against the ``content`` the chunks were cut from, because a block map derived
+    from different text than the chunks were cut from would produce addresses that are wrong
+    in a way nothing downstream could detect.
+
+    It is a SEPARATE handler because the two anchors are separate objects. See
+    :data:`~jmfts_core.ingest_tasks.TASK_ANCHOR_SOURCE` for the argument; the short version
+    is that one is exact and the other is recovered, and a document reaches exactly one of
+    them from its own bytes.
+    """
+    doc = session.get(Document, task.scope_document_id)
+    if doc is None:
+        raise ValueError(
+            f"anchor:source is scoped to document {task.scope_document_id}, which does not exist"
+        )
+
+    extraction = EvidenceRepository(session).read(doc.id, "extraction") or {}
+    source = extraction.get("source")
+    reader = OOXML_READERS.get(source)
+    if reader is None:
+        raise ValueError(
+            f"anchor:source is scoped to document {doc.id}, whose extraction record names "
+            f"source {source!r}; this handler addresses elements of an OOXML package, which "
+            f"is {sorted(OOXML_READERS)}. A PDF's source anchor is its rectangle and "
+            "`citation` writes it; every other format reaches a rectangle through a "
+            "rendition, which is OFFICE_SPEC.md Part 11 step 8"
+        )
+
+    data = BlobRepository(session).read_bytes(doc.id)
+    if data is None:
+        raise ValueError(
+            f"document {doc.id} has no stored blob; anchor:source was enqueued for bytes "
+            "that are no longer there"
+        )
+
+    markdown, meta = reader(data)
+    markdown, blocks = shift_for_removed(markdown, meta["source_blocks"], "\x00")
+    content = doc.content or ""
+    if markdown != content:
+        raise ValueError(
+            f"anchor:source re-extracted document {doc.id} and got {len(markdown)} "
+            f"characters where the node holds {len(content)}; the block map and the chunks "
+            "would then be indexed against different text, and every address derived from "
+            "it would be confidently wrong"
+        )
+
+    starts = [block["start"] for block in blocks]
+
+    chunks = (
+        session.execute(
+            select(Document)
+            .where(Document.path.contains([doc.id]))
+            .where(Document.usetype == USETYPE_CHUNK)
+            .order_by(Document.id)
+        )
+        .scalars()
+        .all()
+    )
+
+    anchored = 0
+    continued = 0
+    unresolved: dict[str, int] = {}
+    parts: set[str] = set()
+
+    evidence = EvidenceRepository(session)
+    for chunk in chunks:
+        # Both rows first, for the reason `run_citation` gives: a chunk holding an anchor
+        # from a superseded extraction beside an unresolved row from this run is a node that
+        # says two things, and 3.2 makes those two different facts rather than one nullable
+        # one.
+        evidence.delete(chunk.id, ANCHOR_NAME)
+        evidence.delete(chunk.id, ANCHOR_UNRESOLVED_NAME)
+
+        span = evidence.read(chunk.id, "source_span")
+        if isinstance(span, list) and len(span) == 2:
+            anchor, code = anchor_for_ooxml_span(blocks, starts, span[0], span[1])
+        else:
+            anchor, code = None, UNRESOLVED_NO_SPAN
+
+        if anchor is not None:
+            evidence.write(chunk.id, ANCHOR_NAME, anchor)
+            anchored += 1
+            parts.add(anchor["part"])
+            if "continues" in anchor:
+                continued += 1
+        else:
+            evidence.write(
+                chunk.id,
+                ANCHOR_UNRESOLVED_NAME,
+                {"code": code, "reason": UNRESOLVED_REASON[code]},
+            )
+            unresolved[code] = unresolved.get(code, 0) + 1
+
+    session.flush()
+
+    return TaskOutcome(
+        detail={
+            "chunks": len(chunks),
+            "anchored": anchored,
+            "unresolved": unresolved,
+            # A passage that left the part it began in — a slide running into its speaker
+            # notes. Reported separately because its address covers only the first part, so
+            # it is the office half of `citation`'s `continues_overleaf`.
+            "continues_in_another_part": continued,
+            "parts_anchored": len(parts),
+            # The pair `extract:text` already reports on its own attempt, repeated here
+            # because this task is where it becomes a recovery rate: blocks with no address
+            # are the reason a chunk can be unresolved without anything having gone wrong.
+            "source_blocks": len(blocks),
+            "addressed_blocks": sum(1 for block in blocks if block.get("path")),
         }
     )
