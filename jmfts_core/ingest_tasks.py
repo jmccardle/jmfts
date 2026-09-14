@@ -171,8 +171,12 @@ TASK_CITATION = "citation"
 #: tree into ``default`` at the end of every run, so moving those usetypes onto the queue
 #: without this would have taken them out of full-text search without saying so.
 #:
-#: See :mod:`jmfts_core.index_tasks` for why this is a row here rather than the rollup task
-#: 11.5's prose describes, and for what about 11.5 is still not built.
+#: **NOT IN** :data:`TASK_ROWS` **SINCE** ``SPRINT_0_6_0.md`` **BLOCK B STEP 7**, which is
+#: the rollup task 11.5's prose describes it as all along. It was a row on the file node
+#: until then, and the row could not reach a spreadsheet: see the deleted row's epitaph in
+#: that table, and :mod:`jmfts_core.index_tasks` for the three causes, the set difference
+#: that replaced the subtree walk, what moving it costs, and what about 11.5 is still not
+#: built.
 TASK_INDEX_BM25 = "index:bm25"
 
 #: ``INGEST_SPEC.md`` 11.4's other missing half — knowledge triples from a document's
@@ -1157,31 +1161,35 @@ TASK_ROWS: tuple[TaskRow, ...] = (
         after_any=(TASK_STRUCTURE_DECLARED, TASK_STRUCTURE_INFERRED),
         requires=(PAGE_GEOMETRY,),
     ),
-    # INGEST_SPEC.md 11.5. `after_any` on the two rungs, like `citation` above, and for the
-    # same reason: it runs over the tree rather than to build it, and exactly one of the
-    # two rungs is ever eligible for a document. It needs the chunks and their `content`,
-    # which a completed rung has written; it does not need their vectors, so unlike
-    # `citation` it does not have to wait for `embed` to drain.
+    # INGEST_SPEC.md 11.5's `index:bm25` WAS A ROW HERE AND IS NOT ONE ANY MORE
+    # (`SPRINT_0_6_0.md` Block B step 7). It read:
     #
-    # `self`, not `subtree`. It writes nothing to any node — the postings, the term
-    # statistics and the index entries are rows in the search tables — so reserving the
-    # subtree would block every `embed` under this file for the duration and buy nothing.
+    #     TaskRow(TASK_INDEX_BM25, write_mode=WRITE_SELF,
+    #             after_any=(TASK_STRUCTURE_DECLARED, TASK_STRUCTURE_INFERRED,
+    #                        TASK_STRUCTURE_CONVERSATION),
+    #             requires=(HAS_TEXT_LAYER,))
     #
-    # `requires=(HAS_TEXT_LAYER,)` is the same repetition the rows above `extract:text`
-    # carry: the dependency gate reaches it first and says so more precisely, and naming
-    # the pattern keeps the row readable without following `after_any` up the table.
-    TaskRow(
-        TASK_INDEX_BM25,
-        write_mode=WRITE_SELF,
-        after_any=(
-            TASK_STRUCTURE_DECLARED,
-            TASK_STRUCTURE_INFERRED,
-            TASK_STRUCTURE_CONVERSATION,
-        ),
-        requires=(HAS_TEXT_LAYER,),
-    ),
-    # INGEST_SPEC.md 11.4, SPRINT_JOBS.md 15.4 S6. The same `after_any` as the two rows
-    # above: it reads the leaves' `content`, which a completed rung has written.
+    # and its comment claimed `after_any` for `citation`'s reason — "exactly one of the two
+    # rungs is ever eligible for a document". **That sentence is true of the prose formats
+    # it was written about and false for a workbook**, whose rung is `structure:sheets`; and
+    # `requires=(HAS_TEXT_LAYER,)` is a PDF property no workbook can satisfy. Either
+    # exclusion alone kept the task from ever being created, and `STRESS_CORPUS.md` 4.4
+    # measured the result on a real corpus: zero `index:bm25` tasks anywhere in a
+    # 21-workbook subtree, an `xlsx` index holding nothing, 4,601 `record` nodes with text.
+    #
+    # THE THIRD CAUSE IS WHY THE ROW IS GONE RATHER THAN WIDENED. A workbook's leaves are
+    # not written by its structure rung and every other format's are: `structure:sheets`
+    # writes the `sheet` containers and `extract:sheet` writes the rows, one rung further
+    # down and scoped to a different node. `_check_task_rows` rule 2 refuses to order two
+    # rows on different nodes and rule 1 refuses a second row under the same name, so this
+    # table cannot state the dependency at all — 4.4c repaired the two named exclusions and
+    # measured `index:bm25 added 0 documents ... it saw a subtree of 2`.
+    # `docs/MEASURE_BM25_BOUNDARY.md` §5.2 moved it to the settling boundary as a set
+    # difference; `jmfts_core.index_tasks` is where that argument now lives, and
+    # `IngestRollupPlanner` is what offers it.
+    #
+    # INGEST_SPEC.md 11.4, SPRINT_JOBS.md 15.4 S6. `after_any` on the three rungs, like
+    # `citation` above: it reads the leaves' `content`, which a completed rung has written.
     #
     # `self`, and this is the one row where that is a statement about somewhere else. It
     # writes no node in this file's subtree — the triples are rows in `triples`, and the

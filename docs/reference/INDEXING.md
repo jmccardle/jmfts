@@ -34,7 +34,6 @@ at the moment they do.
 | `extract:tables` | the file node | `children` | `has_text_layer`, `pages_with_tables` | — | `extract:text` |
 | `extract:images` | the file node | `children` | `has_images` | — | — |
 | `citation` | the file node | `subtree` | `@page_geometry` | — | `structure:declared`, `structure:inferred` |
-| `index:bm25` | the file node | `self` | `has_text_layer` | — | `structure:declared`, `structure:inferred`, `structure:conversation` |
 | `extract:facts` | the file node | `self` | `options.facts.enabled`, `has_text_layer` | `char_count < options.facts.min_characters` | `structure:declared`, `structure:inferred`, `structure:conversation` |
 | `embed` | `children` nodes produced by `structure:declared`, `structure:inferred`, `structure:conversation`, `profile:sheet`, `extract:sheet`, usetype `chunk`, `record`, `profile`, `cell` | `self` | — | — | — |
 
@@ -75,7 +74,7 @@ per-document planner asks for them: the upload path enqueues `probe` and whichev
 `fetch:*` the entry point names, the settling walk asks for the rollups, and the rest are
 operations a caller invokes directly.
 
-`derive:rule`, `fetch:arxiv`, `fetch:path`, `fetch:url`, `probe`, `structure:semantic`, `summarize`, `summarize:llm`, `summarize:tree`, `validate:shape`
+`derive:rule`, `fetch:arxiv`, `fetch:path`, `fetch:url`, `index:bm25`, `probe`, `structure:semantic`, `summarize`, `summarize:llm`, `summarize:tree`, `validate:shape`
 
 ## Retrieval visibility
 

@@ -663,11 +663,23 @@ class SearchRepository:
         # `documents`, so there was no row to test and nowhere to put the predicate.
         #
         # The postings are real. `index_document` gates on content and on
-        # `bm25_exclude_usetypes` and on nothing else, and the ingest pipeline's indexing
-        # rung runs BEFORE `settling.py` walks the node complete — `refresh_index` is the
-        # settled-only path, the incremental one is not. So BM25 returned in-flight nodes
-        # while the other three methods did not, and `tests/test_bm25_settled_gate.py` is
-        # the test that said so.
+        # `bm25_exclude_usetypes` and on nothing else — `refresh_index` is the settled-only
+        # path, the incremental one is not. So BM25 returned in-flight nodes while the
+        # other three methods did not, and `tests/test_bm25_settled_gate.py` is the test
+        # that said so.
+        #
+        # WHAT WROTE THEM CHANGED ON 2026-09-13 AND THE GATE IS NOT LESS NEEDED FOR IT.
+        # `index:bm25` used to be a `TASK_ROWS` row that fired straight after the structure
+        # rung, while every `embed` below was still running, so a whole prose file was
+        # answerable for the duration of its own embedding. `SPRINT_0_6_0.md` Block B step 7
+        # made it a rule at the settling boundary over settled nodes (`jmfts_core.index_tasks`),
+        # which narrows the window to one node: the boundary node itself is written while
+        # its own `settled` column still reads `in_flight`, because `settle_node` sets that
+        # column after the planner it just asked returns nothing. It is invisible here until
+        # it does, which is the correct answer and is this gate producing it. Nothing else
+        # is narrowed: `POST /documents` still writes into `default` inline when
+        # `auto_index_bm25` is set (`document_service.create_document`), and
+        # `POST /indexes/{name}/index-document/{id}` writes any node into any index.
         #
         # IN the scored CTE rather than after it, for the reason the ACL note below already
         # gives: a post-filter would trim the page after `LIMIT` and return a SHORT page

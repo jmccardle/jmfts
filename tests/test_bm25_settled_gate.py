@@ -10,9 +10,19 @@ to ``search_index_entries`` and never reached ``documents`` at all unless a subt
 settled predicate and nowhere to put one.
 
 ``index_document`` is the reason postings for in-flight nodes exist to be found: it gates on
-content and on ``bm25_exclude_usetypes`` and on nothing else, and the ingest pipeline's own
-indexing rung runs *before* ``settling.py`` reaches the node. ``refresh_index`` is the
+content and on ``bm25_exclude_usetypes`` and on nothing else. ``refresh_index`` is the
 settled-only path; the incremental one is not.
+
+**The pipeline's own rung no longer writes them wholesale, and that changes nothing here.**
+Until ``SPRINT_0_6_0.md`` Block B step 7 ``index:bm25`` was a ``TASK_ROWS`` row firing right
+after the structure rung, with every ``embed`` below still running; it is a rule at the
+settling boundary over settled nodes now (``jmfts_core.index_tasks``). The window is one
+node wide rather than one file wide — the boundary node is written while its own column
+still reads ``in_flight`` — and two write paths are not narrowed at all: ``POST /documents``
+indexes into ``default`` inline when ``auto_index_bm25`` is set, and
+``POST /indexes/{index_name}/index-document/{document_id}`` puts any node into any index.
+The tests below drive ``index_document`` directly for that reason: the read side must hold
+whatever the write side was told.
 
 The interesting half of this is :class:`TestTheGateIsNotAPostFilter`. A predicate applied
 after ``LIMIT`` would return a short page rather than a wrong one, which is a quieter bug
