@@ -27,7 +27,7 @@ import igraph as ig
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from jmfts_core.access import readable_id_subset
+from jmfts_core.access import readable_filter, readable_id_subset
 from jmfts_core.models.document import Document, DocumentLink
 from jmfts_core.models.triple import Triple
 
@@ -61,8 +61,29 @@ def _candidate_doc_query(
     parent_id: Optional[int],
     exclude_usetypes: Optional[Iterable[str]],
 ):
-    """Return a select() of Document rows matching scope filters."""
+    """Return a select() of Document rows matching scope filters.
+
+    **Subtree RBAC is applied to the VERTEX SET, which is what makes the scores honest.**
+    ``SPRINT_0_6_0.md`` Block A step 2, answering Part 4 question 4.2: the four analytics
+    verbs used to compute a metric over the whole corpus and then return ids, so a
+    principal with no grant read back the ids and titles of documents it cannot retrieve
+    anywhere else. Two ways to close that. Filtering the RESULT leaks nothing but reports
+    numbers derived from rows the caller cannot see — a centrality score is a property of
+    the graph it was computed on, so that answer is a number about somebody else's corpus.
+    Filtering the GRAPH costs more and moves every score. 4.2's stated default is to filter
+    the graph, and this is it.
+
+    Every score moves for a governed caller, and that is a BEHAVIOUR BREAK rather than a
+    fix — 4.2 says to record it as one. ``CHANGELOG.md`` carries no Unreleased heading in
+    this tree (it is written from the commits at release time), so the break is stated in
+    the commit that made this change and is due a line under 0.6.0 at the tag. For the
+    default deployment nothing moves at all: ``readable_filter`` returns ``None`` for
+    owner, unbound and no-ACR callers, so the statement is byte-identical to what it was.
+    """
     stmt = select(Document.id, Document.title, Document.usetype, Document.path)
+    pred = readable_filter(session)
+    if pred is not None:
+        stmt = stmt.where(pred)
     if parent_id is not None:
         # Documents whose path contains parent_id (descendants) plus the parent itself
         stmt = stmt.where(
@@ -298,8 +319,18 @@ def _build_tree_index(
     """Pull the document tree into memory: id -> children_ids, id -> meta.
 
     Bounded by ``parent_id``: only the parent and its descendants are loaded.
+
+    Bounded by the principal too, for the same reason ``_candidate_doc_query`` is: this
+    map is where ``compute_subtree_authority`` and ``compute_spines`` get the TITLES they
+    return, so filtering only the edge graph would have closed the score and left the
+    labels. An unreadable node dropping out of ``children`` also removes it and everything
+    under it from ``_descendants``, which is the subtree-size and spread input — the
+    authority of a folder is computed over the part of it the caller can see.
     """
     stmt = select(Document.id, Document.parent_id, Document.title, Document.usetype, Document.path)
+    pred = readable_filter(session)
+    if pred is not None:
+        stmt = stmt.where(pred)
     if parent_id is not None:
         stmt = stmt.where(
             (Document.id == parent_id) | (Document.path.op("@>")(func.jsonb_build_array(parent_id)))
