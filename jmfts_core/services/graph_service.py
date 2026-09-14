@@ -14,6 +14,21 @@ EXCEPTION TYPE. The one hand-written status the router raised — the ``/spines`
 when a root has no paths — is reproduced by raising ``LookupError`` (→ 404), with the
 detail string ``"No paths from root <id>"`` preserved verbatim. All seven are reads;
 none commits.
+
+**Subtree RBAC on the analytics verbs is applied to the GRAPH, not to the answer**, and
+it is applied one layer down — in ``graph_analysis._candidate_doc_query`` and
+``_build_tree_index``, which are where every vertex and every title come from. There is
+therefore no ``can_read`` call in ``get_centrality``, ``get_subtree_authority``,
+``get_spines`` or ``get_communities``: a score computed over rows the caller cannot see
+would be a number about a different graph, so the filter belongs where the graph is
+built rather than where its result is serialised. ``SPRINT_0_6_0.md`` Block A step 2,
+Part 4 question 4.2. ``get_neighbors`` is the exception that looks like an inconsistency
+and is not: its walk is bounded by a root the caller names, so the root gets its own
+``can_read`` 404 and the walk hides nodes as it reaches them.
+
+``get_diff`` and ``get_stats`` are NOT filtered. They return counts and no document
+identity, and Block A does not scope them; ``tests/test_expose_principal_audit.py``
+carries that as a listed decision rather than leaving it to be rediscovered.
 """
 
 from __future__ import annotations
@@ -143,7 +158,13 @@ class GraphService:
         exclude_usetypes: Optional[str] = None,
         top: int = 20,
     ) -> CentralityResponse:
-        """Flat top-N centrality scores."""
+        """Flat top-N centrality scores.
+
+        Computed over the documents the caller may read — see the module docstring, and
+        ``graph_analysis._candidate_doc_query`` for where the gate is. ``total_vertices``
+        and ``total_edges`` therefore describe the caller's graph, which is the only graph
+        the scores are about.
+        """
         excludes = _parse_csv(exclude_usetypes)
         build = build_graph(
             self.session, scope=scope, parent_id=parent_id, exclude_usetypes=excludes
@@ -187,7 +208,12 @@ class GraphService:
         exclude_usetypes: Optional[str] = None,
         top: int = 20,
     ) -> SubtreeAuthorityResponse:
-        """Hierarchical roll-up: descendant centrality flows up the tree with decay."""
+        """Hierarchical roll-up: descendant centrality flows up the tree with decay.
+
+        Both inputs are principal-scoped: the centrality graph and the tree index the
+        roll-up walks. An unreadable descendant is not in ``subtree_size``, not in
+        ``spread``, and not in ``top_descendants`` — see the module docstring.
+        """
         excludes = _parse_csv(exclude_usetypes)
         results = compute_subtree_authority(
             self.session,
@@ -242,7 +268,13 @@ class GraphService:
         max_depth: Optional[int] = None,
         exclude_usetypes: Optional[str] = None,
     ) -> SpineResponse:
-        """Top reading paths through the subtree of root_id."""
+        """Top reading paths through the subtree of root_id.
+
+        Principal-scoped through the same two builders as the rest of the analytics verbs.
+        A root the caller cannot read yields no tree and therefore no paths, so it takes
+        the 404 below — the same answer a root that does not exist gets, which is the
+        existence-hiding this codebase spells everywhere else.
+        """
         excludes = _parse_csv(exclude_usetypes)
         paths = compute_spines(
             self.session,
@@ -387,7 +419,12 @@ class GraphService:
         resolution: float = 1.0,
         min_size: int = 2,
     ) -> CommunityResponse:
-        """Leiden communities over the chosen edge graph."""
+        """Leiden communities over the chosen edge graph.
+
+        The partition is over the caller's graph — see the module docstring. A community
+        is a property of the graph it was found in, so a member list assembled from rows
+        the caller cannot read would name documents that are 404 everywhere else.
+        """
         excludes = _parse_csv(exclude_usetypes)
         build = build_graph(
             self.session, scope=scope, parent_id=parent_id, exclude_usetypes=excludes
@@ -460,7 +497,16 @@ class GraphService:
         summary="Run orphan + contradiction + stale + coverage audits in one transaction",
     )
     def post_lint(self, request: LintRequest) -> LintResponse:
-        """Run orphan + contradiction + stale + coverage audits in one transaction."""
+        """Run orphan + contradiction + stale + coverage audits in one transaction.
+
+        **Half of this is principal-scoped and half is not, as of Block A step 2.**
+        ``lint_orphans`` and ``lint_coverage`` build their graph through
+        ``graph_analysis.build_graph`` (``lint.py:66``, ``:246``) and so inherit step 2's
+        vertex filter for free. ``lint_contradictions`` and ``lint_stale`` read ``triples``
+        directly (``lint.py:111``, ``:175``) and report ``triple_ids`` with no gate. Step 2
+        scopes to the four analytics verbs, so closing that is not this step's; it is
+        written here rather than left to be rediscovered.
+        """
         report = lint_corpus(
             self.session,
             scope=request.scope,
