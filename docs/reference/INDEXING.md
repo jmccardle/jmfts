@@ -37,6 +37,8 @@ at the moment they do.
 | `anchor:source` | the file node | `subtree` | `@source_address` | — | `structure:declared`, `structure:inferred` |
 | `extract:facts` | the file node | `self` | `options.facts.enabled`, `has_text_layer` | `char_count < options.facts.min_characters` | `structure:declared`, `structure:inferred`, `structure:conversation` |
 | `embed` | `children` nodes produced by `structure:declared`, `structure:inferred`, `structure:conversation`, `profile:sheet`, `extract:sheet`, usetype `chunk`, `record`, `profile`, `cell`, `table` | `self` | — | — | — |
+| `render:pdf` | the file node | `self` | `@rendition_source` | — | — |
+| `convert:ooxml` | the file node | `self` | `is_legacy_binary` | — | — |
 
 ## What each task reads and writes
 
@@ -48,6 +50,7 @@ of the node above (legal only as a read).
 |---|---|---|---|
 | `anchor:source` | `extraction@self`, `text@self`, `blob@self`, `source_span@subtree` | `source_anchor@subtree` | `cpu` |
 | `citation` | `extraction@self`, `text@self`, `blob@self`, `source_span@subtree` | `source_anchor@subtree` | `cpu` |
+| `convert:ooxml` | `matched@self`, `blob@self` | `conversion@self` | `cpu` |
 | `derive:rule` | — | `text@self` | `cpu` |
 | `embed` | `text@self` | `embedding@self` | `model` |
 | `extract:facts` | `text@self`, `text@subtree` | — | `llm` |
@@ -60,6 +63,7 @@ of the node above (legal only as a read).
 | `probe` | `file@self`, `blob@self` | `matched@self` | `cpu` |
 | `profile:sheet` | `sheet@self`, `blob@ancestor` | `sheet.measurements@self`, `profile@children`, `text@children` | `cpu` |
 | `propose:links` | `sheet.measurements@children` | `column_links@self` | `cpu` |
+| `render:pdf` | `matched@self`, `blob@self` | `rendition@self` | `cpu` |
 | `structure:conversation` | `matched@self`, `blob@self`, `text@self` | `structure@self`, `structure@subtree`, `text@subtree` | `cpu` |
 | `structure:declared` | `text@self`, `extraction@self`, `matched@self` | `structure@self`, `structure@subtree`, `text@subtree`, `source_span@subtree` | `cpu` |
 | `structure:inferred` | `text@self`, `extraction@self`, `matched@self` | `structure@self`, `structure@subtree`, `text@subtree`, `source_span@subtree` | `cpu` |

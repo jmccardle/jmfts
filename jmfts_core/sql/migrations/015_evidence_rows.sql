@@ -103,10 +103,11 @@ CREATE INDEX IF NOT EXISTS idx_document_evidence_stale ON document_evidence (nam
     WHERE state = 'stale';
 
 -- ---------------------------------------------------------------------------
--- The move. Thirty-two keys out of the column, into rows, and then off the column.
+-- The move. Thirty-four keys out of the column, into rows, and then off the column.
 --
--- THREE OF THE THIRTY-TWO MOVE NOTHING AND ARE LISTED ANYWAY. `cell` was registered on
--- 2026-09-08, `table` on 2026-09-14 and `column_links` the same day, all long after this
+-- FIVE OF THE THIRTY-FOUR MOVE NOTHING AND ARE LISTED ANYWAY. `cell` was registered on
+-- 2026-09-08, and `table`, `column_links`, `rendition` and `conversion` all on 2026-09-14
+-- (the last two from `OFFICE_SPEC.md` Part 6, Block G step 32) — every one long after this
 -- migration, so no database has a node carrying any of them in `structured_content` and
 -- their copies find zero rows. `table`
 -- was caught by the full suite at 0.6.0's M1 gate and not by the lane that registered it,
@@ -114,6 +115,9 @@ CREATE INDEX IF NOT EXISTS idx_document_evidence_stale ON document_evidence (nam
 -- the paragraph working as intended one lane later: 8.6's proposals were written to
 -- `structured_content` on the branch they were recovered from, so the name has a real
 -- pre-2b history and nonetheless zero rows to move — no release ever shipped that branch.
+-- `rendition` and `conversion` were caught INSIDE their lane instead, which is the same
+-- reading with the opposite sign: the audit is what makes registering a row and forgetting
+-- this list a red test rather than a key left behind on the next database migrated.
 -- The list is generated from the
 -- REGISTRY rather than from what any particular database holds — `test_evidence_rows.py`
 -- enforces that in both directions — because a name absent here is a key this migration
@@ -141,6 +145,7 @@ INSERT INTO _evidence_keys (column_key, name) VALUES
     ('chunk_index', 'chunk_index'),
     ('column_links', 'column_links'),
     ('conversation_id', 'conversation_id'),
+    ('conversion', 'conversion'),
     ('effective_content', 'effective_content'),
     ('extraction', 'extraction'),
     ('file', 'file'),
@@ -150,6 +155,7 @@ INSERT INTO _evidence_keys (column_key, name) VALUES
     ('part_index', 'part_index'),
     ('profile', 'profile'),
     ('record', 'record'),
+    ('rendition', 'rendition'),
     ('row_index', 'row_index'),
     ('rung', 'rung'),
     ('section_level', 'section_level'),

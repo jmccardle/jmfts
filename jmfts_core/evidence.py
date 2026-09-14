@@ -359,6 +359,23 @@ register(
     nullable=True,
     doc="the page and rectangles a chunk came from. Absent when it could not be placed.",
 )
+# OFFICE_SPEC.md Part 6's two derived artefacts. The BYTES are in `document_renditions` and
+# not in these rows: an OID is a physical address the repository maintains, and evidence is
+# caller-readable and caller-PATCHable. So the rule these two follow is the one `blob`
+# follows in the other direction — existence is the repository's answer, and this is the
+# record of what a run produced, which stays true after a sweeper has evicted the bytes.
+register(
+    "rendition",
+    type=TYPE_DICT,
+    store=Store(STORE_EVIDENCE, row="rendition"),
+    doc="what LibreOffice paginated this document into: page count, per-page size, renderer.",
+)
+register(
+    "conversion",
+    type=TYPE_DICT,
+    store=Store(STORE_EVIDENCE, row="conversion"),
+    doc="which OOXML package a legacy binary was re-expressed as, and by what.",
+)
 
 # --- written by the pipeline, declared by no atom ---------------------------
 #

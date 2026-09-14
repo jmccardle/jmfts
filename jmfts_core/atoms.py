@@ -211,6 +211,24 @@ EV_SOURCE_SPAN = "source_span"
 #: the ``source_anchor`` evidence row on a chunk: the page and the rectangles.
 EV_SOURCE_ANCHOR = "source_anchor"
 
+#: the ``rendition`` evidence row on a file node: what LibreOffice paginated this document
+#: into, how many pages it came to and how big each one is. ``OFFICE_SPEC.md`` Part 6.
+#:
+#: A SEPARATE NAME FROM :data:`EV_BLOB`, and not a second locus of it. ``blob`` is the bytes
+#: the upload stored and is :data:`EXTERNAL_EVIDENCE` — nothing in the pipeline produces it —
+#: while this is produced, by one task, and is DERIVED from those bytes. One name for both
+#: would make ``render:pdf`` a producer of the thing it consumes, which derives a self-edge
+#: for a task that has none.
+EV_RENDITION = "rendition"
+
+#: the ``conversion`` evidence row on a file node: which OOXML package a legacy binary was
+#: re-expressed as. ``OFFICE_SPEC.md`` Part 1's other reason for tier 3.
+#:
+#: Separate from :data:`EV_RENDITION` because the two assert different facts about different
+#: artefacts — one is a picture of the document and the other is the document in a format a
+#: reader can open — and because a node routinely has both.
+EV_CONVERSION = "conversion"
+
 #: Every evidence name an atom may name. A closed vocabulary on purpose: a typo in a
 #: ``consumes`` entry would otherwise name evidence nothing produces, which derives no edge
 #: and looks exactly like an atom that genuinely depends on nothing.
@@ -235,6 +253,8 @@ EVIDENCE: frozenset[str] = frozenset(
         EV_EFFECTIVE_CONTENT,
         EV_SOURCE_SPAN,
         EV_SOURCE_ANCHOR,
+        EV_RENDITION,
+        EV_CONVERSION,
     }
 )
 

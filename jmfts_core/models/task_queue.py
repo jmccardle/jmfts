@@ -130,15 +130,32 @@ TASK_REAPABLE_STATUSES: tuple[str, ...] = (TASK_CLAIMED, TASK_RUNNING)
 #: convenience for a task that fails too often. A task that fails too often needs its
 #: failure fixed.
 #:
+#: ``render:pdf`` is the second member (``OFFICE_SPEC.md`` Part 6, ``SPRINT_0_6_0.md`` Block
+#: G step 32), and it qualifies under the same rule: Part 6 says "Rendering degrades;
+#: retrieval does not", and a ``.docx`` with no rendition keeps its text, its chunks, its
+#: vectors and its place in every index — everything except the picture. Its absence is
+#: visible too, because ``repositories.rendition.pdf_for`` raises with the task's name in it
+#: rather than returning nothing.
+#:
+#: ``convert:ooxml`` is deliberately NOT here, and the pair is what the rule looks like
+#: applied twice to one step. A legacy ``.doc`` that could not be converted has no reader
+#: that can open it, so it has no text, no children and nothing to retrieve — which is
+#: ``extract:text``'s case, not ``citation``'s, and ``settled='failed'`` is the true thing to
+#: say about that node.
+#:
 #: Spelled as a literal rather than imported from :mod:`jmfts_core.ingest_tasks`, which is
 #: where every task NAME is spelled: that module imports this one, so the dependency cannot
-#: run the other way. ``tests/test_citation_task.py`` pins the two spellings together.
+#: run the other way. ``tests/test_citation_task.py``, ``tests/test_render_tasks.py`` and
+#: ``tests/test_office_anchors.py`` pin the spellings together.
 #: ``anchor:source`` joined it with ``OFFICE_SPEC.md`` Part 11 step 9, and it is the same
 #: judgement about a different anchor: an office chunk whose element could not be addressed
 #: is a chunk, it retrieves as it always did, and the handler records the reason on it. What
 #: would NOT qualify is the reading that makes them one task — a rung that both extracted an
 #: office document and anchored it could not fail one half without failing the other.
-ADVISORY_TASK_TYPES: frozenset[str] = frozenset({"citation", "anchor:source"})
+#: ``render:pdf`` joined at Block G step 32 for a third reason of the same shape: a
+#: document LibreOffice cannot convert has no rendition, keeps its source bytes, and is
+#: searched exactly as before. What it loses is a picture, not a retrieval.
+ADVISORY_TASK_TYPES: frozenset[str] = frozenset({"citation", "anchor:source", "render:pdf"})
 
 #: Declared write modes, spec 5.3. See ``TaskQueueRepository.claim_next`` for the
 #: conflict matrix these drive.

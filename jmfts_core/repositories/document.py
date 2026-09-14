@@ -433,6 +433,13 @@ class DocumentRepository:
         # explicitly. Unlink the whole subtree's objects FIRST — after the cascade there
         # is nothing left that knows their OIDs.
         BlobRepository(self.session).unlink_subtree(document_id)
+        # The SAME leak, for the derived bytes: a rendition is a large object too, and
+        # `document_renditions` cascades exactly as `document_blobs` does. Imported here and
+        # not at module scope to keep the repository import graph acyclic — `rendition`
+        # imports `blob`, which this module already holds.
+        from jmfts_core.repositories.rendition import RenditionRepository
+
+        RenditionRepository(self.session).unlink_subtree(document_id)
         self.session.delete(doc)
         return True
 

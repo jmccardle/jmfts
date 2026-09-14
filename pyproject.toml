@@ -273,7 +273,14 @@ sketch = [
 # nobody runs. The conversion path is exercised in its own CI job, on an image that has
 # the system package.
 #
-# No code imports this yet. docs/OFFICE_SPEC.md Part 11 step 7 is where it lands.
+# `jmfts_core/convert.py` is the only module that imports it, through `require_unoserver()`
+# at the point of use and never at module scope — the same seam `jmfts_core/office/` is for
+# tier 2, and `tests/test_office_packaging.py`'s rule applies unchanged. It landed with
+# docs/OFFICE_SPEC.md Part 11 step 7 (SPRINT_0_6_0.md Block G step 32).
+#
+# INSTALLING IT IS HALF THE JOB, which is what makes this extra different from every other
+# one here: the wheel is a client, and a client needs a unoserver to talk to.
+# `Dockerfile.libreoffice` builds one, and `JMFTS_CONVERT_URL` is how a JMFTS finds it.
 convert = [
     "unoserver>=3.0",
 ]

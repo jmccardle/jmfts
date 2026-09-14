@@ -44,7 +44,50 @@ logger = logging.getLogger(__name__)
 #: table here is not optional bookkeeping — it is part of creating the table.
 #: (vdo_frontend's version hard-coded a single table in the subquery, which is exactly
 #: the bug this constant is shaped to prevent.)
-_OID_SOURCES: tuple[tuple[str, str], ...] = (("document_blobs", "lob_oid"),)
+_OID_SOURCES: tuple[tuple[str, str], ...] = (
+    ("document_blobs", "lob_oid"),
+    # OFFICE_SPEC.md Part 6's renditions and Part 1's legacy conversions, added with
+    # migration 024. Both are DERIVED and regenerable, which changes what an orphan of one
+    # costs and changes nothing about whether this list has to name it: an OID this sweep
+    # cannot see is an OID it destroys.
+    ("document_renditions", "lob_oid"),
+)
+
+
+def lob_exists(session: Session, oid: int) -> bool:
+    """Whether a large object is really there. One implementation, two repositories.
+
+    ``lo_get`` and ``lo_unlink`` both RAISE on a missing OID, and a raise inside a worker's
+    transaction aborts the whole of it — so every caller has to ask first. Written as a
+    function rather than left as a method so that
+    :mod:`jmfts_core.repositories.rendition` asks the same question the same way.
+    """
+    return (
+        session.execute(
+            text("SELECT 1 FROM pg_largeobject_metadata WHERE oid = :oid"), {"oid": oid}
+        ).scalar()
+        is not None
+    )
+
+
+def unlink_lob(session: Session, oid: int) -> bool:
+    """``lo_unlink`` one object. True if it was there, False if it already was not.
+
+    ``lo_unlink`` on a missing OID raises, and that error would abort the whole transaction —
+    so a document whose bytes had already vanished could never be deleted at all. The
+    existence check turns that into a WARNING naming the OID: the inconsistency is reported,
+    not swallowed, and the delete the operator asked for still happens. (vdo_frontend wrote
+    this as ``except: pass``, which reports nothing.)
+    """
+    if not lob_exists(session, oid):
+        logger.warning(
+            "large object %s was already gone at unlink time — a row named it but "
+            "the object did not exist",
+            oid,
+        )
+        return False
+    session.execute(text("SELECT lo_unlink(:oid)"), {"oid": oid})
+    return True
 
 
 class BlobLeakError(RuntimeError):
@@ -241,29 +284,13 @@ class BlobRepository:
     # =========================================================================
 
     def _lob_exists(self, oid: int) -> bool:
-        return (
-            self.session.execute(
-                text("SELECT 1 FROM pg_largeobject_metadata WHERE oid = :oid"), {"oid": oid}
-            ).scalar()
-            is not None
-        )
+        return lob_exists(self.session, oid)
 
     def _unlink(self, oid: int) -> bool:
         """``lo_unlink`` one object. True if it was there, False if it already was not.
 
-        ``lo_unlink`` on a missing OID raises, and that error would abort the whole
-        transaction — so a document whose bytes had already vanished could never be
-        deleted at all. The existence check turns that into a WARNING naming the OID: the
-        inconsistency is reported, not swallowed, and the delete the operator asked for
-        still happens. (vdo_frontend wrote this as ``except: pass``, which reports
-        nothing.)
+        The body moved to :func:`unlink_lob` when ``document_renditions`` arrived and needed
+        the same care with the same warning; this stays as the name the rest of this class
+        calls, so the two repositories cannot come to unlink differently.
         """
-        if not self._lob_exists(oid):
-            logger.warning(
-                "large object %s was already gone at unlink time — a row named it but "
-                "the object did not exist",
-                oid,
-            )
-            return False
-        self.session.execute(text("SELECT lo_unlink(:oid)"), {"oid": oid})
-        return True
+        return unlink_lob(self.session, oid)

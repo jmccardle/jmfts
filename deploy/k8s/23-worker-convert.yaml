@@ -1,0 +1,147 @@
+# The tier-3 pool: `render:pdf` and `convert:ooxml`, the two tasks that need LibreOffice.
+#
+# TWO DEPLOYMENTS AND ONE SERVICE, and the split is the point. `jmfts-libreoffice` runs
+# unoserver and holds no JMFTS, no queue claim and no database connection; `jmfts-worker-
+# convert` is an ordinary CPU worker that happens to have JMFTS_CONVERT_URL set. Which one
+# is scarce is the one you scale, and a conversion that wedges LibreOffice restarts a
+# container that was holding nothing.
+#
+# YOU MAY NOT NEED THE WORKER POOL AT ALL. JMFTS_CONVERT_URL is what makes a worker able to
+# convert, so putting it in 10-config.yaml instead gives the capability to every pool and
+# this file reduces to the LibreOffice half. That is the JMFTS_RUNNER_URL shape, and it is
+# the right default for a small fleet. The separate pool below is for the case where
+# conversion should not compete with ingest for the same workers.
+#
+# THE BADGE IS OPTIONAL AND IT IS A COMMITMENT. `jmfts_core.task_routing.CONVERT_POLICY`
+# routes the two task types at the `convert` badge; applying it (JMFTS_TASK_BADGES in
+# 10-config.yaml) says the cluster HAS this pool, because badges are asymmetric — a badged
+# task is claimed by no un-badged worker, so a cluster that routes and does not run the pool
+# stalls silently, and `render:pdf` being advisory means the document settles without its
+# rendition and without a failure anybody can see. Leave it unset and every worker with the
+# URL takes the work.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jmfts-libreoffice
+  namespace: jmfts
+  labels:
+    app.kubernetes.io/name: jmfts-libreoffice
+    app.kubernetes.io/component: converter
+spec:
+  # ONE, and the replica count is a real constraint rather than a starting point: unoserver
+  # keeps one LibreOffice warm and SERIALISES conversions through it (OFFICE_SPEC.md Part 6
+  # — concurrent `soffice` invocations fight over the user profile directory). Throughput
+  # comes from more replicas behind this Service, never from more concurrency inside one.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: jmfts-libreoffice
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: jmfts-libreoffice
+    spec:
+      containers:
+        - name: unoserver
+          image: jmfts-libreoffice:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: xmlrpc
+              containerPort: 2003
+          # Memory is the one that matters: LibreOffice loads the whole document, and a
+          # spreadsheet that paginates into hundreds of pages is where this pool dies.
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              memory: "4Gi"
+          # No probe on 2003. unoserver answers XML-RPC and not HTTP GET, so an httpGet
+          # probe would report a permanently unhealthy container that is working fine; a
+          # tcpSocket probe says only that something is listening, which the kubelet already
+          # knows. Liveness here is `--conversion-timeout` in the image: a conversion that
+          # stops making progress exits the process and the pod restarts.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jmfts-libreoffice
+  namespace: jmfts
+spec:
+  # ClusterIP and no Ingress, deliberately: unoserver has NO authentication of any kind, so
+  # anything that can reach this port can convert arbitrary bytes with this cluster's CPU.
+  # It is reachable from the workers and from nowhere else.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: jmfts-libreoffice
+  ports:
+    - name: xmlrpc
+      port: 2003
+      targetPort: xmlrpc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jmfts-worker-convert
+  namespace: jmfts
+  labels:
+    app.kubernetes.io/name: jmfts-worker
+    app.kubernetes.io/component: convert
+spec:
+  # Bounded by the converter behind it, not by this cluster: these pods spend their time
+  # waiting on XML-RPC. More than one per LibreOffice replica only queues at the Service.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: jmfts-worker
+      app.kubernetes.io/component: convert
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: jmfts-worker
+        app.kubernetes.io/component: convert
+    spec:
+      # A conversion is minutes for a large document, and the task is claimed while it runs.
+      terminationGracePeriodSeconds: 900
+      containers:
+        - name: worker
+          # The THIN image. This pool never embeds — `render:pdf` and `convert:ooxml` are
+          # both COST_CPU and call no model — so the 3.98 GB CPU image would be 3.3 GB of
+          # torch this pod never imports. It still needs --runner-url for anything else it
+          # might claim, which is why the badge below matters if you set one.
+          image: jmfts-worker-thin:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: JMFTS_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # Uncomment together with JMFTS_TASK_BADGES in 10-config.yaml. Both or neither:
+            # a badged worker with an unrouted queue idles, and a routed queue with no badged
+            # worker stalls.
+            # - name: JMFTS_WORKER_BADGE
+            #   value: "convert"
+            - name: JMFTS_CONVERT_URL
+              value: "http://jmfts-libreoffice.jmfts.svc.cluster.local:2003"
+            # WHICH LibreOffice is behind that URL, recorded on every rendition this pool
+            # produces (SPRINT_0_6_0.md 4.9). It is declared here because unoserver cannot
+            # report it — `info()` gives its own version and the filter lists, and nothing
+            # in that surface names the office suite. Keep it in step with the image tag
+            # above; read the truth with:
+            #   kubectl exec deploy/jmfts-libreoffice -- soffice --version
+            # Blank is allowed and means nobody measured, which costs the ability to tell an
+            # upgrade's renditions from the previous version's.
+            - name: JMFTS_CONVERT_VERSION
+              value: ""
+          envFrom:
+            - configMapRef:
+                name: jmfts-worker
+            - secretRef:
+                name: jmfts-worker-db
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              memory: "1Gi"

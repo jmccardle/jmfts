@@ -140,15 +140,25 @@ class TestShape:
         47 and 30 → 31 → 32, the dicts 16 → 17, the bare scalars unmoved again. It is a ROW
         and not a leaf inside ``structure`` for the reason its own registration gives: 8.6
         draws no boundary and writes no node, so it is not what the structure row asserts.
+
+        A FIFTH TIME, the same day, and it is Block G step 32: ``render:pdf`` and
+        ``convert:ooxml`` each write a block, so ``rendition`` and ``conversion`` are two more
+        entries and two more rows, both dicts. 47 → 49, 32 → 34, dicts 17 → 19, bare scalars
+        unmoved again. The rule they are registered under is the plain one — a task that
+        writes a fact writes it somewhere, and an unregistered name is a write
+        ``EvidenceRepository`` refuses — and the thing worth noticing is what is NOT here: the
+        rendition's BYTES, which are a large object in ``document_renditions``. An OID is a
+        physical address the repository maintains, and this registry is what a caller may read
+        and PATCH.
         """
         stored = [
             e for e in REGISTRY.values() if e.store.kind == STORE_EVIDENCE and not e.store.path
         ]
         dicts = [e for e in stored if e.type == TYPE_DICT]
         stated = {
-            "registry entries": (len(REGISTRY), 47),
-            "evidence rows": (len(stored), 32),
-            "rows that are dicts": (len(dicts), 17),
+            "registry entries": (len(REGISTRY), 49),
+            "evidence rows": (len(stored), 34),
+            "rows that are dicts": (len(dicts), 19),
             "rows that are bare scalars": (len(stored) - len(dicts), 15),
         }
         wrong = {k: v for k, v in stated.items() if v[0] != v[1]}
@@ -429,6 +439,25 @@ UNREACHABLE_HERE = {
     "conversation_id": "the conversation rung",
     "over_token_window": "the conversation rung",
     "part_index": "the conversation rung, and only for a turn that did not fit",
+    # The two tier-3 rows, and they are the first entries here whose reason is the
+    # ENVIRONMENT rather than the input. `render:pdf` runs on every office document this
+    # fixture ingests — it is an unconditional row — and it fails, permanently and by design,
+    # because the suite has no LibreOffice: `dev` does not imply `convert` (pyproject.toml
+    # says why), so the unoserver client is not installed either. That failure is the
+    # behaviour `tests/test_render_tasks.py` asserts, and this list is where the same fact
+    # reads as an absence.
+    #
+    # THEY WOULD APPEAR ON A MACHINE THAT HAS ONE, which is what makes the entries honest
+    # rather than a hole: a suite run with JMFTS_CONVERT_URL set writes both rows and this
+    # test still passes, because the list is a floor and not an assertion of absence.
+    "rendition": (
+        "written by `render:pdf`, which needs a LibreOffice this suite deliberately does "
+        "not have; tests/test_render_tasks.py drives the handler against a fake converter"
+    ),
+    "conversion": (
+        "written by `convert:ooxml`, same reason, and additionally only for a legacy "
+        "binary — none of this fixture's files is one"
+    ),
 }
 
 

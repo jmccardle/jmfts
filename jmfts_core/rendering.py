@@ -153,6 +153,30 @@ def page_count(pdf: bytes) -> int:
         doc.close()
 
 
+def page_geometry(pdf: bytes) -> list[dict]:
+    """Every page's size in PDF points, in order. ``[{"width": 595.3, "height": 841.9}, …]``
+
+    Written for ``render:pdf``, which records it on the rendition (``OFFICE_SPEC.md`` Part 6:
+    "a blob OID under ``file.rendition_ref``, plus page count and page geometry"), and it
+    belongs here rather than in that handler for this module's stated reason — it is a
+    function of bytes and numbers, testable without a database.
+
+    **Per page rather than one size for the document.** A presentation is landscape where its
+    handout pages are portrait, and a spreadsheet paginates into whatever its print area
+    implies, so a caller converting a rectangle into a pixel box needs the page it is on. It
+    also serves as the CHECK that a converter returned a PDF at all: bytes that are not one
+    raise :class:`UnreadablePdf` here rather than being stored and discovered later.
+    """
+    doc = _open(pdf)
+    try:
+        return [
+            {"width": round(page.rect.width, 2), "height": round(page.rect.height, 2)}
+            for page in doc
+        ]
+    finally:
+        doc.close()
+
+
 def _check_bounds(width_pt: float, height_pt: float, dpi: int) -> None:
     """Refuse a render that is too dense or too large, naming the ``dpi`` that would fit.
 
