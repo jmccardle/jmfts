@@ -1,7 +1,7 @@
 """RenditionRepository — derived bytes, and which bytes a page image is drawn from.
 
 ``docs/OFFICE_SPEC.md`` Part 6. The table's reasoning is in
-:mod:`jmfts_core.models.document_rendition` and in migration 024; this module is what writes
+:mod:`jmfts_core.models.document_rendition` and in migration 023; this module is what writes
 it, what reads it, and — in :func:`pdf_for` — the one question every page-image caller has to
 ask before it can render anything.
 

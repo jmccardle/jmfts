@@ -1,4 +1,4 @@
--- Migration 024: derived bytes get a table, because the uploaded ones will not share theirs.
+-- Migration 023: derived bytes get a table, because the uploaded ones will not share theirs.
 --
 -- `OFFICE_SPEC.md` Part 6, `SPRINT_0_6_0.md` Block G step 32. A rendition is a PDF of the
 -- source document, produced by LibreOffice at ingest so that serving a citation image is
@@ -63,7 +63,7 @@ CREATE INDEX IF NOT EXISTS ix_document_renditions_document
 -- Every delta from 017 on ends with these three lines. `ON CONFLICT DO NOTHING` so a re-run
 -- against a `schema.sql`-built database leaves that database's own 'schema' row standing.
 INSERT INTO schema_migrations (name, applied_at, source) VALUES
-    ('024_document_renditions.sql', NOW(), 'delta')
+    ('023_document_renditions.sql', NOW(), 'delta')
 ON CONFLICT (name) DO NOTHING;
 
 COMMIT;
