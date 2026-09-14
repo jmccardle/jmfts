@@ -37,6 +37,7 @@ from jmfts_client.contracts.anchor import (
     ANCHOR_ROW,
     ANCHOR_UNRESOLVED_ROW,
     CellsAnchor,
+    OoxmlAnchor,
     PdfAnchor,
     SpanAnchor,
     UnknownAnchorKind,
@@ -1609,6 +1610,26 @@ class DocumentService:
                 f"{anchor.char_start}-{anchor.char_end} of its extracted markdown, which is "
                 "a range in text and has no rectangle on any page. Nothing has paginated "
                 "this document, so there is no picture of that span to crop"
+            )
+        if isinstance(anchor, OoxmlAnchor):
+            # The third absence, and the most precise of the three. This node's passage IS
+            # addressed — exactly, permanently, at an element of the source package — and
+            # still has no rectangle, because a `.docx` has no pages until something
+            # paginates it. `OFFICE_SPEC.md` Part 5's "Two anchors, not one" is this
+            # distinction: the source address is what `anchor:source` recovers from the
+            # uploaded bytes, and a rectangle is what step 33 will recover from a rendition.
+            #
+            # The message names the element rather than saying "no anchor", because those
+            # are different facts and a caller that cannot tell them apart will report the
+            # second when the first is true.
+            where = f"{anchor.path} of {anchor.part}"
+            if anchor.slide is not None:
+                where += f" (slide {anchor.slide})"
+            raise RegionNotAddressable(
+                f"Document {document_id} is addressed at {where}, which is an exact address "
+                "in the source package and has no rectangle on any page. An office document "
+                "has no pages until `render:pdf` paginates it; recovering a rectangle from "
+                "that rendition is docs/SPRINT_0_6_0.md Block G step 33, which has not run"
             )
         return anchor
 

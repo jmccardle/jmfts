@@ -606,8 +606,11 @@ class TestRegion:
         chunk, _ = _anchored_chunk(db_session, pdf_node.id)
         evidence = EvidenceRepository(db_session)
         evidence.delete(chunk.id, ANCHOR_ROW)
-        evidence.write(chunk.id, ANCHOR_ROW, {"kind": "ooxml", "part": "word/document.xml"})
-        with pytest.raises(RegionNotAddressable, match="ooxml"):
+        # `ooxml` was the example here until step 34 made it a real kind, which is the
+        # version-skew this refusal is about arriving in this repository rather than in a
+        # client six months behind. `mathml` is not a kind anything writes.
+        evidence.write(chunk.id, ANCHOR_ROW, {"kind": "mathml", "part": "word/document.xml"})
+        with pytest.raises(RegionNotAddressable, match="mathml"):
             DocumentService(db_session).get_document_region(chunk.id, anchor=True)
 
     def test_an_unreadable_document_is_indistinguishable_from_a_missing_one(

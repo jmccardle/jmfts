@@ -128,6 +128,20 @@ export function highlight(evidence, surface) {
           `cannot be drawn on a ${surface.kind} surface. Highlight it in the rendered text ` +
           "instead; see SpanAnchor in jmfts-client/jmfts_client/contracts/anchor.py."
       );
+    case "ooxml":
+      // The same shape of answer as `span`, and for a sharper reason. This passage is
+      // addressed EXACTLY — an element of the source package, recovered from the uploaded
+      // bytes by `anchor:source` — and still has no rectangle, because an office document
+      // has no pages until `render:pdf` paginates it. `OFFICE_SPEC.md` Part 5's "Two
+      // anchors, not one" is precisely this split, and step 33 is the one that recovers a
+      // rectangle from a rendition. Throwing here rather than returning UNRESOLVED keeps
+      // the distinction a viewer needs: UNRESOLVED means nothing could be recovered, and
+      // this means something exact was.
+      throw new OverlayError(
+        `an ooxml anchor (${anchor.path} of ${anchor.part}) is an address in the source ` +
+          `package and has no rectangle to draw on a ${surface.kind} surface. Say where the ` +
+          "passage is instead; a rectangle needs a rendition, which is Block G step 33."
+      );
     default:
       throw new UnknownAnchorKind(anchor.kind);
   }

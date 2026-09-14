@@ -104,7 +104,48 @@ class SpanAnchor(BaseModel):
     char_end: int = Field(..., ge=0)
 
 
-SourceAnchor = Annotated[Union[PdfAnchor, CellsAnchor, SpanAnchor], Field(discriminator="kind")]
+class OoxmlAnchor(BaseModel):
+    """An element of an OOXML package, by part and XPath.
+
+    ``{"kind": "ooxml", "part": "word/document.xml", "path": "/w:document/w:body/w:p[42]"}``,
+    written by ``anchor:source`` (``jmfts_core/citation_tasks.py:424``). ``OFFICE_SPEC.md``
+    Part 5's SOURCE anchor: exact, permanent, and computable from the uploaded bytes, which is
+    what makes it a different task from ``citation`` rather than another format in its reader
+    table. A rectangle on a rendered page is the OTHER anchor and is recorded separately.
+
+    **This has no rectangle, and that is not a gap.** A ``.docx`` has no pages until something
+    paginates it, so nothing here can be drawn on a page image until a rendition exists
+    (``render:pdf``, Block G step 32) and something recovers geometry from it (step 33). What
+    an overlay can do today is say WHERE the passage is in the document's own structure, which
+    is the same answer a span highlight gives a format with no pages.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["ooxml"] = "ooxml"
+    #: The package part, e.g. ``word/document.xml`` or ``ppt/slides/slide1.xml``.
+    part: str
+    #: An XPath into that part, resolvable with the three-prefix namespace table
+    #: ``anchor:source`` binds. Not parsed here, for ``CellsAnchor.ref``'s reason: a second
+    #: grammar in the client would be a second grammar.
+    path: str
+    #: The slide number, for a ``pptx`` part that has one. Absent for ``docx``.
+    slide: Optional[int] = None
+    #: The last element of the SAME part the passage covers, when it spans more than one.
+    #: Absent when the passage is one element.
+    through: Optional[str] = None
+    #: Further PARTS the passage runs into, in order — a chunk running from a slide into its
+    #: notes. Absent, not empty, when it stays in one part.
+    #:
+    #: Note the type: :attr:`PdfAnchor.continues` is a list of page NUMBERS and this is a list
+    #: of part NAMES. Both answer "where else does this passage go", and neither can be read
+    #: as the other, which is why they are fields on two models rather than one shared field.
+    continues: Optional[list[str]] = None
+
+
+SourceAnchor = Annotated[
+    Union[PdfAnchor, CellsAnchor, SpanAnchor, OoxmlAnchor], Field(discriminator="kind")
+]
 
 
 class UnresolvedAnchor(BaseModel):
@@ -139,8 +180,8 @@ class UnknownAnchorKind(ValueError):
 
     def __init__(self, kind: object) -> None:
         super().__init__(
-            f"anchor kind {kind!r} is not one of pdf, cells, span. This client is older "
-            "than the appliance that wrote it."
+            f"anchor kind {kind!r} is not one of pdf, cells, span, ooxml. This client is "
+            "older than the appliance that wrote it."
         )
         self.kind = kind
 
@@ -156,7 +197,7 @@ def parse_anchor(row: object) -> SourceAnchor:
     if not isinstance(row, dict):
         raise UnknownAnchorKind(type(row).__name__)
     kind = row.get("kind")
-    for model in (PdfAnchor, CellsAnchor, SpanAnchor):
+    for model in (PdfAnchor, CellsAnchor, SpanAnchor, OoxmlAnchor):
         if kind == model.model_fields["kind"].default:
             return model.model_validate(row)
     raise UnknownAnchorKind(kind)
