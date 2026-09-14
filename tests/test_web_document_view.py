@@ -412,6 +412,18 @@ PARAM_HARNESS = textwrap.dedent("""
     catch (error) { out.refusals.noEvidence = [error.name, error.message]; }
 
     out.href = view.hrefWith({ id: "7", anchor: "{}" }, { page: 3 });
+
+    // `render()`'s fourth argument, built from the context IC-7 hands a component.
+    const handed = { client: { name: "the one client" }, params: { id: "7" }, navigate: () => {} };
+    const evidence = { anchor: %(anchor)s, unresolved: null };
+    const named = view.renderContext(handed, { evidence, dpi: 150, page: 5, ref: "B4:H120" });
+    const silent = view.renderContext(handed, { evidence, dpi: 150, page: null, ref: undefined });
+    out.context = {
+      named: { keys: Object.keys(named).sort(), page: named.page, ref: named.ref,
+               dpi: named.dpi, evidence: named.evidence, client: named.client.name },
+      silent: { keys: Object.keys(silent).sort(), hasPage: "page" in silent,
+                hasRef: "ref" in silent },
+    };
     console.log(JSON.stringify(out));
     """)
 
@@ -770,7 +782,6 @@ PAGE_HARNESS = textwrap.dedent("""
     install();
     const module = await import("%(static)s/views/document.js");
     const { views } = await import("%(static)s/shell/registry.js");
-
     const fixtures = %(fixtures)s;
     globalThis.__pixels = %(pixels)s;
     const registration = views().find((v) => v.id === "document");
@@ -1033,6 +1044,56 @@ def test_more_children_comes_from_the_offset_the_view_surface_has(page):
     """``/view/{id}/expand-children`` takes an offset, so this one really is a next page."""
     assert page["calls"]["paging"] == [["expand", {"document_id": 7, "offset": 1, "limit": 20}]]
     assert "which is all of them" in page["children"]["text"]
+
+
+def test_the_content_renderer_is_handed_the_context_it_declares_it_needs(params):
+    """Step 29's fourth argument, from the object IC-7 already hands a component.
+
+    Four of the nine renderers draw bytes that are not in ``rendered_content`` — a page image, a
+    cropped rectangle, a grid of cells — so they declare ``needs: ["client"]`` and ``render()``
+    refuses rather than reaching ``undefined.get_document_image``. Migration 023 points usetype
+    ``sheet`` at ``sheet-region``, so this is not hypothetical: a three-argument call is every
+    worksheet in the corpus raising.
+
+    What is passed is the context this component was handed, plus what only this view knows —
+    the anchor pair it already resolved (so an anchored hit costs no evidence call inside the
+    renderer either), the density, and ``page``/``ref`` ONLY when the route named one.
+    ``pageOf`` reads a present key as an instruction and refuses a null, so "the reader did not
+    say which page" has to arrive there as an absence rather than as a value.
+    """
+    named = params["context"]["named"]
+    assert named["client"] == "the one client", "the context's own keys survive"
+    assert set(named["keys"]) == {"client", "params", "navigate", "evidence", "dpi", "page", "ref"}
+    assert named["evidence"] == {"anchor": PDF_ANCHOR, "unresolved": None}
+    assert named["page"] == 5
+    assert named["ref"] == "B4:H120"
+    assert named["dpi"] == PAGE_DPI
+
+    silent = params["context"]["silent"]
+    assert silent["hasPage"] is False and silent["hasRef"] is False
+    assert set(silent["keys"]) == {"client", "params", "navigate", "evidence", "dpi"}
+
+
+def test_the_content_is_rendered_with_four_arguments_and_the_result_is_not_awaited():
+    """The call itself, read off the module, because the fourth argument is the break.
+
+    This repository's ``render/renderers.js`` is still step 25's three-argument version, so
+    nothing executable here can tell a four-argument call from a three-argument one — the extra
+    argument is simply ignored until lane 29's renderers land. The call shape is therefore
+    asserted against the source, and the context it passes is asserted for real above.
+
+    ``element.ready`` is not awaited and ``element.surface`` is not read: the first resolves —
+    never rejects — to a status for a failure that is already on the page, and the second is a
+    function whose value belongs to the render that produced it. A view that cached either
+    would be holding a fact about a previous picture.
+    """
+    code = _code()
+    assert re.search(
+        r"render\(\s*view\.rendered_content,\s*view\.presentation,\s*view,\s*renderContext\(",
+        code,
+    ), "the content panel no longer passes render() its fourth argument"
+    assert ".ready" not in code, "this view does not branch on a renderer's outcome"
+    assert ".surface(" not in code.replace("cellsSurface(", "").replace("pageSurface(", "")
 
 
 def test_the_stylesheet_comes_from_the_view_and_is_linked_once(page):

@@ -224,6 +224,36 @@ export function evidenceFromRows(response) {
   };
 }
 
+/**
+ * Everything a renderer may ask with: `render()`'s fourth argument.
+ *
+ * STEP 29 MADE THIS ARGUMENT LOAD-BEARING. Four of the nine renderers draw bytes that are not
+ * in `rendered_content` — a page image, a cropped rectangle, a grid of cells — so they declare
+ * `needs: ["client"]` and `render()` refuses to dispatch without them rather than reaching
+ * `undefined.get_document_image`. Migration 023 points usetype `sheet` at `sheet-region`, so a
+ * three-argument call is not a missed opportunity here: it is every worksheet in the corpus
+ * raising.
+ *
+ * The base is the context IC-7 handed the component, unpicked and rebuilt nowhere. On top of
+ * it go the three things only this view knows:
+ *
+ * * `evidence` — the pair already resolved for the source panel, so a renderer that wants an
+ *   anchor does not re-read what a search hit already carried (IC-4, one layer further down);
+ * * `dpi` — sent explicitly so the density that produced a picture is in the log beside it;
+ * * `page` and `ref` — ONLY when the route named one. `pageOf` in `render/renderers.js` reads a
+ *   present key as an instruction and refuses a null, and "the reader did not say which page"
+ *   has to arrive there as an absence rather than as a value.
+ */
+export function renderContext(context, { evidence, dpi, page, ref }) {
+  return {
+    ...context,
+    evidence,
+    dpi,
+    ...(page === null || page === undefined ? {} : { page }),
+    ...(ref === null || ref === undefined || ref === "" ? {} : { ref }),
+  };
+}
+
 /** A link back to this view with some arguments replaced, keeping the rest of the route. */
 export function hrefWith(params, overrides) {
   const query = new URLSearchParams();
@@ -906,7 +936,14 @@ function landing(page) {
   return page;
 }
 
-async function component({ client, params }) {
+async function component(context) {
+  // The WHOLE context, not two keys off it. IC-7 hands a component `{client, params, navigate}`
+  // and step 29 made that object the fourth argument of `render()`: four of the nine renderers
+  // draw bytes that are not in `rendered_content` — a page image, a cropped rectangle, a grid
+  // of cells — so they declare `needs: ["client"]` and `render()` refuses rather than reaching
+  // `undefined.get_document_image`. Destructuring here and rebuilding an object there would be
+  // two spellings of one thing, and the second would be the one that goes stale.
+  const { client, params } = context;
   linkStyles();
   const page = make("div", "view-document");
 
@@ -984,9 +1021,24 @@ async function component({ client, params }) {
   }
 
   // ---------------------------------------------------------------------- the content
+  //
+  // FOUR ARGUMENTS, and the fourth is `renderContext` above. `element.ready` is deliberately
+  // NOT awaited: the four visual renderers return their frame and fill it in, a failure
+  // arrives as its own message inside that frame, and nothing on this page branches on the
+  // outcome — so awaiting would delay the rest of the page in order to learn something the
+  // reader can already see. Nor is `element.surface()` called here; it is a function because
+  // an extent belongs to the render that produced it, and this view's own surfaces are the
+  // ones it draws on.
   const content = section(page, `Content — ${view.presentation.renderer}`);
   try {
-    content.append(render(view.rendered_content, view.presentation, view));
+    content.append(
+      render(
+        view.rendered_content,
+        view.presentation,
+        view,
+        renderContext(context, { evidence, dpi, page: requested, ref: params.ref })
+      )
+    );
   } catch (error) {
     // Shown here rather than thrown to the shell, which would replace the whole page with one
     // message and take the links, the children and the source panel down with it. An
