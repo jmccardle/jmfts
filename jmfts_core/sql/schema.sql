@@ -667,13 +667,6 @@ CREATE TABLE usetype_presentations (
     usetype VARCHAR(100) PRIMARY KEY,
 
     -- markdown | code | json-table | transcript | plain
-    --   | pdf-page | image | sheet-region | office
-    -- The nine values of `jmfts_core.models.usetype_presentation.RENDERERS`, which is where
-    -- the list is enforced (`repositories/usetype_presentation.py:119`) — this column is an
-    -- open string on purpose, so that adding a renderer is a tuple edit and a row rather than
-    -- an ALTER. The last four arrived with `docs/SPRINT_0_6_0.md` Block F step 29 and each
-    -- renders something the node does not carry: a page image, a cropped rectangle, a grid of
-    -- cells, or an office file as the markdown this appliance read out of it.
     renderer VARCHAR(50) NOT NULL,
 
     -- Renderer-specific extras (e.g. {"language": "python"} for code).
@@ -713,14 +706,7 @@ VALUES
     ('chunk',              'plain',    'hidden',            'hidden',            'Chunked sub-document'),
     ('conversation',       'transcript','collapsed',        'sidebar',           'Conversation thread'),
     ('raw',                'plain',    'collapsed',         'footnotes',         'Raw text'),
-    ('transcript',         'transcript','collapsed',        'footnotes',         'Voice transcript'),
-    -- A sheet node's own content is thin — `sheet_tasks` builds a markdown grid, counts it and
-    -- discards it (`docs/SPRINT_0_6_0.md` Part 1) — so under the `*` default a worksheet
-    -- rendered as an almost-empty markdown document. `sheet-region` reads the cells from
-    -- `GET /documents/{id}/cells` instead, which is the node's own region: its `cells` anchor
-    -- when it has one, the measured used range otherwise, with `ref_source` saying which.
-    -- Migration 023 carries this one row to a database that already exists.
-    ('sheet',              'sheet-region','collapsed',      'hidden',            'Worksheet region, read as cells');
+    ('transcript',         'transcript','collapsed',        'footnotes',         'Voice transcript');
 
 -- ============================================================================
 -- ONTOLOGIES AND SHAPE BINDINGS (see migration 013, jmfts_core/models/ontology.py)
@@ -915,8 +901,7 @@ INSERT INTO schema_migrations (name, applied_at, source) VALUES
     ('019_link_derived_by.sql', NOW(), 'schema'),
     ('020_container_lookup.sql', NOW(), 'schema'),
     ('021_profile_usetype.sql', NOW(), 'schema'),
-    ('022_token_embed_256_hnsw.sql', NOW(), 'schema'),
-    ('023_sheet_region_presentation.sql', NOW(), 'schema');
+    ('022_token_embed_256_hnsw.sql', NOW(), 'schema');
 -- END MIGRATION LEDGER
 
 -- ============================================================================

@@ -866,10 +866,10 @@ RENDERER_HARNESS = textwrap.dedent("""
     });
     const doc = { id: 7, title: "t", usetype: "document" };
 
-    const out = { names: rendererNames(), showing: {}, needs: {}, rendered: {}, refusals: {} };
+    const out = { names: rendererNames(), showing: {}, arity: {}, rendered: {}, refusals: {} };
     for (const name of rendererNames()) {
       out.showing[name] = rendererFor(name).showing;
-      out.needs[name] = [...rendererFor(name).needs];
+      out.arity[name] = rendererFor(name).render.length;
     }
 
     out.rendered.plain = serialize(render("a\\nb", presentation("plain"), doc));
@@ -884,27 +884,29 @@ RENDERER_HARNESS = textwrap.dedent("""
     };
     refuse("unknown renderer", () => render("x", presentation("mermaid"), doc));
     refuse("json-table on prose", () => render("not json", presentation("json-table"), doc));
-    // A renderer that reads the appliance, called by a view that passed no context at all.
-    refuse("no client", () => render("", presentation("pdf-page"), doc));
     console.log(JSON.stringify(out));
     """)
 
 
 @needs_node
-def test_every_renderer_declares_what_it_shows_and_what_it_needs(tmp_path):
-    """Step 25 shipped the interface and step 29 shipped the renderers; this is the ledger.
+def test_every_renderer_is_finished_and_draws_from_the_content_it_was_given(tmp_path):
+    """Step 25 shipped the interface and step 29 finished the renderers; this is the ledger.
 
     ``showing`` was step 25's device for a renderer that is not finished — null when it
     renders what its name says, and otherwise a sentence ``render()`` puts on the page, so
     that "finished the renderer and forgot to take the notice down" is not a state that
-    exists. All nine read null now, which is what finishing the two unfinished ones looks like
-    from here.
+    exists. All five read null now, which is what finishing ``markdown`` and ``transcript``
+    looks like from here.
 
-    ``needs`` is step 29's addition and it is the same shape of declaration for a different
-    fact: four of the nine draw something that is not in ``rendered_content`` — a page image, a
-    cropped rectangle, a grid of cells — and cannot be rendered without a client. Declared, so
-    that a view calling one without a context is refused with a sentence naming what to pass
-    rather than reaching ``undefined.get_document_image``.
+    The second assertion is the division step 29 settled. **A renderer draws CONTENT and a
+    view draws SOURCE.** ``content`` is ``ViewResponse.rendered_content``, a string the caller
+    already has; a page image is bytes behind a token-gated route, and the only thing that can
+    fetch one is the generated client, which a renderer does not hold. So no renderer takes a
+    fourth argument, none of them is asynchronous, and the four names step 29's brief lists
+    beyond these five are library functions in ``render/surfaces.js`` that a view composes —
+    see that module and this one's header. A renderer that grew a client parameter would put
+    the credential and the call log in two places, and step 23's "a view that shows something
+    the log has no call for computed it client-side" stops being readable the same day.
     """
     result = _node(tmp_path, RENDERER_HARNESS)
 
@@ -915,10 +917,10 @@ def test_every_renderer_declares_what_it_shows_and_what_it_needs(tmp_path):
         f"{unfinished}"
     )
 
-    from_content = {name for name, needs in result["needs"].items() if needs == []}
-    assert from_content == {"plain", "code", "json-table", "markdown", "transcript"}
-    from_appliance = {name for name, needs in result["needs"].items() if needs == ["client"]}
-    assert from_appliance == {"pdf-page", "image", "sheet-region", "office"}
+    assert all(declared <= 3 for declared in result["arity"].values()), (
+        f"a renderer declares more than IC-8's three parameters: {result['arity']}. A renderer "
+        "draws content; the view draws source and holds the client."
+    )
 
     # Step 25's notice wrapper is gone from these two, because there is nothing to warn about
     # any more: `# H` is a heading and not a line of source with a hash on it.
@@ -946,12 +948,6 @@ def test_every_renderer_declares_what_it_shows_and_what_it_needs(tmp_path):
     assert result["refusals"]["unknown renderer"][0] == "UnknownRendererError"
     assert "mermaid" in result["refusals"]["unknown renderer"][1]
     assert result["refusals"]["json-table on prose"][0] == "RenderError"
-
-    # The refusal a view meets if it forgets the fourth argument. It names the missing key and
-    # what to pass, because the author of the view is the one who has to act on it.
-    missing = result["refusals"]["no client"]
-    assert missing[0] == "RenderError"
-    assert "client" in missing[1] and "context" in missing[1]
 
 
 # ------------------------------------------------------------------ IC-9: the highlight overlay

@@ -153,15 +153,13 @@ h5.render-md-heading, h6.render-md-heading { font-size: .95rem; color: var(--dim
   color: var(--dim); font-weight: 600;
 }
 
-/* The three surfaces (step 29). `.render-status` is what a deferred renderer shows while it
- * is asking, and what carries the failure's own message when it does not get an answer. */
-.render-page, .render-region, .render-cells, .render-office, .render-sheet {
-  margin: 0 0 16px;
-}
-.render-status { margin: 0 0 8px; font-size: .9em; }
+/* The surfaces a VIEW composes (step 29, `render/surfaces.js`). A renderer draws content and
+ * a view draws source, so these classes belong to figures a view built out of bytes it
+ * fetched — not to anything `render()` returns. */
+.render-page, .render-region, .render-sheet { margin: 0 0 16px; }
 .render-caption { margin: 6px 0 0; font-size: .88em; color: var(--dim); }
 .render-picture { display: block; max-width: 100%; height: auto; border: 1px solid var(--line); }
-.render-download { margin: 8px 0; }
+.render-download-ready { display: inline-block; margin: 8px 0; }
 .render-scroll { overflow-x: auto; max-width: 100%; }
 
 /* A spreadsheet grid, with a FIXED cell size — `render/sheet.js` sets the numbers in the

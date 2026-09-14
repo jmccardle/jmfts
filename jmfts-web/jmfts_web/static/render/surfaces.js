@@ -22,11 +22,23 @@
 // would be the other one, which is why the field exists at all and why this file says which of
 // the two it is rather than leaving it to the caller.
 //
-// A SURFACE IS A FUNCTION ON THE ELEMENT, NOT AN OBJECT BESIDE IT. Every renderer here hangs
+// A SURFACE IS A FUNCTION ON THE ELEMENT, NOT AN OBJECT BESIDE IT. Every figure here hangs
 // `element.surface()` on what it returns. A function because a surface carries the extent the
 // thing is rendered AT, and a caller holding an object from before a re-render would draw a
 // box on the previous picture — a wrong box, confidently placed, which is the failure the
 // whole contract is shaped against.
+//
+// NOTHING IN THIS FILE FETCHES ANYTHING, and that is the division this bundle settled on.
+// `render()` (IC-8) draws CONTENT — the string the view already has — and the VIEW draws
+// SOURCE: it holds the client, it makes the call, and it hands the bytes here. So every
+// function below takes a Blob, a response or a number that the caller already obtained, and
+// the token stays in one place. See the header of `render/renderers.js` for the argument.
+//
+// WHAT THAT LEAVES SHARED IS THE PART THAT WAS GOING TO GO WRONG. Deriving a page's extent
+// from a PNG and a density, choosing an origin corner, turning a box into CSS, and saying the
+// sentence that goes beside a passage with no box — four things three views would each have
+// written, and the plan names the third of them as the failure IC-9 exists to prevent. They
+// are here once.
 
 import { highlight, HIGHLIGHT_STATUS } from "./overlay.js";
 
@@ -245,4 +257,215 @@ export async function pictureFrom(blob, { alt }) {
   image.setAttribute("height", String(pixels.height));
   image.addEventListener("load", () => URL.revokeObjectURL(url));
   return { image, pixels };
+}
+
+// ------------------------------------------------- what a view composes out of the above
+//
+// A view holds the client and makes the calls; these take what came back. Written once
+// because otherwise they are written once per view: `wt/view-tree` derived a page's scale and
+// chose an origin corner by hand before this existed, which is `docs/SPRINT_0_6_0.md`'s
+// "writing it three times is how the three end up disagreeing about which corner the origin
+// is in" arriving on schedule.
+
+const el = (tag, className) => {
+  const made = document.createElement(tag);
+  if (className) made.className = className;
+  return made;
+};
+
+const say = (tag, className, value) => {
+  const made = el(tag, className);
+  // textContent, never innerHTML. Some of these strings are a document's own filename and an
+  // evidence row's own reason, and neither is this page's to execute.
+  made.textContent = value;
+  return made;
+};
+
+/** The failure's own words. Never `JSON.stringify(error)`, which is `{}` for every Error. */
+export const messageOf = (error) => (error instanceof Error ? error.message : String(error));
+
+/** A size a reader can weigh, so a Blob is reported as bytes and a type rather than as `{}`. */
+export const describeBlob = (blob) =>
+  `${blob.size.toLocaleString()} bytes of ${blob.type || "an undeclared type"}`;
+
+/**
+ * The two anchor rows of one node, out of a `GET /documents/{id}/evidence` response.
+ *
+ * BOTH KEYS ALWAYS, which is `highlight()`'s rule and `evidence.py:453`'s reason: "no
+ * highlight" and "the rectangle could not be recovered, and here is why" are different facts,
+ * and a caller that passed one has not said whether it looked for the other. A search hit
+ * carries the same pair as `source_anchor` and `source_anchor_unresolved` (IC-4), which is one
+ * round trip per hit cheaper — pass those straight to `highlight()` and skip this.
+ *
+ * A row that is ABSENT and a row written with a null value both come back as null, and here
+ * that is one fact rather than two: `source_anchor` written-and-null says the anchor task ran
+ * and placed nothing, which is the same "there is no rectangle" a viewer has to draw.
+ */
+export function anchorPair(evidenceResponse) {
+  const rows = evidenceResponse?.evidence ?? {};
+  return Object.freeze({
+    anchor: rows["source_anchor"] ?? null,
+    unresolved: rows["source_anchor.unresolved"] ?? null,
+  });
+}
+
+/**
+ * Which page of a document a node is on.
+ *
+ * The same rule `get_document_image` applies to an omitted `page` — a file node is the whole
+ * document so its first page is page 0, and anything else names its page through its own
+ * anchor. It is here as well as there because a PNG carries no page number and `BinaryPayload`
+ * is bytes and their type, so a view that has to SAY which page it is showing has to work it
+ * out. The duplication is then made harmless the other way: a view that calls this SENDS the
+ * answer as `?page=`, so the server never takes the decision and the two cannot disagree.
+ *
+ * Refuses rather than falling back to page 0. A picture of the wrong page is what
+ * `OFFICE_SPEC.md` Part 5 calls worse than no picture at all, because the reader cannot tell.
+ */
+export function pageFor(document_, evidence, named) {
+  if (named !== undefined && named !== null) {
+    if (!Number.isInteger(named) || named < 0) {
+      throw new SurfaceError(`page ${JSON.stringify(named)} is not a 0-based page number`);
+    }
+    return named;
+  }
+  // `USETYPE_FILE` (`jmfts_core/models/document.py:48`), and this is the browser's copy of it
+  // rather than a third spelling: `ViewResponse.usetype` carries the string and nothing serves
+  // the constant. The alternative is not a lookup, it is not knowing.
+  if (document_?.usetype === "file") return 0;
+  if (evidence?.anchor?.kind === "pdf") return evidence.anchor.page;
+  if (evidence?.unresolved) {
+    throw new SurfaceError(
+      "This node has no page recorded, and the reason was: " +
+        `${evidence.unresolved.reason} (${evidence.unresolved.code}). Name a page to render ` +
+        "one anyway."
+    );
+  }
+  throw new SurfaceError(
+    `Document ${document_?.id} is not a file node and carries no pdf anchor, so nothing says ` +
+      "which page it came from. A picture of the wrong page is worse than no picture " +
+      "(OFFICE_SPEC.md Part 5), so name one rather than being shown page 0."
+  );
+}
+
+/** One anchor in the words a caption uses. */
+export function describeAnchor(anchor) {
+  if (anchor.kind === "pdf") {
+    const box = anchor.bbox.map((value) => Math.round(value * 10) / 10).join(", ");
+    return `page ${anchor.page + 1}, [${box}] in points`;
+  }
+  if (anchor.kind === "cells") return `${anchor.sheet}!${anchor.ref}`;
+  return `characters ${anchor.char_start} to ${anchor.char_end}`;
+}
+
+/**
+ * A rendered page, with the passage boxed on it. The beeline's picture.
+ *
+ * @param {{blob: Blob, page: number, dpi: number,
+ *          evidence: {anchor: object|null, unresolved: object|null}, label: string}} spec
+ *   `blob` is what `GET /documents/{id}/image?page=&dpi=` answered — the VIEW called it, and
+ *   `dpi` is the density the view ASKED for, which is the number this page's scale is made of.
+ * @returns {Promise<Element>} a `<figure>` carrying `surface()`, `overlayContainer` and
+ *   `highlight` (what the overlay decided, so a caller can branch without re-deriving it)
+ */
+export async function pageFigure({ blob, page, dpi, evidence, label }) {
+  const { image, pixels } = await pictureFrom(blob, {
+    alt: `page ${page + 1} of ${label}, rendered at ${dpi} dpi`,
+  });
+  const surface = rasterSurface({ kind: "pdf-page", pixels, dpi, page });
+  const figure = el("figure", "render-page");
+  const positioned = el("div", "overlay-surface");
+  positioned.append(image);
+  figure.append(positioned);
+  const found = drawHighlight(positioned, evidence, surface);
+  figure.append(say("figcaption", "render-caption", `Page ${page + 1}, rendered at ${dpi} dpi.`));
+  const notice = highlightNotice(found);
+  if (notice) figure.append(say("p", "overlay-notice", notice));
+  figure.surface = () => surface;
+  figure.overlayContainer = positioned;
+  figure.highlight = found;
+  return figure;
+}
+
+/**
+ * The picture of the words that matched: this node's own rectangle, cropped out of the page.
+ *
+ * NO BOX IS DRAWN ON IT, and that is the one thing here worth reading twice. The crop IS the
+ * anchor's rectangle, so a box would cover the whole picture — and it would cover it in the
+ * WRONG PLACE, because the anchor's coordinates are the page's and this surface's are the
+ * crop's. The two differ by the crop's origin, `toPixels()` has no offset for that and must
+ * not grow one quietly, and a box drawn 15% to the right of where it belongs is exactly the
+ * confidently-wrong rectangle `OFFICE_SPEC.md` Part 5 calls worse than none. So the caption
+ * states the page and the rectangle in points instead.
+ *
+ * The surface it returns is still real, and it is the space a query-time `search_for` within
+ * one node would produce coordinates in — which the sprint plan defers by name ("a text span
+ * within a node's content... simply not in this sprint") rather than leaves out by accident.
+ */
+export async function regionFigure({ blob, dpi, anchor, label }) {
+  const { image, pixels } = await pictureFrom(blob, {
+    alt: `the region ${label} was extracted from, rendered at ${dpi} dpi`,
+  });
+  const surface = rasterSurface({ kind: "image", pixels, dpi });
+  const figure = el("figure", "render-region");
+  const positioned = el("div", "overlay-surface");
+  positioned.append(image);
+  figure.append(positioned);
+  figure.append(
+    say(
+      "figcaption",
+      "render-caption",
+      `This picture IS the rectangle recorded for this passage — ${describeAnchor(anchor)} — ` +
+        `cropped out of the page at ${dpi} dpi, so there is no box to draw on it.`
+    )
+  );
+  figure.surface = () => surface;
+  figure.overlayContainer = positioned;
+  return figure;
+}
+
+/**
+ * The sentence that says which representation of a document is on the page.
+ *
+ * ONE WORDING, because three views writing three of them is how one of them ends up not
+ * saying it at all. `docs/SPRINT_0_6_0.md` step 29 requires it of the office case — "a page
+ * that silently shows markdown where it showed a rendered page for the document next to it is
+ * the failure this step is written to avoid" — and the requirement is about the PAGE saying
+ * so, not about which function says it.
+ *
+ * `rendition` is read from a named row rather than inferred from a failed call: pass
+ * `Object.prototype.hasOwnProperty.call(file, "rendition_ref")` — `OFFICE_SPEC.md` Part 6
+ * names that key — so that both answers are sentences and neither is a caught exception.
+ */
+export function sourceNotice({ rendition, filename, mime }) {
+  const note = el("p", "render-notice");
+  note.textContent = rendition
+    ? "This appliance holds a rendition of this document and this front end cannot show it " +
+      "yet — serving a citation image off a rendition is docs/SPRINT_0_6_0.md Block G step " +
+      "33. What follows is the markdown `extract:text` read out of the source."
+    : "This is the markdown this appliance read out of the document, NOT a rendered page of " +
+      "it. There is no rendered page: `file.rendition_ref` is not on this node, and nothing " +
+      "in this appliance writes one — `render:pdf` is Block G step 32. What is below is what " +
+      "was chunked, embedded and indexed, which is what a search hit hits.";
+  const described = [filename, mime].filter(Boolean).join(", ");
+  if (!described) return note;
+  const holder = el("div", "render-source-notice");
+  holder.append(note, say("p", "dim", `Source file: ${described}.`));
+  return holder;
+}
+
+/**
+ * A link that saves bytes the page already holds.
+ *
+ * Separate from the fetch on purpose: `GET /documents/{id}/blob` serves the whole upload and
+ * an office document is megabytes, so a view offers the control and calls the route when
+ * somebody asks. What this does is turn the answer into something a browser will save, under
+ * the uploader's own filename — which is the `file` evidence block's, the record of what was
+ * received (`OFFICE_SPEC.md` 3.3).
+ */
+export function downloadLink(blob, filename) {
+  const link = say("a", "render-download-ready", `Save ${filename} — ${describeBlob(blob)}`);
+  link.setAttribute("href", URL.createObjectURL(blob));
+  link.setAttribute("download", filename);
+  return link;
 }
