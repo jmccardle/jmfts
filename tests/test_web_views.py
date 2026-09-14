@@ -7,8 +7,11 @@ each is pinned here by the property Part 5.1's table names for it rather than by
   asserted: two branches of a scratch repository each append a view to the real manifest and
   the merge is run. The same merge is run again without the ``.gitattributes`` line, where it
   must conflict, because a clean merge that nothing forced is a clean merge by luck.
-The two interfaces of step 25 are pinned in the same file as they land; what is here at this
-commit is IC-7 and the shell the views are mounted into.
+* the defect that opened this lane: the capability table read three field names that
+  ``CapabilitiesResponse`` does not carry, and all three rendered as the word "none" because
+  ``pills(items)`` could not tell a field that is absent from a field that is empty. The
+  fixture below is BUILT FROM THE CONTRACT — a real ``CapabilitiesResponse``, dumped to JSON —
+  so a field renamed in ``jmfts-client`` fails here rather than on somebody's screen.
 
 These need no database and no browser. Where ``node`` is on PATH they execute the bundle's ES
 modules against a stubbed DOM, which is the same arrangement
@@ -25,8 +28,20 @@ import shutil
 import subprocess
 import textwrap
 from pathlib import Path
+from typing import Union, get_args, get_origin
 
 import pytest
+from pydantic import BaseModel
+
+from jmfts_client.contracts.meta import (
+    CapabilitiesResponse,
+    CorpusFacts,
+    EmbeddingCapability,
+    ExtraStatus,
+    IngestCapability,
+    LlmCapability,
+    RetrievalCapability,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 STATIC = REPO / "jmfts-web" / "jmfts_web" / "static"
@@ -492,3 +507,273 @@ def test_the_shell_draws_its_frame_and_shows_a_view_that_fails(tmp_path):
     log = _find(tree, "shell-log")[0]["html"]
     assert "Nothing yet." not in log
     assert "GET /health" in log
+
+
+# ---------------------------------------------------- the defect: reading a field that is there
+
+
+def _capabilities_fixture() -> CapabilitiesResponse:
+    """A real ``CapabilitiesResponse``, so the fixture cannot drift from the contract.
+
+    Hand-typing a dict here would reproduce the defect under test in the test itself: the page
+    read three field names that do not exist, and a hand-typed fixture could have carried the
+    same three. Every value below is placed by Pydantic into the model the appliance returns.
+    """
+    return CapabilitiesResponse(
+        version="0.5.1",
+        extras=[
+            ExtraStatus(
+                name="embed", installed=True, provides="produce embeddings", install="pip install"
+            ),
+            ExtraStatus(
+                name="office", installed=False, provides="open .docx", install="pip install"
+            ),
+            ExtraStatus(name="rdf", installed=True, provides="Turtle", install="pip install"),
+            ExtraStatus(name="sketch", installed=True, provides="MinHash", install="pip install"),
+            ExtraStatus(
+                name="convert", installed=False, provides="LibreOffice", install="pip install"
+            ),
+        ],
+        embedding=EmbeddingCapability(
+            model="nomic-ai/modernbert-embed-base",
+            device="cpu",
+            document_dims=768,
+            token_dims=256,
+            local_model_available=True,
+            runner_url=None,
+            can_embed=True,
+        ),
+        retrieval=RetrievalCapability(
+            methods=["vector", "fulltext", "bm25", "maxsim"],
+            default_methods=["vector", "bm25"],
+            default_weights={"vector": 0.86, "bm25": 0.14},
+            search_exclude_usetypes=["entity", "entities", "summary", "derived"],
+            bm25_exclude_usetypes=["entity"],
+        ),
+        ingest=IngestCapability(
+            usetypes=["document", "wiki:arxiv"],
+            detectable_formats=["pdf", "docx", "xlsx", "pptx", "markdown", "html"],
+            probeable_formats=["pdf", "docx", "xlsx"],
+            task_types=["embed", "index:bm25"],
+        ),
+        llm=LlmCapability(configured=False, base_url="", model="", requires_llm=["synthesis"]),
+        corpus=CorpusFacts(
+            documents=1284,
+            documents_with_vectors=1200,
+            documents_with_token_vectors=0,
+            bm25_indexes=["default"],
+        ),
+    )
+
+
+CAPABILITY_HARNESS = textwrap.dedent("""
+    import { install, serialize } from "./dom.mjs";
+    install();
+    const { views } = await import("%(static)s/shell/registry.js");
+    await import("%(static)s/views/capabilities.js");
+
+    const capabilities = %(capabilities)s;
+    const calls = [];
+    const client = {
+      operations: { a: 1, b: 2, c: 3 },
+      health_check_liveness: async () => { calls.push("health"); return { status: "ok" }; },
+      capabilities: async (args) => { calls.push(["capabilities", args]); return capabilities; },
+    };
+
+    const [view] = views();
+    const element = await view.component({ client, params: {}, navigate: () => {} });
+    console.log(JSON.stringify({
+      registration: { id: view.id, title: view.title, path: view.path, tags: [...view.tags] },
+      calls,
+      tree: serialize(element),
+    }));
+    """)
+
+
+def _rows(tree: dict) -> dict[str, dict]:
+    """The capability table as ``{row label: the cell}``."""
+
+    def walk(node):
+        if node["tag"] == "tr":
+            head, cell = (c for c in node["children"] if c["tag"] in ("th", "td"))
+            yield head["text"], cell
+        for child in node["children"]:
+            yield from walk(child)
+
+    return dict(walk(tree))
+
+
+def _pills(cell: dict) -> list[str]:
+    """The pill labels in one cell, and the pills alone — a "none" is not a pill."""
+    return [
+        c["text"]
+        for c in cell["children"][0]["children"]
+        if c["class"] and c["class"].startswith("pill")
+    ]
+
+
+@needs_node
+def test_the_capability_table_renders_the_fields_the_response_actually_carries(tmp_path):
+    """The three defects of 2026-09-14, each asserted on what reaches the page.
+
+    Written against the RENDERED OUTPUT and not against the absence of a console error, which
+    is the point. ``read_console_messages`` with ``onlyErrors`` reported nothing when all three
+    rows were wrong: ``(items || []).length === 0`` rendered "none", and an empty list is not
+    an error. A test that only checked "it did not throw" would have passed before the fix too.
+    """
+    fixture = _capabilities_fixture()
+    result = _node(
+        tmp_path,
+        CAPABILITY_HARNESS.replace("%(capabilities)s", fixture.model_dump_json()),
+    )
+
+    assert result["registration"] == {
+        "id": "capabilities",
+        "title": "This appliance",
+        "path": "/capabilities",
+        "tags": ["appliance"],
+    }
+    assert result["calls"] == ["health", ["capabilities", {"corpus": True}]]
+
+    rows = _rows(result["tree"])
+
+    # Defect 1: `extras` is list[ExtraStatus], and reading it as an object rendered its
+    # indices — "0 1 2 3 4". Five named pills, three of them marked installed.
+    assert _pills(rows["Extras"]) == ["embed", "office", "rdf", "sketch", "convert"]
+    marked = [
+        c["text"] for c in rows["Extras"]["children"][0]["children"] if c["class"] == "pill on"
+    ]
+    assert marked == ["embed", "rdf", "sketch"]
+    assert "not installed" in _titles(rows["Extras"])["office"]
+
+    # Defect 2: there is no `cap.formats`. Both real lists reach the page, under labels that
+    # say which question each answers.
+    assert _pills(rows["Formats identified from the bytes"]) == [
+        "pdf",
+        "docx",
+        "xlsx",
+        "pptx",
+        "markdown",
+        "html",
+    ]
+    assert _pills(rows["Formats something can look inside"]) == ["pdf", "docx", "xlsx"]
+
+    # Defect 3: the field is `search_exclude_usetypes`, and it rendered as "none".
+    assert _pills(rows["Held out of every result"]) == [
+        "entity",
+        "entities",
+        "summary",
+        "derived",
+    ]
+    assert _pills(rows["Never written to a BM25 index"]) == ["entity"]
+
+    # The fourth finding, which was a decision: the page asked for corpus counts and dropped
+    # them. It renders them, and it says out loud which method returns nothing here.
+    assert rows["Documents"]["text"] == "1284"
+    assert rows["Documents a vector search can reach"]["text"].startswith("1200")
+    maxsim = rows["Documents MaxSim can rank"]
+    assert maxsim["children"][0]["text"] == "0"
+    assert maxsim["children"][0]["class"] == "bad"
+    assert "returns nothing here" in maxsim["text"]
+    assert _pills(rows["BM25 indexes"]) == ["default"]
+
+    assert rows["Version"]["text"] == "0.5.1"
+    assert rows["Can produce a vector"]["text"].startswith("yes, in this process")
+    assert rows["Operations this client knows"]["text"].startswith("3")
+
+
+def _titles(cell: dict) -> dict[str, str]:
+    return {c["text"]: c["title"] or "" for c in cell["children"][0]["children"]}
+
+
+MISSPELT_FIELD_HARNESS = textwrap.dedent("""
+    import { install } from "./dom.mjs";
+    install();
+    const { field, ContractError } =
+      await import("%(static)s/views/capabilities.js");
+
+    const out = {};
+    const attempt = (label, response, path) => {
+      try {
+        out[label] = { value: field(response, path), error: null };
+      } catch (error) {
+        out[label] = {
+          value: null,
+          error: error instanceof ContractError ? error.message : `WRONG TYPE: ${error}`,
+        };
+      }
+    };
+
+    attempt("present", { version: "1" }, "version");
+    attempt("present but null", { embedding: { runner_url: null } }, "embedding.runner_url");
+    attempt("absent leaf", { retrieval: { methods: [] } }, "retrieval.search_exclude_usetypes");
+    attempt("absent branch", {}, "ingest.detectable_formats");
+    attempt("undeclared path", { formats: [] }, "formats");
+    console.log(JSON.stringify(out));
+    """)
+
+
+@needs_node
+def test_a_field_the_response_does_not_carry_is_an_error_and_not_the_word_none(tmp_path):
+    """The structural half of the fix, and the half that generalises.
+
+    Correcting three names would have left the next misspelling to render as "none" again. What
+    stops that is that the view no longer reaches into the response with ``.``: every read goes
+    through ``field()``, an ABSENT key raises, and a key that is present and null comes back as
+    the value it is. ``embedding.runner_url`` is null on an appliance that embeds locally, and
+    that is an answer rather than a gap.
+    """
+    result = _node(tmp_path, MISSPELT_FIELD_HARNESS)
+
+    assert result["present"] == {"value": "1", "error": None}
+    assert result["present but null"] == {"value": None, "error": None}
+
+    for label in ("absent leaf", "absent branch", "undeclared path"):
+        assert result[label]["error"], f"{label} was read as a value instead of refused"
+    assert "search_exclude_usetypes" in result["absent leaf"]["error"]
+    assert "READS" in result["undeclared path"]["error"]
+
+
+def _walk_contract(model: type[BaseModel], path: str) -> object:
+    """Resolve one dotted path against a Pydantic model, or raise ``KeyError``."""
+    current: object = model
+    for key in path.split("."):
+        if not (isinstance(current, type) and issubclass(current, BaseModel)):
+            raise KeyError(f"{path}: {current} has no fields to look {key} up in")
+        info = current.model_fields.get(key)
+        if info is None:
+            raise KeyError(f"{path}: no field {key!r} on {current.__name__}")
+        annotation = info.annotation
+        # ``Optional[CorpusFacts]`` is the one wrapper that appears here; step into it so a
+        # path through an optional sub-model resolves the way a page reading it would.
+        if get_origin(annotation) is Union:
+            members = [a for a in get_args(annotation) if a is not type(None)]
+            annotation = members[0] if len(members) == 1 else annotation
+        current = annotation
+    return current
+
+
+def test_the_capability_view_reads_only_fields_the_contract_carries():
+    """Every path in the view's ``READS`` resolves against ``CapabilitiesResponse``.
+
+    This is the check whose absence caused the defect. The generated ``client/verbs.d.ts``
+    already carried the right shape and nothing compared the page to it; comparing the page to
+    the Pydantic model instead is stronger, because the model is what the appliance serialises.
+    """
+    source = (STATIC / "views" / "capabilities.js").read_text(encoding="utf-8")
+    block = source[source.index("export const READS = Object.freeze([") :]
+    reads = re.findall(r'"([a-z_.]+)"', block[: block.index("]);")])
+    assert reads, "capabilities.js no longer declares READS"
+
+    for path in reads:
+        _walk_contract(CapabilitiesResponse, path)  # KeyError is the failure
+
+    # And the declaration is not allowed to go stale in the other direction: a path used in the
+    # module and missing from READS is refused at runtime by ``field()`` itself, so what is
+    # checked here is that nothing bypasses it. Comment lines are dropped first — this module
+    # quotes the three wrong names on purpose, so that a reader meets the defect at the fix.
+    code = "\n".join(
+        line for line in source.splitlines() if not line.lstrip().startswith(("//", "*", "/*"))
+    )
+    bypass = re.findall(r"\bcap\.[a-z_]+", code)
+    assert not bypass, f"the view reaches into the response directly: {bypass}"
