@@ -28,3 +28,4 @@ import "../views/log.js";
 import "../views/search.js";
 import "../views/upload.js";
 import "../views/tree.js";
+import "../views/document.js";

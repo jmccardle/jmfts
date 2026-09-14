@@ -1,0 +1,93 @@
+/* The document detail view's own styling. Loaded by `views/document.js`, by nothing else.
+ *
+ * docs/SPRINT_0_6_0.md Block F step 28, and `views/tree.css`'s header gives the rule both
+ * files are here under.
+ *
+ * THE GRID'S PITCH IS LOAD-BEARING AND IT IS DECLARED TWICE ON PURPOSE. `cellsSurface()` in
+ * `document.js` computes the overlay's pixel extent as (columns + 1) × CELL_W by (rows + 1) ×
+ * CELL_H, so the box it hands IC-9 lands on the right cells only while this stylesheet lays
+ * the cells out on exactly that pitch. Two files cannot import one number, so
+ * `tests/test_web_document_view.py::test_the_grid_pitch_in_the_stylesheet_is_the_one_the_
+ * surface_computes_in` reads both and fails when they disagree — which is the alternative to
+ * a comment asking somebody to remember.
+ */
+
+.view-document .doc-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.view-document .doc-crumbs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  margin: 0 0 12px;
+}
+.view-document .doc-panel {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px;
+  margin: 8px 0 0;
+}
+.view-document .doc-frame {
+  max-width: 100%;
+  overflow: auto;
+  border: 1px solid var(--line);
+}
+.view-document .doc-caption {
+  margin: 4px 0 0;
+  font-size: 0.85em;
+}
+
+/* The fixed pitch. See the header: `cellsSurface()` computes in these two numbers. */
+.view-document .doc-grid {
+  border-collapse: collapse;
+  table-layout: fixed;
+  width: auto;
+}
+.view-document .doc-grid td,
+.view-document .doc-grid th {
+  width: 104px;
+  height: 24px;
+  max-width: 104px;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  font-size: 0.85em;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+.view-document .doc-grid th {
+  color: var(--dim);
+  font-weight: 600;
+  text-align: center;
+}
+.view-document .doc-grid td.formula {
+  border-bottom: 2px solid var(--accent);
+}
+
+.view-document .doc-stub {
+  border-bottom: 1px solid var(--line);
+  padding: 6px 0;
+}
+.view-document .doc-stub p {
+  margin: 2px 0 0;
+  color: var(--dim);
+  font-size: 0.9em;
+}
+.view-document .doc-form {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.view-document .doc-form input {
+  padding: 5px 7px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+}
