@@ -5,23 +5,26 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>JMFTS</title>
 <!--
-  docs/SPRINT_0_6_0.md Block F step 19. This is the capability landing, and it is the whole
-  front end until step 24 adds the shell and the view registry.
+  docs/SPRINT_0_6_0.md Block F, steps 19 and 23. This is the capability landing, and it is
+  the whole front end until step 24 adds the shell and the view registry.
 
-  It is not a placeholder. It is the smallest document that proves the path end to end: the
-  mount serves it, it is same-origin so it needs no CORS entry, it takes a token and keeps it
-  out of the URL, and it renders an answer from the live appliance. Everything after it is
-  more views, not a different arrangement.
+  Step 19 built it around a hand-written fetch wrapper and said step 23 would replace that
+  with a generated client emitting the same event shape. It has: everything below calls
+  ./client/, which is generated from /openapi.json by scripts/generate_ts_client.py, and the
+  call log is the client's own event stream rather than something this page keeps.
 
-  No build step, no framework, no CDN. Step 24 introduces a source tree and a build; a page
-  that needs neither should not wait for them.
+  That is what makes "the front end thinly wraps the API" checkable. Every row below came
+  from a call the log shows; a row the log has no call for would be something this page
+  computed in the browser, and you could see that from here.
+
+  No build step, no framework, no CDN. ./client/ is ES modules the browser runs as they are.
 -->
 <style>
   :root { color-scheme: light dark; --fg: #16181d; --bg: #fbfbfa; --dim: #6a6f7a;
-          --line: #dcdde1; --accent: #1f5fa8; --bad: #a8321f; }
+          --line: #dcdde1; --accent: #1f5fa8; --bad: #a8321f; --soft: #f2f2f0; }
   @media (prefers-color-scheme: dark) {
     :root { --fg: #e6e7ea; --bg: #16181d; --dim: #9aa0ad; --line: #2e3239;
-            --accent: #79aef0; --bad: #f0897a; }
+            --accent: #79aef0; --bad: #f0897a; --soft: #1d2026; }
   }
   * { box-sizing: border-box; }
   body { margin: 0; padding: 0 16px 64px; background: var(--bg); color: var(--fg);
@@ -41,6 +44,8 @@
   button { padding: 6px 14px; border: 1px solid var(--accent); border-radius: 4px;
     background: var(--accent); color: #fff; cursor: pointer; font: inherit; }
   button.ghost { background: transparent; color: var(--accent); }
+  button.tiny { padding: 0 6px; font-size: .8em; border-color: var(--line);
+    background: transparent; color: var(--dim); }
   table { border-collapse: collapse; width: 100%; }
   td, th { text-align: left; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--line);
            vertical-align: top; }
@@ -51,8 +56,12 @@
   .bad { color: var(--bad); }
   .dim { color: var(--dim); }
   #log { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
-  #log div { padding: 5px 10px; border-bottom: 1px solid var(--line); }
-  #log div:last-child { border-bottom: 0; }
+  #log > div { padding: 5px 10px; border-bottom: 1px solid var(--line); }
+  #log > div:last-child { border-bottom: 0; }
+  #log .row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  #log .row .grow { flex: 1 1 auto; }
+  pre.copy { margin: 6px 0 0; padding: 8px 10px; background: var(--soft);
+    border-radius: 4px; overflow-x: auto; white-space: pre; font-size: .85em; }
 </style>
 </head>
 <body>
@@ -77,46 +86,57 @@
   <div id="log"><div class="dim">Nothing yet.</div></div>
 </main>
 
-<script>
-// The token lives in sessionStorage, not localStorage and never in the URL: a tab that is
-// closed has forgotten it, and a pasted address does not carry a credential.
-const KEY = "jmfts.token";
+<script type="module">
+import {
+  JmftsClient, TOKEN_KEY, asCurl, asFetch, asPython, detailOf,
+} from "./client/index.js";
+
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, c => (
   {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
-// Every request goes through here, and every request is logged. Step 23 replaces this with
-// a generated client emitting the same event shape; the property worth keeping from the
-// first day is that a view cannot call the API without the log seeing it.
+// Same origin, and the token lives in sessionStorage under the key the client names — not
+// localStorage and never the URL. A closed tab has forgotten it; a pasted address does not
+// carry a credential. `credentialFromSession` is the client's default, so nothing here has
+// to reach for the value itself.
+const client = new JmftsClient();
+
+// The log IS the client's event stream. This page adds nothing to it and hides nothing from
+// it, which is the property worth having: what you see below is every request that went out.
 const calls = [];
-async function api(path) {
-  const started = performance.now();
-  const token = sessionStorage.getItem(KEY);
-  const headers = token ? { Authorization: "Bearer " + token } : {};
-  let status = 0, body = null, error = null;
-  try {
-    const resp = await fetch(path, { headers });
-    status = resp.status;
-    body = resp.headers.get("content-type")?.includes("json")
-      ? await resp.json() : await resp.text();
-  } catch (e) {
-    error = String(e);
-  }
-  calls.unshift({ path, status, ms: Math.round(performance.now() - started), error });
-  renderLog();
-  if (error) throw new Error(error);
-  if (status >= 400) throw new Error("HTTP " + status + " on " + path);
-  return body;
-}
+client.onCall((event) => { calls.unshift(event); renderLog(); });
 
 function renderLog() {
-  $("log").innerHTML = calls.length === 0
-    ? '<div class="dim">Nothing yet.</div>'
-    : calls.map(c => `<div class="mono">GET ${esc(c.path)} &rarr; ${
-        c.error ? '<span class="bad">' + esc(c.error) + "</span>"
-                : (c.status >= 400 ? '<span class="bad">' + c.status + "</span>" : c.status)
-      } <span class="dim">${c.ms} ms</span></div>`).join("");
+  if (calls.length === 0) { $("log").innerHTML = '<div class="dim">Nothing yet.</div>'; return; }
+  $("log").innerHTML = calls.map((c, i) => `
+    <div>
+      <div class="row">
+        <span class="mono grow">${esc(c.method)} ${esc(c.path)}
+          ${esc(new URLSearchParams(
+              Object.entries(c.query).map(([k, v]) => [k, String(v)])).toString())}
+          &rarr; ${c.status === 0 || c.status >= 400
+            ? `<span class="bad">${c.status || esc(detailOf(c.response))}</span>`
+            : c.status}
+          <span class="dim">${c.ms} ms</span></span>
+        <button class="tiny" data-i="${i}" data-as="curl">curl</button>
+        <button class="tiny" data-i="${i}" data-as="python">python</button>
+        <button class="tiny" data-i="${i}" data-as="fetch">fetch</button>
+      </div>
+      <div class="out"></div>
+    </div>`).join("");
 }
+
+// Copy-out. The event is a call plus its arguments, so it prints three ways from the same
+// table the request was built from — and the credential is NEVER in any of them.
+$("log").addEventListener("click", (ev) => {
+  const button = ev.target.closest("button[data-as]");
+  if (!button) return;
+  const event = calls[Number(button.dataset.i)];
+  const printers = { curl: asCurl, python: asPython, fetch: asFetch };
+  const options = { baseUrl: window.location.origin };
+  const target = button.closest("div").parentElement.querySelector(".out");
+  target.innerHTML = `<pre class="copy">${esc(printers[button.dataset.as](event, options))}</pre>`;
+});
 
 const pills = (items, live) => (items || []).length === 0
   ? '<span class="dim">none</span>'
@@ -138,6 +158,12 @@ function render(cap) {
     ["Ingest entry points", pills(cap.ingest?.usetypes)],
     ["Retrieval methods", pills(cap.retrieval?.methods)],
     ["Held out of every result", pills(cap.retrieval?.excluded_usetypes)],
+    // The one row below that is NOT from a call, and it says so. Property 2 of step 23 is
+    // that a view showing something the log has no call for computed it in the browser; a
+    // page claiming that has to hold itself to it, and the way to hold to it is to label
+    // the exception rather than to quietly have one.
+    ["Operations this client knows <span class=\"dim\">(generated table, not a call)</span>",
+      String(Object.keys(client.operations).length)],
   ];
   $("out").innerHTML = "<h2>This appliance</h2><table>" + rows.map(
     ([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("") + "</table>";
@@ -146,18 +172,18 @@ function render(cap) {
 async function load() {
   $("out").innerHTML = "";
   try {
-    await api("/health");
+    // `/health` is the one path in PUBLIC_PATHS, so this answers with no credential — which
+    // is what lets the next failure be read as "the token is wrong" rather than "nothing is
+    // running". The client knows it takes none; the operation table says so.
+    await client.health_check_liveness();
   } catch {
     $("status").innerHTML = '<span class="bad">the appliance is not answering</span>';
     return;
   }
   try {
-    render(await api("/capabilities?corpus=true"));
+    render(await client.capabilities({ corpus: true }));
     $("status").textContent = "connected";
   } catch (err) {
-    // 401 here means the token is wrong or absent, and saying so is the whole job: the
-    // failure a reader needs to tell apart is "no credential" from "nothing is running",
-    // and /health above has already answered the second.
     $("status").innerHTML = '<span class="bad">' + esc(err.message) +
       " &mdash; check the token</span>";
   }
@@ -166,17 +192,17 @@ async function load() {
 $("auth").addEventListener("submit", (ev) => {
   ev.preventDefault();
   const value = $("token").value.trim();
-  if (value) sessionStorage.setItem(KEY, value);
+  if (value) sessionStorage.setItem(TOKEN_KEY, value);
   $("token").value = "";
   load();
 });
 $("forget").addEventListener("click", () => {
-  sessionStorage.removeItem(KEY);
+  sessionStorage.removeItem(TOKEN_KEY);
   $("status").textContent = "token forgotten";
   $("out").innerHTML = "";
 });
 
-if (sessionStorage.getItem(KEY)) load();
+if (sessionStorage.getItem(TOKEN_KEY)) load();
 else $("status").textContent = "a token is needed for everything except /health";
 </script>
 </body>
