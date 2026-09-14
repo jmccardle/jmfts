@@ -964,6 +964,32 @@ master
 worktree, run the files the change touches. `JMFTS_CI_PG_PORT` moves both the port and the
 container name, so parallel worktrees can each hold a database without colliding.
 
+**`JMFTS_CI_PG_PORT` is a MUTEX, not only a port, and the difference cost a lane two and a
+half hours on 2026-09-13.** `run_tests_docker.sh`'s `cleanup` runs `docker rm -f -v` at
+STARTUP as well as on exit, so a second invocation on the same port destroys the database the
+first is connected to. The script's own comment at line 22 predicts the symptom exactly —
+"the suite then fails partway through with connection errors that look like flakes and are
+not" — and it is written about two *agents* colliding. It is equally true of one agent
+starting a second run on its own port, which is what happened: a full suite reported
+`6 failed, 2385 passed, 157 errors` in 2:22:36, every failure in files the change did not
+touch. The same commit on the same port with nothing else running read `2548 passed, 40
+skipped in 595.25s`.
+
+The rule that follows: **one run per port at a time, and a gate with several lanes landing at
+once needs a port per lane or a queue.** A gate is exactly where this is most likely, because
+it is the one moment several people want the same suite.
+
+**Running readings, so a gate compares against a number rather than an impression:**
+
+| Commit | Reading |
+|---|---|
+| `db30087` — the pre-0.6.0 baseline | `2480 passed, 40 skipped in 440.04s` |
+| `28598a8` — M0's gate | `2498 passed, 40 skipped in 530.11s` |
+| `516c7d3` — `wt/bytes` alone, off M0 | `2548 passed, 40 skipped in 595.25s` |
+
+The last is M0 plus exactly the 50 tests that branch adds, with the skip count unmoved. A
+reading that does not decompose like that at a gate is the thing to chase.
+
 **`black --line-length 100 --check jmfts_core jmfts-client tests` and
 `ruff check jmfts_core jmfts-client tests` run before every merge**, because `.githooks/pre-commit`
 and `.github/workflows/ci.yml` run the same three paths and the three cannot be allowed to
