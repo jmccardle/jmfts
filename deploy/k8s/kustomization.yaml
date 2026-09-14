@@ -21,6 +21,7 @@ resources:
   - 20-worker-cpu.yaml
   - 21-worker-gpu.yaml
   - 22-worker-llm.yaml
+  - 23-worker-convert.yaml
   - 30-api.yaml
 
 # Point the API and both worker pools at wherever you pushed the images — this file is the
@@ -39,4 +40,11 @@ images:
   - name: jmfts-worker-cpu
     newTag: latest
   - name: jmfts-worker-gpu
+    newTag: latest
+  # The convert pool's two images. `jmfts-libreoffice` is built from Dockerfile.libreoffice
+  # and holds no JMFTS at all; `jmfts-worker-thin` is Dockerfile.worker with `--build-arg
+  # EXTRAS=`, because a pool that only converts never imports torch.
+  - name: jmfts-libreoffice
+    newTag: latest
+  - name: jmfts-worker-thin
     newTag: latest

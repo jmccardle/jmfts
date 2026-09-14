@@ -1,0 +1,110 @@
+# The tier-3 image: LibreOffice with unoserver in front of it. NOT a JMFTS.
+#
+#   docker build -f Dockerfile.libreoffice -t jmfts-libreoffice:latest .
+#   docker run -d --name libreoffice -p 2003:2003 jmfts-libreoffice:latest
+#   JMFTS_CONVERT_URL=http://127.0.0.1:2003 jmfts-worker
+#
+# `docs/OFFICE_SPEC.md` Part 1: LibreOffice is a ~500 MB system package, so it is not an
+# extra and cannot be one — `pip install libreoffice` is not a thing. It gets a whole image,
+# and the `convert` extra on the JMFTS side installs only the client that talks to it.
+#
+# WHY THIS IMAGE HOLDS NO JMFTS AT ALL, which is the decision worth stating. The other
+# option was a badged JMFTS worker image with LibreOffice baked in, and that is still a
+# supported deployment — build FROM this image and `pip install jmfts`, or set
+# JMFTS_CONVERT_URL on an ordinary worker and point it here. Keeping the two apart means:
+#
+#   * the 500 MB is paid by one pool rather than by every worker that might claim a
+#     `render:pdf`, and any worker with the URL can convert, which is the JMFTS_RUNNER_URL
+#     shape Part 1 asks tier 3 to follow;
+#   * a conversion that wedges LibreOffice takes down a container that holds no queue
+#     claim and no database connection. `--conversion-timeout` below makes that recovery
+#     automatic: unoserver terminates LibreOffice and exits, the container restarts, and
+#     the JMFTS worker sees a connection error — which `task_errors.classify_exception`
+#     grades RETRYABLE, so the task is retried rather than failed;
+#   * the LibreOffice version is a property of THIS image and moves on its own schedule,
+#     which is what `SPRINT_0_6_0.md` 4.9's "re-render on read after an upgrade" needs it
+#     to be.
+#
+# WHICH LIBREOFFICE. `SPRINT_0_6_0.md` 4.9 pins 26.8.0 — Fresh rather than Still, because
+# 26.2 reaches end of life on 2026-11-30 and pinning it would ship a component with no
+# security updates on its first day. What is installed here is what the base image's apt
+# repository carries, and the build PRINTS it rather than claiming it: a Dockerfile that
+# hard-coded a version string it did not verify would be exactly the lie
+# JMFTS_CONVERT_VERSION exists to avoid. Set EXPECT_VERSION to make the build fail unless
+# the pin is what landed:
+#
+#   docker build -f Dockerfile.libreoffice --build-arg EXPECT_VERSION=26.8.0 .
+#
+# The version this image reports is what the WORKER's JMFTS_CONVERT_VERSION must be set to
+# (deploy/k8s/23-worker-convert.yaml says so beside the field). Read it with:
+#
+#   docker run --rm jmfts-libreoffice:latest soffice --version
+ARG BASE=debian:trixie-slim
+FROM ${BASE}
+
+# The three applications, and nothing else from the suite: Writer, Calc and Impress cover
+# every format `render:pdf` and `convert:ooxml` are asked for. `libreoffice` unqualified
+# pulls Base, Draw, Math and a JRE.
+#
+# `python3-uno` is the binding unoserver imports; it comes from the distribution and MUST
+# match the installed LibreOffice, which is why it is apt and not pip.
+#
+# `fonts-liberation` and `fonts-dejavu-core` are not optional decoration. A document laid
+# out in Arial or Times renders with metric-compatible substitutes or it renders wrong —
+# different line breaks, different pagination, and therefore a rectangle on a different
+# page from the words it was measured against.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      libreoffice-writer \
+      libreoffice-calc \
+      libreoffice-impress \
+      python3-uno \
+      python3-venv \
+      fonts-liberation \
+      fonts-dejavu-core \
+ && rm -rf /var/lib/apt/lists/*
+
+# --system-site-packages so the venv can see `uno`, which apt installed into the system
+# interpreter and pip cannot provide. unoserver itself is pure Python.
+RUN python3 -m venv --system-site-packages /opt/unoserver \
+ && /opt/unoserver/bin/pip install --no-cache-dir 'unoserver>=3.0'
+
+# What actually landed, printed into the build log and left in the image for anyone who
+# needs it later. EXPECT_VERSION is empty by default: an unpinned build is a legitimate
+# thing to do and this records what it got, while a pinned build fails loudly here rather
+# than serving a different pagination than the renditions in the database were made with.
+ARG EXPECT_VERSION=""
+RUN soffice --version | tee /etc/jmfts-libreoffice-version \
+ && if [ -n "${EXPECT_VERSION}" ] && ! grep -q "${EXPECT_VERSION}" /etc/jmfts-libreoffice-version; then \
+      echo "EXPECT_VERSION=${EXPECT_VERSION} was asked for; this base carries:" >&2; \
+      cat /etc/jmfts-libreoffice-version >&2; \
+      exit 1; \
+    fi
+
+# A writable profile directory. LibreOffice will not start without one it owns, and two
+# processes sharing one fight over it — which is the reason Part 6 gives for unoserver
+# over `soffice --headless --convert-to` per file.
+ENV HOME=/tmp/libreoffice
+RUN mkdir -p /tmp/libreoffice && chmod 1777 /tmp/libreoffice
+
+EXPOSE 2003
+
+# `--interface 0.0.0.0` because the client is in another container; the default binds
+# loopback and would answer nobody. `--uno-interface` stays on loopback: that is
+# LibreOffice's own socket, spoken only by the unoserver in this same container, and
+# exposing it would publish an unauthenticated scripting interface.
+#
+# NOTHING AUTHENTICATES THIS PORT. unoserver has no credential of any kind, so anything
+# that can reach it can convert arbitrary bytes with it. It belongs on a cluster network,
+# never on a public one — deploy/k8s/23-worker-convert.yaml gives it a ClusterIP service
+# and no Ingress, and the docker form above binds 127.0.0.1 for the same reason.
+#
+# `--conversion-timeout 300`: a document LibreOffice cannot finish terminates the process
+# instead of holding the caller forever. The unoserver CLIENT takes no timeout (see
+# jmfts_core/convert.py), so this is where that bound lives, and it is a better place for
+# it — the converter is what knows a conversion has stopped making progress.
+CMD ["/opt/unoserver/bin/unoserver", \
+     "--interface", "0.0.0.0", \
+     "--port", "2003", \
+     "--uno-interface", "127.0.0.1", \
+     "--conversion-timeout", "300"]
