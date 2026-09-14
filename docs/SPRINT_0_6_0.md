@@ -98,7 +98,9 @@ in `CLAUDE.md` precisely because the number moves; Block E is what the number ar
 
 ## Part 2 — The scope
 
-**Seven blocks, thirty-four steps.** The blocks are a schedule and the order is argued here.
+**Seven blocks, thirty-five steps.** The blocks are a schedule and the order is argued here.
+Step 35 was added on 2026-09-13 by Block A step 3's audit, on its first run — see that
+block. The count moved because the sprint found a defect, which is the plan working.
 
 **Block F is the headline and the rest ride along with it.** 0.6.0 ships a web front end: drag
 a file in, search it, click a result, see the page and the rectangle the answer came from.
@@ -197,6 +199,38 @@ against the mounted routes; the audit this step adds reads the same registry and
 different question of it.
 An entry on the "why not" list is a decision with a reason attached, which is the same shape
 as `tests/test_readme_links.py::NOT_PUBLISHED`.
+
+**Step 3 ran on 2026-09-13 and found eleven more gaps.** That is the step justifying itself
+on its first execution, and it is also a problem: eleven is more than Block A can absorb
+without becoming a different sprint. They are recorded in `tests/test_expose_principal_audit.py`
+as `OPEN GAP` reasons, which is the honest holding position — the audit reports them, the list
+says why each is unclosed, and the test does not go green by pretending otherwise.
+
+**One of the eleven is step 1's defect on a second table and is promoted to a step.** Five
+`TripleService` write verbs take a subject document and an object document and gate neither,
+while the triple READ side is gated. That is the same shape as `create_link`, found the same
+way, and its entry condition is writable without a measurement — so by Part 0's rule it is a
+step rather than a gap. It becomes **step 35**.
+
+| Step | What | Entry condition | Size |
+|---|---|---|---|
+| 35 | Gate triple WRITE on the principal, subject and object | A principal with read-only access to document *B* asserts a triple naming *B* and it succeeds | medium |
+
+Same answer as 4.1, for the same reason: **write on the subject, read on the object.** A
+triple is a directed edge between two documents and the argument does not change because the
+table does.
+
+**The other ten stay gaps.** `DocumentService.embed_document` misses the `require_write` at
+`repositories/document.py:401`; `IngestService.file_frontier`; `TemplateService.get_template`
+and `render_template`, where a template IS a document read by `session.get(Document, id)` with
+no `can_read`; and five `IndexService` verbs, in a service that reaches `jmfts_core.access`
+nowhere at all. Each is a candidate step for 0.7.0 and none is scope creep into step 3.
+
+**The audit is a floor and not a proof, and the file says so.** Reachability into
+`jmfts_core.access` is necessary, not sufficient: `TemplateService.list_templates` reaches
+`require_add_child` because `_get_container_id` may create a container document — a real call
+on a real gate that scopes nothing. The assertion is written only on the sound direction, that
+no path implies certainly unscoped.
 
 ### Block E — the working record, republished
 
