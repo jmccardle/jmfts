@@ -1,0 +1,61 @@
+/* The search view's own stylesheet.
+ *
+ * docs/SPRINT_0_6_0.md Block F step 27. Loaded by `views/search.js` and by nothing else —
+ * `shell/shell.css`'s header states the rule: "A view that needs styling of its own adds it from
+ * its own module rather than a second <link> here", because `index.html` is the file five F3
+ * worktrees would otherwise all edit, which is the conflict IC-7 exists to remove.
+ *
+ * Everything here is either a layout this page needs or a colour taken from the shell's
+ * variables. No font host, no CDN, no absolute URL in a url() — the appliance is expected to run
+ * air-gapped and `test_nothing_in_the_bundle_loads_from_the_network` holds the whole bundle to
+ * it, this file included.
+ *
+ * The one thing worth reading rather than skipping is `.search-columns`. It is a grid with
+ * `grid-auto-flow: column` and a minimum column width, so seven columns stay seven columns and
+ * the page scrolls sideways rather than reflowing them into a list. The side-by-side IS the
+ * step, and a layout that stacked the columns would have quietly removed it.
+ */
+
+.view-search .search-form {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 10px 14px; align-items: end;
+  border: 1px solid var(--line); border-radius: 6px; padding: 12px; margin: 0 0 12px;
+}
+.view-search .search-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.view-search .search-field > span {
+  font-size: .72rem; text-transform: uppercase; letter-spacing: .07em; color: var(--dim);
+}
+.view-search input, .view-search select {
+  padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--bg); color: var(--fg); font: inherit; min-width: 0;
+}
+.view-search .search-wide { grid-column: 1 / -1; }
+.view-search .search-methods { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; }
+.view-search .search-methods label { display: inline-flex; gap: 5px; align-items: baseline; }
+.view-search .search-columns {
+  display: grid; grid-auto-flow: column; grid-auto-columns: minmax(17rem, 1fr);
+  gap: 10px; overflow-x: auto; align-items: start; padding-bottom: 8px;
+}
+.view-search .search-column {
+  border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; min-width: 0;
+}
+.view-search .search-column h3 { margin: 0; font-size: .95rem; font-weight: 650; }
+.view-search .search-count { font-variant-numeric: tabular-nums; }
+.view-search .search-hit { border-top: 1px solid var(--line); padding: 6px 0 4px; }
+.view-search .search-hit:first-of-type { border-top: 0; }
+.view-search .search-rank { color: var(--dim); font-variant-numeric: tabular-nums; }
+.view-search .search-snippet {
+  margin: 3px 0 0; font-size: .88em; color: var(--dim); overflow-wrap: anywhere;
+}
+.view-search .search-badge {
+  display: inline-block; padding: 0 6px; margin: 3px 4px 0 0; border-radius: 10px;
+  border: 1px solid var(--line); font-size: .78em;
+}
+.view-search .search-badge.anchored { border-color: var(--accent); color: var(--accent); }
+.view-search .search-badge.unresolved,
+.view-search .search-badge.contradictory,
+.view-search .search-badge.unreadable { border-color: var(--bad); color: var(--bad); }
+.view-search .search-answer { white-space: pre-wrap; margin: 0 0 10px; }
+.view-search .search-panel {
+  border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin: 0 0 12px;
+}
