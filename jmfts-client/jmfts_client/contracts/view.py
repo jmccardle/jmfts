@@ -79,6 +79,28 @@ class ViewResponse(BaseModel):
     triples: list[ViewTripleRef] = Field(default_factory=list)
     presentation: ViewPresentation
 
+    #: IC-3. Whether the CALLING principal may modify this document, add children under it,
+    #: or attach an edge whose source it is — ``jmfts_core.access.can_write``, which is the
+    #: same function Block A step 1's gate calls, so a page and a gate cannot disagree.
+    #:
+    #: **Added because a viewer could not ask.** No response reported the caller's own access
+    #: level (checked 2026-09-13 across ``view.py`` and ``document.py``), so a page rendering
+    #: a "create link" or "edit" control had to fire the call and read a 403 back to find
+    #: out. That is a control that lies, and offering an action that will be refused is the
+    #: user-facing half of the same defect Block A closes on the server side.
+    #:
+    #: ``True`` for an ungoverned document, which is not an oversight: access control in
+    #: JMFTS is opt-in and ``can_write`` returns True when no access-control root governs the
+    #: node (``jmfts_core/access.py:172``). It is also ``True`` for the owner and for an
+    #: in-process caller, which ``_bypass`` (``:38``) exempts from all of it.
+    can_write: bool = Field(
+        ...,
+        description=(
+            "Whether the calling principal may modify this document. False means a write "
+            "control should not be offered, not that one would fail silently."
+        ),
+    )
+
 
 class BreadcrumbResponse(BaseModel):
     document_id: int

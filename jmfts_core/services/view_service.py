@@ -36,7 +36,7 @@ from jmfts_client.contracts.view import (
     ViewResponse,
     ViewTripleRef,
 )
-from jmfts_core.access import can_read
+from jmfts_core.access import can_read, can_write
 from jmfts_core.models.document import Document
 from jmfts_core.registry import expose, register_service
 from jmfts_core.repositories.usetype_presentation import UsetypePresentationRepository
@@ -213,6 +213,12 @@ class ViewService:
             usetype=bundle.document.usetype,
             renderer=presentation.renderer,
             rendered_content=rendered,
+            # IC-3. The same `can_write` Block A step 1's gate calls, so a page that renders
+            # a write control and a repository that refuses one cannot disagree about who
+            # may act. This read has already happened logically — the caller reached here
+            # only because `can_read` passed — and both answers come off the same governing
+            # ACR set for this document.
+            can_write=can_write(self.session, bundle.document),
             ancestors=[
                 ViewAncestor(id=a.id, title=a.title, usetype=a.usetype) for a in bundle.ancestors
             ],
