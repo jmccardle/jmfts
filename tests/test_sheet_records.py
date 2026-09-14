@@ -40,19 +40,30 @@ import jmfts_core.ingest_tasks  # noqa: E402,F401  (import order; see the module
 from jmfts_client.contracts.upload import UploadedFile  # noqa: E402
 from jmfts_core.ingest_tasks import TASK_EXTRACT_SHEET  # noqa: E402
 from jmfts_core.ingest_options import resolve_options  # noqa: E402
-from jmfts_core.models.document import Document, USETYPE_RECORD  # noqa: E402
+from jmfts_core.models.document import (  # noqa: E402
+    Document,
+    SETTLED_SETTLED,
+    USETYPE_RECORD,
+    USETYPE_TABLE,
+)
 from jmfts_core.office.cells import (  # noqa: E402
     ROWS_READ_MAX,
     TooManyRows,
     json_value,
     read_rows,
 )
-from jmfts_core.office.sheets import measure_sheet  # noqa: E402
+from jmfts_core.office.sheets import (  # noqa: E402
+    NAME_SOURCE_BANNER,
+    NAME_SOURCE_HEADER,
+    measure_sheet,
+)
 from jmfts_core.repositories.document import DocumentRepository  # noqa: E402
 from jmfts_core.repositories.evidence import EvidenceRepository  # noqa: E402
 from jmfts_core.services.ingest_service import IngestService  # noqa: E402
+from jmfts_core.sheet_profile import sheet_evidence_block  # noqa: E402
 from jmfts_core.sheet_records import (  # noqa: E402
     SHAPE_RECORDS,
+    SHAPE_SMALL_TABLE,
     HeaderDoesNotCoverTheRow,
     build_records,
     header_labels,
@@ -75,7 +86,10 @@ def _workbook_bytes() -> bytes:
 
     ``Deals`` holds every type a cell can be, a blank row in the middle so that a row
     NUMBER cannot be confused with a position, a forced-text identifier, and a formula.
-    ``Notes`` has a value but no header row, which is the branch that produces no records.
+    ``Notes`` has a value but no header row under either pass of the scan — every row of it
+    has a hole — which is the branch that produces no RECORDS. It still produces a `table`
+    node, and that is step 12: on the open web the sheets that match `small_table` and not
+    `records` are 56.0% of all of them, against the 4.6% that match `records` and not it.
     """
     workbook = openpyxl.Workbook()
     deals = workbook.active
@@ -105,9 +119,18 @@ def workbook_bytes() -> bytes:
     return _workbook_bytes()
 
 
-def _header(data: bytes, sheet: str) -> list:
-    """The header the way the task gets it: off what ``profile:sheet`` measured."""
-    return [column.name for column in measure_sheet(data, sheet, render_cell_budget=8192).columns]
+def _header(data: bytes, sheet: str) -> dict:
+    """The header the way the task gets it: off what ``profile:sheet`` measured.
+
+    Both halves, because the ROW is now a measurement too — a header at row 4 makes rows 1
+    to 3 a banner and not instances, and `build_records` cannot skip them without being
+    told which row it was.
+    """
+    measured = measure_sheet(data, sheet, render_cell_budget=8192)
+    return {
+        "header": [column.name for column in measured.columns],
+        "header_row": measured.header_row.row,
+    }
 
 
 def _upload(session, data: bytes, filename: str = "records.xlsx"):
@@ -290,12 +313,12 @@ def _with_shared_formula(data: bytes) -> bytes:
 class TestBuildRecords:
     def test_the_header_row_is_not_a_record(self, workbook_bytes):
         rows = read_rows(workbook_bytes, "Deals", max_rows=100)
-        records = build_records(rows, header=_header(workbook_bytes, "Deals"))
+        records = build_records(rows, **_header(workbook_bytes, "Deals"))
         assert [record.row_index for record in records] == [2, 3, 5]
 
     def test_a_record_holds_the_typed_values_under_the_column_names(self, workbook_bytes):
         rows = read_rows(workbook_bytes, "Deals", max_rows=100)
-        records = build_records(rows, header=_header(workbook_bytes, "Deals"))
+        records = build_records(rows, **_header(workbook_bytes, "Deals"))
         assert records[0].record == {
             "Deal ID": "D-4471",
             "Account": "Northwind Freight",
@@ -308,7 +331,7 @@ class TestBuildRecords:
         """8.4: `content` is what gets embedded, so braces and quotes would be tokens
         spent on syntax the model gains nothing from."""
         rows = read_rows(workbook_bytes, "Deals", max_rows=100)
-        records = build_records(rows, header=_header(workbook_bytes, "Deals"))
+        records = build_records(rows, **_header(workbook_bytes, "Deals"))
         assert records[0].content == (
             "Deal ID: D-4471. Account: Northwind Freight. Value: 128000. "
             "Close Date: 2026-09-30. Won: TRUE."
@@ -318,13 +341,13 @@ class TestBuildRecords:
         """Row 5 has no close date. A key holding null and an absent key say the same
         thing about a spreadsheet, and the absent one does not spend a token saying it."""
         rows = read_rows(workbook_bytes, "Deals", max_rows=100)
-        record = build_records(rows, header=_header(workbook_bytes, "Deals"))[2]
+        record = build_records(rows, **_header(workbook_bytes, "Deals"))[2]
         assert "Close Date" not in record.record
         assert record.record["Deal ID"] == "0012345"
 
     def test_notes_land_under_the_column_name_and_only_where_there_are_any(self, workbook_bytes):
         rows = read_rows(workbook_bytes, "Deals", max_rows=100)
-        records = build_records(rows, header=_header(workbook_bytes, "Deals"))
+        records = build_records(rows, **_header(workbook_bytes, "Deals"))
         assert records[0].cells == {}
         assert records[2].cells == {
             "Deal ID": {"text_forced": True},
@@ -335,8 +358,23 @@ class TestBuildRecords:
         """`header_labels` is the whole coupling between the two tasks. It reads the
         stored `columns` ARRAY in order, so `header[0]` names column A — and a column the
         profile left unnamed stays unnamed here rather than being invented."""
-        stored = [{"name": "Deal ID"}, {"name": "Account"}, {"name": None}]
+        stored = [
+            {"name": "Deal ID", "name_source": NAME_SOURCE_HEADER},
+            {"name": "Account", "name_source": NAME_SOURCE_HEADER},
+            {"name": None, "name_source": None},
+        ]
         assert header_labels(stored) == ["Deal ID", "Account", None]
+
+    def test_a_banner_label_is_not_a_record_key(self):
+        """Step 13 gives a header-less sheet's columns a label read from a merged banner,
+        and a banner names the GROUP the merge spans — three columns under one banner share
+        one string, and three record keys that are one string are one key holding the last
+        value. So the SOURCE is checked, not the name."""
+        stored = [
+            {"name": "2024 Actuals", "name_source": NAME_SOURCE_BANNER},
+            {"name": "2024 Actuals", "name_source": NAME_SOURCE_BANNER},
+        ]
+        assert header_labels(stored) == [None, None]
 
     def test_a_value_the_header_does_not_name_raises(self, workbook_bytes):
         """The profile and this read ran over the same bytes with the same reader, so a
@@ -344,7 +382,7 @@ class TestBuildRecords:
         that is missing a field nobody can see is missing."""
         rows = read_rows(workbook_bytes, "Deals", max_rows=100)
         with pytest.raises(HeaderDoesNotCoverTheRow, match="column 4"):
-            build_records(rows, header=["Deal ID", "Account", "Value"])
+            build_records(rows, header=["Deal ID", "Account", "Value"], header_row=1)
 
 
 # ---------------------------------------------------------------------------
@@ -386,11 +424,15 @@ class TestExtractSheetTask:
         node = _sheet_node(db_session, file_node, "Deals")
         block = evidence(node)["sheet"]
 
-        assert block["shape"] == SHAPE_RECORDS
+        # BOTH shapes, and `small_table` first because 8.4 lists it first. `Deals` has a
+        # header row AND renders inside the document window, which is the contested
+        # population step 12 is about — 29.4% of git-corpora sheets and 12.5% of FUSE ones.
+        assert block["shape"] == [SHAPE_SMALL_TABLE, SHAPE_RECORDS]
         assert block["rung"] == RUNG_INFERRED
         assert block["record_count"] == 3
-        # A margin says how close a decision was to a boundary, and a boolean has no
-        # boundary to be close to.
+        # A margin says how close a decision was to a boundary, and neither input has one:
+        # a boolean has no boundary, and a token count against the model's own window is a
+        # hard edge rather than a threshold somebody chose.
         assert block["shape_margin"] is None
 
     def test_the_shape_verdict_does_not_erase_the_branch_inputs(
@@ -404,26 +446,158 @@ class TestExtractSheetTask:
         decision = evidence(node)["sheet"]["shape_decision"]
 
         assert decision["decided"] is True
-        assert decision["basis"] == "header_row"
-        assert "8.8" in decision["reason"]
+        assert decision["basis"] == "header_row, rendered_fits_doc_window"
+        assert "8.4" in decision["reason"]
         assert decision["inputs"]["header_row"] is True
+        assert decision["inputs"]["header_row_number"] == 1
         assert "fill_ratio" in decision["inputs"]
 
     def test_a_sheet_with_no_header_row_gets_no_records_and_says_why(
         self, db_session, evidence, workbook_bytes
     ):
-        """Not a failure. A sheet with no header row has no keys, and the shapes 8.4 gives
-        it read thresholds 8.8 leaves unset."""
+        """Not a failure. A sheet with no header row has no keys, and the two shapes 8.4
+        gives it — `matrix` and `unstructured` — read thresholds 8.8 leaves unset.
+
+        It is NOT nothing any more, and that is step 12: `Notes` renders inside the
+        document window, so it gets the `small_table` node it always matched and nothing
+        ever wrote. On the open web that population is 56.0% of sheets, against the 4.6%
+        that match `records` and not `table`.
+        """
         file_node = _ingest(db_session, workbook_bytes)
         node = _sheet_node(db_session, file_node, "Notes")
 
         assert _children(db_session, node.id, USETYPE_RECORD) == []
-        assert evidence(node)["sheet"]["shape"] is None
+        assert evidence(node)["sheet"]["shape"] == [SHAPE_SMALL_TABLE]
         attempt = next(
             entry for entry in evidence(node)["attempts"] if entry["task"] == TASK_EXTRACT_SHEET
         )
-        assert attempt["rung"] is None
+        assert attempt["rung"] == RUNG_INFERRED
         assert "header_row" in attempt["detail"]["no_records"]
+
+
+class TestTheTableShape:
+    """Step 11 and step 12. 8.4's ``small_table``, and both shapes where both match."""
+
+    def test_the_whole_sheet_arrives_as_one_markdown_table(
+        self, db_session, evidence, workbook_bytes
+    ):
+        file_node = _ingest(db_session, workbook_bytes)
+        sheet = _sheet_node(db_session, file_node, "Deals")
+        tables = _children(db_session, sheet.id, USETYPE_TABLE)
+
+        assert len(tables) == 1
+        lines = tables[0].content.splitlines()
+        assert lines[0] == "| Deal ID | Account | Value | Close Date | Won |"
+        assert lines[1] == "| --- | --- | --- | --- | --- |"
+        assert tables[0].title == "Deals — whole sheet"
+
+    def test_the_markdown_is_the_profile_s_own_and_not_a_second_rendering(
+        self, db_session, evidence, workbook_bytes
+    ):
+        """The same rule this task already follows for the header verdict: a second
+        derivation could disagree, and then the token count that decided the shape would be
+        a count of a string nobody stored."""
+        file_node = _ingest(db_session, workbook_bytes)
+        sheet = _sheet_node(db_session, file_node, "Deals")
+        table = _children(db_session, sheet.id, USETYPE_TABLE)[0]
+
+        assert table.content == evidence(sheet)["sheet"]["measurements"]["rendered_markdown"]
+
+    def test_the_table_node_carries_what_it_is_the_whole_of(
+        self, db_session, evidence, workbook_bytes
+    ):
+        file_node = _ingest(db_session, workbook_bytes)
+        sheet = _sheet_node(db_session, file_node, "Deals")
+        block = evidence(_children(db_session, sheet.id, USETYPE_TABLE)[0])["table"]
+
+        assert block["sheet_name"] == "Deals"
+        assert (block["rows"], block["cols"]) == (5, 5)
+        assert block["header_row_number"] == 1
+        assert block["fits_doc_window"] is True
+        assert block["rendered_tokens"] > 0
+
+    def test_both_shapes_are_emitted_and_neither_contains_the_other(
+        self, db_session, evidence, workbook_bytes
+    ):
+        """8.4 says the first match wins. Both match here and both are written: a table
+        node and its own row nodes are separate documents, and a query matching both
+        returns both."""
+        file_node = _ingest(db_session, workbook_bytes)
+        sheet = _sheet_node(db_session, file_node, "Deals")
+
+        tables = _children(db_session, sheet.id, USETYPE_TABLE)
+        records = _children(db_session, sheet.id, USETYPE_RECORD)
+        assert len(tables) == 1 and len(records) == 3
+        assert all(table.parent_id == sheet.id for table in tables)
+        assert all(record.parent_id == sheet.id for record in records)
+
+    def test_the_table_node_gets_a_vector_like_any_other_leaf(self, db_session, workbook_bytes):
+        """8.4: "embedded as-is". A shape that produced a node no query could reach would
+        be `KNOWN-DEFECTS` D1 in a third costume."""
+        file_node = _ingest(db_session, workbook_bytes)
+        sheet = _sheet_node(db_session, file_node, "Deals")
+        table = _children(db_session, sheet.id, USETYPE_TABLE)[0]
+
+        assert table.embed is not None
+        assert table.settled == SETTLED_SETTLED
+
+    def test_a_sheet_that_matches_neither_shape_writes_nothing_and_claims_no_rung(
+        self, db_session, evidence, workbook_bytes
+    ):
+        """The branch that used to be the ONLY outcome for a header-less sheet, and is now
+        the narrow case: no header row and no render inside the document window.
+
+        Driven through the handler rather than through a fixture whose render genuinely
+        misses the window, because such a workbook is 16,000 cells and 400 record nodes to
+        embed — the branch under test is a predicate over two stored measurements, and a
+        four-hundred-node ingest would be paying for the predicate in forward passes.
+        `Notes` has no header under either pass; stripping the stored markdown is what the
+        other half of the condition looks like on the node.
+        """
+        file_node = _ingest(db_session, workbook_bytes)
+        node = _sheet_node(db_session, file_node, "Notes")
+        block = dict(evidence(node)["sheet"])
+        block["measurements"] = dict(
+            block["measurements"], rendered_markdown=None, rendered_fits_doc_window=False
+        )
+        EvidenceRepository(db_session).write(node.id, "sheet", block)
+        db_session.flush()
+
+        outcome = run_extract_sheet(db_session, _ScopedTask(node.id))
+
+        assert outcome.rung is None
+        assert outcome.detail["shape"] == []
+        assert "8.4's `small_table` does not match it" in outcome.detail["no_table"]
+        assert outcome.produced["node_count"] == 0
+        assert evidence(node)["sheet"]["shape"] == []
+        assert evidence(node)["sheet"]["shape_decision"]["decided"] is False
+
+    def test_a_sheet_the_render_missed_says_which_way_it_missed(self, withheld_block):
+        """The two ways a sheet misses `small_table` are different facts and are two keys:
+        it did not render at all (`rendered_unbounded_reason`), or it rendered over the
+        window and the markdown was not kept (`rendered_withheld_reason`). Neither is a
+        failure, and a null with no reason beside it would be neither answer."""
+        measurements = withheld_block["measurements"]
+
+        assert measurements["rendered_markdown"] is None
+        assert measurements["rendered_unbounded_reason"] is None
+        assert "over the 8192-token document window" in measurements["rendered_withheld_reason"]
+
+    @pytest.fixture
+    def withheld_block(self, workbook_bytes):
+        """8.7's block for a sheet whose render is over the document window.
+
+        A pure function of the measurement and a token count, so the over-window case costs
+        one call rather than a workbook nobody wants to embed.
+        """
+        return sheet_evidence_block(
+            measure_sheet(workbook_bytes, "Deals", render_cell_budget=8192),
+            rendered_tokens=9_000,
+            token_window=512,
+            doc_window=8192,
+            embedding_model="test-model",
+            render_cell_budget=8192,
+        )
 
     def test_the_attempt_counts_what_the_standard_library_pass_found(
         self, db_session, evidence, workbook_bytes

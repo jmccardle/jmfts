@@ -176,6 +176,14 @@ EV_RECORD = "record"
 #: the field it came from, which a split row would otherwise have no way to state.
 EV_CELL = "cell"
 
+#: The whole worksheet as one markdown table, on the ``table`` node ``extract:sheet`` writes
+#: for 8.4's ``small_table``. A separate name from :data:`EV_TEXT` for the reason
+#: :data:`EV_RECORD` is: the node's ``content`` is the table a query matches, and this says
+#: which sheet it is the whole of, how many rows and columns went into it, and what the
+#: render measured — so a hit on it can be traced back to the cells without re-reading the
+#: workbook.
+EV_TABLE = "table"
+
 #: The vectors: ``Document.embed``, and the token rows when they were asked for. Not a
 #: an evidence row — it is columns and a table — but it is evidence in exactly
 #: the sense that matters here, because ``structure:semantic`` cannot run without it.
@@ -211,6 +219,7 @@ EVIDENCE: frozenset[str] = frozenset(
         EV_PROFILE,
         EV_RECORD,
         EV_CELL,
+        EV_TABLE,
         EV_EMBEDDING,
         EV_EFFECTIVE_CONTENT,
         EV_SOURCE_SPAN,

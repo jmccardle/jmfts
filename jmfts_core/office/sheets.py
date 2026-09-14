@@ -39,6 +39,24 @@ rows cannot have one held in memory. :data:`DISTINCT_TRACKED_MAX` is where track
 past it the column reports what it knows — a floor, and a sketch — rather than a number it
 did not measure. See the constant for why the value is a resource bound and not one of
 8.8's thresholds.
+
+**THE HEADER IS LOOKED FOR IN ROWS 1 TO 8, IN TWO PASSES, AND 8.3 SAID ROW 1.** That is an
+amendment to 8.3 and it was chosen from a measurement rather than argued —
+``scripts/header_rules.py`` applied six candidate rules to the first eight rows of 30,448
+open-web (``datasets/corpus-fuse``) and 8,652 git-corpora sheets on 2026-09-03:
+
+======================================  ================  =============
+rule                                    FUSE (open web)   git corpora
+======================================  ================  =============
+8.3 as written — the rule at row 1      23.9%             35.5%
+the same rule, rows 1–8                 45.5%             44.7%
+plus the any-type second pass           54.4%             54.8%
+======================================  ================  =============
+
+``extract:sheet`` fires on nothing else, so those are the sheets that produce record nodes
+at all. See :data:`HEADER_SCAN_ROWS` for why eight rows, :func:`_header_scan` for why two
+passes rather than one relaxed rule, and :class:`HeaderRowScan` for what the rows above the
+header are (``SPRINT_0_4_0.md`` open question 4.3, answered there).
 """
 
 from __future__ import annotations
@@ -47,8 +65,8 @@ import datetime
 import io
 import re
 import zipfile
-from dataclasses import dataclass, field
-from typing import Any, Optional
+from dataclasses import dataclass, field, replace
+from typing import Any, Optional, Sequence
 from xml.etree import ElementTree as ET
 
 from jmfts_core.office import require_openpyxl
@@ -59,7 +77,7 @@ from jmfts_core.sketch import SketchBuilder
 #: is decided by it, and a threshold sweep may pick any closed-set threshold at all up to
 #: this without re-reading a blob. What it costs to raise is memory — the tracked values
 #: are the canonical strings themselves, so 50,000 of them is single-digit MB per column
-#: and a sheet holds one set per column plus four for the interior.
+#: and a sheet holds one set per column plus two for the interior.
 #:
 #: What it costs to have at all: a column with more distinct values than this reports
 #: ``distinct_count: null`` with a floor beside it, and ``is_unique: null``. That is the
@@ -67,6 +85,36 @@ from jmfts_core.sketch import SketchBuilder
 #: limitation for the identifier column of a very large table, recorded rather than
 #: papered over.
 DISTINCT_TRACKED_MAX = 50_000
+
+#: How many rows from the top :func:`_header_scan` looks at for a header row.
+#:
+#: MEASURED, not chosen. ``scripts/header_rules.py`` read the first eight rows of every
+#: sheet in both corpora and recorded which row each candidate rule fired at. The rows the
+#: shipped rule finds below row 1 are a LONG TAIL rather than a spike at row 2 — FUSE
+#: r2:1,646 r3:1,312 r4:1,405 r5:731 r6:645 r7:574 — which is title rows and merged banners
+#: of varying height, consistent with the 47.5% merged-cell rate on the same corpus. Two
+#: rows would have taken less than half of what eight take.
+#:
+#: It bounds the memory this module holds for the scan (eight rows of canonical strings,
+#: :attr:`_Scan.head_values`) and it bounds nothing else: the per-column accumulators start
+#: below it and the rows between the header and row 8 are folded back in at assembly, so a
+#: sheet whose header is at row 4 counts rows 5 onward exactly.
+HEADER_SCAN_ROWS = 8
+
+#: 8.3's rule as written: every cell of the used width is text, and all are distinct.
+HEADER_RULE_ALL_TEXT = "all_text"
+
+#: The second pass: every cell is non-empty and all are distinct, of ANY type. A year or
+#: period header — ``2019, 2020, 2021`` — is a perfectly good field list that 8.3 rejects
+#: for being numeric.
+HEADER_RULE_ANY_TYPE = "any_type"
+
+#: Where a column's ``name`` came from: the header row 8.3 names.
+NAME_SOURCE_HEADER = "header_row"
+
+#: Where a column's ``name`` came from: a merged banner above the data, for a sheet that has
+#: no header row at all. See :func:`_banner_labels`.
+NAME_SOURCE_BANNER = "banner"
 
 #: How many of a column's distinct values are handed back for storage. 8.5 stores
 #: ``values`` for a closed-set column and a count for a high-cardinality one, and WHICH IS
@@ -96,6 +144,10 @@ _PR_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 #: Escapes a cell value for a markdown table cell: a pipe would close the cell and a
 #: newline would end the row.
 _MARKDOWN_UNSAFE = re.compile(r"[|\r\n]")
+
+#: One ``<mergeCell ref="A5:B6"/>``. The two-ended form only: a merge is a rectangle, and
+#: ``$`` absolute markers do not appear in this attribute — Excel writes a plain rectangle.
+_MERGE_REF = re.compile(r"^([A-Za-z]{1,3})([0-9]{1,7}):([A-Za-z]{1,3})([0-9]{1,7})$")
 
 #: How fast :func:`_scan` runs over the empty rows a wide ``<dimension>`` pads with.
 #: MEASURED, 2026-09-05, openpyxl 3.1.5 on CPython 3.11: three synthetic sheets of five
@@ -247,6 +299,24 @@ def column_letter(index: int) -> str:
     return letters
 
 
+def column_index(reference: str) -> int:
+    """``"A2"`` -> 1, ``"AB17"`` -> 28. :func:`column_letter`'s inverse.
+
+    IT LIVES HERE AND NOT IN :mod:`jmfts_core.office.cells`, which is where it was written
+    and which still exports it. This module is the lower of the two — ``cells`` imports
+    ``canonical``, ``column_letter`` and ``_worksheet_part`` from here and says why: one
+    escaping rule and one part-resolution walk, in one place, because two copies are free to
+    disagree. :func:`_merged_ranges` needs to turn ``A5:B6`` into column numbers, and a
+    second letters-to-index loop here would have been exactly that second copy.
+    """
+    total = 0
+    for character in reference:
+        if not character.isalpha():
+            break
+        total = total * 26 + (ord(character.upper()) - ord("A") + 1)
+    return total
+
+
 # ---------------------------------------------------------------------------
 # The shapes the measurement comes back in
 # ---------------------------------------------------------------------------
@@ -272,17 +342,25 @@ class _DistinctSet:
         if len(self.values) >= self.limit:
             self.exact = False
 
-    def plus(self, value: Optional[str]) -> "_DistinctSet":
-        """A copy holding one more value, for the row-1 fold-in in :func:`_column`.
+    def plus(self, values: Sequence[Optional[str]]) -> "_DistinctSet":
+        """A copy holding the head rows' values too, for the fold-in in :func:`_column`.
 
-        A set cannot be un-added from, so a column's row-1 cell is held out of the scan and
-        folded in here instead: a header label may also appear in its own column's body, and
-        "subtract one" would then be wrong by exactly the case that matters.
+        A set cannot be un-added from, so the cells of rows 1 to :data:`HEADER_SCAN_ROWS`
+        are held out of the scan and folded in here instead: a header label may also appear
+        in its own column's body, and "subtract one" would then be wrong by exactly the case
+        that matters.
+
+        IT TAKES A SEQUENCE SINCE THE HEADER SCAN, where it took one value. The row held out
+        used to be row 1 alone, because 8.3 defined the header as a property of row 1; the
+        scan now holds out eight and folds back the ones that turned out to be below the
+        header, which is between zero and eight values rather than one.
         """
-        if value is None:
+        present = [value for value in values if value is not None]
+        if not present:
             return self
         copied = _DistinctSet(limit=self.limit, values=set(self.values), exact=self.exact)
-        copied.add(value)
+        for value in present:
+            copied.add(value)
         return copied
 
     @property
@@ -300,14 +378,25 @@ class ColumnMeasurement:
     two of those three are known.
 
     ``body_rows`` is the denominator ``fill_ratio`` was taken over — the rows below the
-    header row, or every row where there is none. It is carried rather than left to be
-    re-derived because a sweep that redefines ``header_row`` (see :class:`HeaderEvidence`)
-    changes the denominator, and it must be able to see which one was used.
+    header row, or below the banner where there is one and no header, or every row where
+    there is neither. It is carried rather than left to be re-derived because a sweep that
+    redefines ``header_row`` (see :class:`HeaderEvidence`) changes the denominator, and it
+    must be able to see which one was used. The header scan MOVED this number for two
+    populations at once — a header at row 4 takes three rows out of it, and a headerless
+    sheet under a merged banner takes the banner's rows out — so it is now carried for a
+    reason it was only anticipating before.
+
+    ``name_source`` says which of the two rules named this column: :data:`NAME_SOURCE_HEADER`
+    for the header row 8.3 defines, :data:`NAME_SOURCE_BANNER` for the merged banner a
+    header-less sheet is labelled from. ``None`` exactly when ``name`` is. It is not
+    cosmetic: ``sheet_records.header_labels`` accepts only the first, because a banner label
+    names a GROUP of columns and a record key has to name one.
     """
 
     index: int
     letter: str
     name: Optional[str]
+    name_source: Optional[str]
     dominant_type: str
     type_counts: dict
     non_empty: int
@@ -350,6 +439,100 @@ class HeaderEvidence:
     #: table's corner, measured.
     leading_empty: bool
 
+    @property
+    def any_type_verdict(self) -> bool:
+        """The second pass's rule: non-empty and distinct, of any type.
+
+        DERIVED AND NOT STORED, because it is exactly ``all_non_empty and all_distinct`` and
+        both were already measured for their own sake. Registering a fourth component would
+        have been a fourth number that has to stay equal to two others.
+        """
+        return self.all_non_empty and self.all_distinct
+
+
+@dataclass(frozen=True)
+class BannerRow:
+    """One row above the data that is not a header. ``SPRINT_0_4_0.md`` open question 4.3.
+
+    **That question asked what rows 1 to N−1 are when the header is at row N, and offered
+    three readings: discard them, keep them as the sheet node's own content, or read a label
+    out of them. This is the answer, and it takes the second and third and refuses the
+    first.** They are a MEASUREMENT — this class, carried on
+    :attr:`HeaderRowScan.banner` — and they are spent twice: ``sheet_profile`` states them
+    in the profile node's prose, so the words a person put at the top of the sheet are
+    embedded and retrievable, and :func:`_banner_labels` reads a column label out of the
+    merged ones for a sheet that has no header row at all.
+
+    Discarding was never available once the scan existed. A header at row 4 means rows 1–3
+    were READ, and a measurement that is read and dropped is a fact the appliance had and
+    threw away; the rendered table leaves them out of its body because a markdown table has
+    one header row, which is a rendering decision rather than a decision about the rows.
+    """
+
+    index: int
+    #: Canonical strings over ``1..cols``, ``None`` where the cell is empty.
+    values: tuple
+
+
+@dataclass(frozen=True)
+class MergedRange:
+    """One ``<mergeCell ref="A5:B6"/>``, as row and column numbers. 1-based, inclusive."""
+
+    min_row: int
+    min_col: int
+    max_row: int
+    max_col: int
+
+    @property
+    def cols(self) -> int:
+        return self.max_col - self.min_col + 1
+
+
+@dataclass(frozen=True)
+class MergedCells:
+    """What ``<mergeCells>`` declares: the count 8.3 asks for, and the ranges near the top.
+
+    ``ranges`` is NOT every merge in the sheet. Only the ones inside the scanned prefix can
+    be a banner — a merge at row 900 is a formatting choice in the middle of the data — so
+    only those are kept, and the whole element is already materialised by the parse that
+    counts them, so keeping a filtered tuple of four-int records costs nothing the count did
+    not already cost.
+    """
+
+    count: int
+    ranges: tuple
+
+
+@dataclass(frozen=True)
+class HeaderRowScan:
+    """Which row of the top :data:`HEADER_SCAN_ROWS` is the header, and under which rule.
+
+    8.3 defines ``header_row`` as a property of row 1 and :attr:`verdict` keeps that name and
+    that meaning — is there a header row at all — while :attr:`row` says WHERE it is and
+    :attr:`rule` says which of the two passes found it. A sweep that wants to re-decide reads
+    :attr:`candidates`, which holds one :class:`HeaderEvidence` per scanned row and is the
+    whole input to both passes.
+
+    :attr:`evidence` is the components at :attr:`row`, or row 1's when nothing fired — row 1's
+    because that is the row 8.3 asks about, so a reader who does not know about the scan sees
+    the number 8.3 promised them.
+    """
+
+    verdict: bool
+    row: Optional[int]
+    rule: Optional[str]
+    evidence: HeaderEvidence
+    candidates: tuple
+    scanned_rows: int
+    banner: tuple
+
+    @property
+    def first_data_row(self) -> int:
+        """The first row that is an instance rather than a label. 1 when there is neither."""
+        if self.row is not None:
+            return self.row + 1
+        return (max((banner.index for banner in self.banner), default=0)) + 1
+
 
 @dataclass(frozen=True)
 class SheetMeasurement:
@@ -358,6 +541,12 @@ class SheetMeasurement:
     ``rendered_markdown`` is ``None`` when the sheet is provably too large to fit any
     embedding window; see :func:`measure_sheet` for the derivation, which is an inequality
     rather than a chosen size.
+
+    ``header_row`` is a :class:`HeaderRowScan` and ``header_col`` is a bare
+    :class:`HeaderEvidence`, and the asymmetry is deliberate: the row scan is what was
+    amended, and 8.3's ``header_col`` — "column A is all text and all distinct below row 1" —
+    is still implemented exactly as written. Nothing measured says it should move, and moving
+    it on the symmetry argument alone would be a rule chosen for tidiness.
     """
 
     name: str
@@ -367,7 +556,7 @@ class SheetMeasurement:
     fill_ratio: float
     declared_rows: Optional[int]
     declared_cols: Optional[int]
-    header_row: HeaderEvidence
+    header_row: HeaderRowScan
     header_col: HeaderEvidence
     interior_rows: int
     interior_cols: int
@@ -376,11 +565,13 @@ class SheetMeasurement:
     interior_cardinality_at_least: int
     interior_cardinality_exact: bool
     merged_cells: int
+    merged_ranges: tuple
     columns: tuple
     rendered_markdown: Optional[str]
     rendered_unbounded_reason: Optional[str]
     distinct_tracked_max: int
     values_retained_max: int
+    header_scan_rows: int
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +620,61 @@ def _header_evidence(values: list, kinds: list) -> HeaderEvidence:
     )
 
 
+def _header_scan(candidates: Sequence[HeaderEvidence]) -> HeaderRowScan:
+    """Two passes over the top rows. The first pass is 8.3's rule; the second allows numerics.
+
+    **TWO PASSES AND NOT ONE RELAXED RULE, and the reason is ordering rather than rate.**
+    The any-type rule accepts every row the all-text rule accepts, so as a SET the two
+    orderings admit exactly the same sheets — 54.4% / 54.8% either way. What differs is
+    which ROW each picks, and a single interleaved pass would let a numeric row above a real
+    header win. ``scripts/header_rules.py`` measured what that costs on a neighbouring
+    candidate: naming row 1's contiguous prefix fires EARLIER than the shipped rule on 38.9%
+    of the sheets both accept, and on those it names 1.1 columns where the shipped rule
+    names 7.6, because it finds a one-cell title row and stops. A relaxed rule does not only
+    admit more sheets, it admits them sooner, and that moves the outcome from "no records"
+    to "wrong records". Running the strict rule over all eight rows first is what buys the
+    admissions without the reordering.
+
+    Two other relaxations were measured and are NOT here: naming every present cell fires on
+    95.2% of FUSE sheets and admits a merged banner with holes in it as a field list, and a
+    majority-text rule gained 235 FUSE sheets and 42 git sheets, which is not worth a code
+    change.
+
+    The returned scan carries NO banner. Which rows are the banner is decided here — they
+    are the rows above :attr:`HeaderRowScan.row`, or the rows a merged banner covers where
+    no pass fired — but their VALUES live in the scan accumulator, so :func:`_assemble`
+    attaches them.
+    """
+    for rule, matches in (
+        (HEADER_RULE_ALL_TEXT, lambda evidence: evidence.verdict),
+        (HEADER_RULE_ANY_TYPE, lambda evidence: evidence.any_type_verdict),
+    ):
+        for offset, evidence in enumerate(candidates):
+            if matches(evidence):
+                row = offset + 1
+                return HeaderRowScan(
+                    verdict=True,
+                    row=row,
+                    rule=rule,
+                    evidence=evidence,
+                    candidates=tuple(candidates),
+                    scanned_rows=len(candidates),
+                    banner=(),
+                )
+    return HeaderRowScan(
+        verdict=False,
+        row=None,
+        rule=None,
+        # Row 1's, which is the row 8.3 asks about. An empty sheet has no candidate at all
+        # and gets the rule's answer over no cells, which is what `_header_evidence` returns
+        # for an empty list rather than a shape invented here.
+        evidence=candidates[0] if candidates else _header_evidence([], []),
+        candidates=tuple(candidates),
+        scanned_rows=len(candidates),
+        banner=(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # The scan
 # ---------------------------------------------------------------------------
@@ -438,19 +684,25 @@ def _header_evidence(values: list, kinds: list) -> HeaderEvidence:
 class _Scan:
     """The mutable accumulator :func:`_scan` fills and :func:`_assemble` freezes.
 
-    **Four interior sets, not one.** The interior begins below row 1 only if ``header_row``
-    holds and right of column A only if ``header_col`` does; the first is a property of
-    every used COLUMN and the second of every used ROW, so neither is known until the last
-    row has been read — by which time the interior cannot be re-walked without a second
-    pass over the part. Keeping all four candidates costs four bounded sets and removes
-    that pass. They are keyed ``(row_offset, col_offset)`` with offsets of 0 or 1.
+    **Two interior sets, not four, and the header scan is what took the other two away.**
+    The interior begins right of column A only if ``header_col`` holds — a property of every
+    used ROW, unknown until the last one has been read — so both column candidates are
+    kept, keyed by ``col_offset`` of 0 or 1. The ROW side used to be the same two-way
+    choice, row 1 or not; it is now a number between 0 and 8 and keeping nine candidate sets
+    for it would be nine bounded sets per sheet. Instead the head rows are held out of the
+    interior entirely and folded back in at assembly, which is the treatment the columns
+    already had and is exact for the same reason.
+
+    ``head_values`` and ``head_kinds`` are keyed ``(row, col)`` over rows 1 to
+    :data:`HEADER_SCAN_ROWS`. They are what both passes of the header scan read, what the
+    fold-in below the header replays, and what a merged banner's label is read from.
     """
 
     rows: int = 0
     cols: int = 0
     non_empty_cells: int = 0
-    first_row: dict = field(default_factory=dict)
-    first_row_kind: dict = field(default_factory=dict)
+    head_values: dict = field(default_factory=dict)
+    head_kinds: dict = field(default_factory=dict)
     first_col: dict = field(default_factory=dict)
     first_col_kind: dict = field(default_factory=dict)
     per_column_non_empty: dict = field(default_factory=dict)
@@ -462,19 +714,26 @@ class _Scan:
     render_bounded: bool = False
 
 
-_INTERIOR_KEYS = ((0, 0), (0, 1), (1, 0), (1, 1))
+_INTERIOR_COL_OFFSETS = (0, 1)
 
 
-def _scan(worksheet, *, render_cell_budget: int, distinct_tracked_max: int) -> _Scan:
+def _scan(
+    worksheet,
+    *,
+    render_cell_budget: int,
+    distinct_tracked_max: int,
+    header_scan_rows: int,
+) -> _Scan:
     """The single pass. Everything 8.3 measures is accumulated here or not at all."""
     scan = _Scan()
-    for key in _INTERIOR_KEYS:
-        scan.interior[key] = _DistinctSet(limit=distinct_tracked_max)
-        scan.interior_non_empty[key] = 0
+    for col_offset in _INTERIOR_COL_OFFSETS:
+        scan.interior[col_offset] = _DistinctSet(limit=distinct_tracked_max)
+        scan.interior_non_empty[col_offset] = 0
 
     for row_index, row in enumerate(worksheet.iter_rows(values_only=True), start=1):
         rendered: list = []
         row_has_value = False
+        in_head = row_index <= header_scan_rows
         for col_index, raw in enumerate(row, start=1):
             text = canonical(raw)
             rendered.append("" if text is None else text)
@@ -486,28 +745,33 @@ def _scan(worksheet, *, render_cell_budget: int, distinct_tracked_max: int) -> _
             if col_index > scan.cols:
                 scan.cols = col_index
 
-            if row_index == 1:
-                scan.first_row[col_index] = text
-                scan.first_row_kind[col_index] = kind
+            if in_head:
+                scan.head_values[(row_index, col_index)] = text
+                scan.head_kinds[(row_index, col_index)] = kind
             if col_index == 1:
                 scan.first_col[row_index] = text
                 scan.first_col_kind[row_index] = kind
 
-            for row_offset, col_offset in _INTERIOR_KEYS:
-                if row_index <= row_offset or col_index <= col_offset:
-                    continue
-                scan.interior[(row_offset, col_offset)].add(text)
-                scan.interior_non_empty[(row_offset, col_offset)] += 1
-
-            # ROW 1 IS NOT PART OF A COLUMN'S STATISTICS while it might be the header, and
-            # whether it is is not known until every used column has been read. So the
-            # accumulators below cover rows 2..N and `first_row` above keeps row 1's cell;
-            # a sheet whose first row turns out NOT to be a header folds it back in at
-            # assembly (:func:`_column`). Counting it here would give a header cell a vote
-            # in its own column's `dominant_type`, put the label in the column's distinct
-            # set, and make `fill_ratio` exceed 1.
-            if row_index == 1:
+            # THE HEAD ROWS ARE NOT PART OF ANY COLUMN'S STATISTICS while one of them might
+            # be the header, and which one is is not known until every used column has been
+            # read. So the accumulators below cover rows HEADER_SCAN_ROWS+1..N and
+            # `head_values` above keeps the cells; the rows that turn out to be BELOW the
+            # header are folded back in at assembly (:func:`_column`, :func:`_assemble`).
+            # Counting them here would give a header cell a vote in its own column's
+            # `dominant_type`, put the label in the column's distinct set, and make
+            # `fill_ratio` exceed 1.
+            #
+            # It used to be row 1 alone that was held out, because 8.3 defined the header as
+            # a property of row 1. Eight rows is the same trade at eight times the size, and
+            # the size is what `HEADER_SCAN_ROWS` bounds.
+            if in_head:
                 continue
+
+            for col_offset in _INTERIOR_COL_OFFSETS:
+                if col_index <= col_offset:
+                    continue
+                scan.interior[col_offset].add(text)
+                scan.interior_non_empty[col_offset] += 1
 
             scan.per_column_non_empty[col_index] = scan.per_column_non_empty.get(col_index, 0) + 1
             types = scan.per_column_types.setdefault(col_index, {})
@@ -555,6 +819,7 @@ def measure_sheet(
     with_sketches: bool = True,
     distinct_tracked_max: int = DISTINCT_TRACKED_MAX,
     values_retained_max: int = VALUES_RETAINED_MAX,
+    header_scan_rows: int = HEADER_SCAN_ROWS,
 ) -> SheetMeasurement:
     """One pass over one sheet's used range. ``INGEST_SPEC.md`` 8.3.
 
@@ -636,6 +901,7 @@ def measure_sheet(
             worksheet,
             render_cell_budget=render_cell_budget,
             distinct_tracked_max=distinct_tracked_max,
+            header_scan_rows=header_scan_rows,
         )
     finally:
         # A read-only workbook holds the ZIP open and the caller is inside a database
@@ -647,10 +913,11 @@ def measure_sheet(
         name=sheet_name,
         declared_rows=declared_rows,
         declared_cols=declared_cols,
-        merged_cells=count_merged_cells(data, sheet_name),
+        merged=read_merged_cells(data, sheet_name, within_rows=header_scan_rows),
         with_sketches=with_sketches,
         distinct_tracked_max=distinct_tracked_max,
         values_retained_max=values_retained_max,
+        header_scan_rows=header_scan_rows,
     )
 
 
@@ -660,44 +927,89 @@ def _assemble(
     name: str,
     declared_rows: Optional[int],
     declared_cols: Optional[int],
-    merged_cells: int,
+    merged: MergedCells,
     with_sketches: bool,
     distinct_tracked_max: int,
     values_retained_max: int,
+    header_scan_rows: int,
 ) -> SheetMeasurement:
     rows, cols = scan.rows, scan.cols
     cells = rows * cols
     fill_ratio = (scan.non_empty_cells / cells) if cells else 0.0
 
-    header_row = _header_evidence(
-        [scan.first_row.get(index) for index in range(1, cols + 1)],
-        [scan.first_row_kind.get(index) for index in range(1, cols + 1)],
+    scanned = min(rows, header_scan_rows)
+    header_row = _header_scan(
+        [
+            _header_evidence(
+                [scan.head_values.get((row, index)) for index in range(1, cols + 1)],
+                [scan.head_kinds.get((row, index)) for index in range(1, cols + 1)],
+            )
+            for row in range(1, scanned + 1)
+        ]
     )
     # 8.3: "column A is all text and all distinct BELOW ROW 1" — below row 1 outright, not
-    # below whatever turned out to be the header row. Implemented as written.
+    # below whatever turned out to be the header row. Implemented as written; see
+    # `SheetMeasurement` for why the header scan did not move it.
     header_col = _header_evidence(
         [scan.first_col.get(index) for index in range(2, rows + 1)],
         [scan.first_col_kind.get(index) for index in range(2, rows + 1)],
     )
 
-    key = (1 if header_row.verdict else 0, 1 if header_col.verdict else 0)
-    interior = scan.interior[key]
-    body_rows = max(rows - key[0], 0)
+    banner_ranges = _banner_ranges(merged.ranges, scan=scan, header_row=header_row, cols=cols)
+    banner_bottom = max((r.max_row for r in banner_ranges), default=0)
+    header_row = replace(
+        header_row,
+        banner=tuple(
+            BannerRow(
+                index=row,
+                values=tuple(scan.head_values.get((row, index)) for index in range(1, cols + 1)),
+            )
+            for row in range(1, (header_row.row or banner_bottom + 1))
+        ),
+    )
+    labels = _banner_labels(banner_ranges, scan=scan)
+
+    first_data_row = header_row.first_data_row
+    col_offset = 1 if header_col.verdict else 0
+    body_rows = max(rows - (first_data_row - 1), 0)
+    # The head rows at or below the first data row were held out of the scan and are data,
+    # so they are replayed into the interior here — the same fold-in `_column` does, over
+    # the same rows, for the same reason the accumulators could not do it in one pass.
+    folded = range(first_data_row, scanned + 1)
+    interior = scan.interior[col_offset].plus(
+        [
+            scan.head_values.get((row, index))
+            for row in folded
+            for index in range(col_offset + 1, cols + 1)
+        ]
+    )
+    interior_non_empty = scan.interior_non_empty[col_offset] + sum(
+        1
+        for row in folded
+        for index in range(col_offset + 1, cols + 1)
+        if scan.head_values.get((row, index)) is not None
+    )
+    named = {
+        index: _column_name(index, scan=scan, header_row=header_row, labels=labels)
+        for index in range(1, cols + 1)
+    }
     columns = tuple(
         _column(
             index=index,
-            name=(scan.first_row.get(index) if header_row.verdict else None),
+            name=named[index][0],
+            name_source=named[index][1],
             scan=scan,
             body_rows=body_rows,
-            # Row 1 is a value in this column, not a label for it, so it is folded back in.
-            first_row_value=(None if header_row.verdict else scan.first_row.get(index)),
-            first_row_kind=(None if header_row.verdict else scan.first_row_kind.get(index)),
+            # A head row at or below the first data row is a value in this column, not a
+            # label for it, so it is folded back in.
+            folded_rows=folded,
             with_sketches=with_sketches,
+            distinct_tracked_max=distinct_tracked_max,
             values_retained_max=values_retained_max,
         )
         for index in range(1, cols + 1)
     )
-    rendered, reason = _render(scan, header_row.verdict, rows, cols)
+    rendered, reason = _render(scan, header_row, rows, cols)
     return SheetMeasurement(
         name=name,
         rows=rows,
@@ -709,38 +1021,116 @@ def _assemble(
         header_row=header_row,
         header_col=header_col,
         interior_rows=body_rows,
-        interior_cols=max(cols - key[1], 0),
-        interior_non_empty=scan.interior_non_empty[key],
+        interior_cols=max(cols - col_offset, 0),
+        interior_non_empty=interior_non_empty,
         interior_cardinality=interior.count if interior.exact else None,
         interior_cardinality_at_least=interior.count,
         interior_cardinality_exact=interior.exact,
-        merged_cells=merged_cells,
+        merged_cells=merged.count,
+        merged_ranges=merged.ranges,
         columns=columns,
         rendered_markdown=rendered,
         rendered_unbounded_reason=reason,
         distinct_tracked_max=distinct_tracked_max,
         values_retained_max=values_retained_max,
+        header_scan_rows=header_scan_rows,
     )
+
+
+def _column_name(
+    index: int, *, scan: _Scan, header_row: HeaderRowScan, labels: dict
+) -> tuple[Optional[str], Optional[str]]:
+    """``(name, name_source)`` for one column. The two are decided together on purpose.
+
+    They are one fact in two fields and computing them apart is how they would come to
+    disagree — a name with the wrong source is exactly the pair
+    :func:`~jmfts_core.sheet_records.header_labels` reads to decide whether the string is a
+    record key. The header row wins where there is one; a merged banner names the column
+    only where there is not.
+    """
+    if header_row.row is not None:
+        name = scan.head_values.get((header_row.row, index))
+        return (name, NAME_SOURCE_HEADER if name else None)
+    label = labels.get(index)
+    return (label, NAME_SOURCE_BANNER if label else None)
+
+
+def _banner_ranges(ranges: Sequence, *, scan: _Scan, header_row: HeaderRowScan, cols: int) -> tuple:
+    """The merged ranges that are a BANNER over some of the columns rather than a title.
+
+    Three conditions, and each one is a measured property of the file rather than a guess:
+
+    * it spans MORE THAN ONE COLUMN — a merge one column wide is a tall cell;
+    * it spans FEWER COLUMNS THAN THE SHEET IS WIDE — a merge across the whole used width is
+      the sheet's title, which labels no column in particular and is carried as a
+      :class:`BannerRow` instead;
+    * its anchor cell holds a value — an empty merge declares a layout and says nothing.
+
+    Where a header row was found, a banner must lie ABOVE it: below the header the same
+    shape is a merged data cell. Where none was found, every qualifying range in the scanned
+    prefix counts, which is the case step 13 exists for.
+    """
+    ceiling = header_row.row if header_row.row is not None else None
+    return tuple(
+        entry
+        for entry in ranges
+        if entry.cols > 1
+        and entry.cols < cols
+        and (ceiling is None or entry.max_row < ceiling)
+        and scan.head_values.get((entry.min_row, entry.min_col)) is not None
+    )
+
+
+def _banner_labels(ranges: Sequence, *, scan: _Scan) -> dict:
+    """``{column index: label}`` from the banner ranges. The LOWEST banner wins.
+
+    ``INGEST_SPEC.md`` 8.5's profile enumerates a column's distinct values, and for a sheet
+    with no header row it does so under no label at all — ``Column C has 4 distinct values:
+    …`` — which is a sentence an agent cannot use to write its next query. The column letter
+    is the honest fallback and is useless for retrieval.
+
+    A merged banner is the one label the FILE states: ``2024 Actuals`` spanning C1:D1 says
+    those two columns are that, in the author's own words. The lowest banner wins because a
+    stack of them narrows downward — a year over two quarters — and the narrowest is the one
+    that describes the column rather than the group it sits in.
+    """
+    labels: dict = {}
+    for entry in sorted(ranges, key=lambda r: (r.max_row, -r.cols)):
+        label = scan.head_values.get((entry.min_row, entry.min_col))
+        for index in range(entry.min_col, entry.max_col + 1):
+            labels[index] = label
+    return labels
 
 
 def _column(
     *,
     index: int,
     name: Optional[str],
+    name_source: Optional[str],
     scan: _Scan,
     body_rows: int,
-    first_row_value: Optional[str],
-    first_row_kind: Optional[str],
+    folded_rows: range,
     with_sketches: bool,
+    distinct_tracked_max: int,
     values_retained_max: int,
 ) -> ColumnMeasurement:
-    distinct = scan.per_column_distinct.get(index) or _DistinctSet()
+    # THE LIMIT IS THE CALLER'S EVEN ON THE FALLBACK, and the header scan is what made that
+    # matter. The scan's accumulators start BELOW `HEADER_SCAN_ROWS`, so on a sheet of eight
+    # rows or fewer every column takes this branch and the whole of its distinct set is the
+    # fold-in — a default limit here would have silently ignored `distinct_tracked_max` for
+    # exactly the sheets a test can build.
+    distinct = scan.per_column_distinct.get(index) or _DistinctSet(limit=distinct_tracked_max)
     non_empty = scan.per_column_non_empty.get(index, 0)
     types = dict(scan.per_column_types.get(index, {}))
-    if first_row_value is not None:
-        distinct = distinct.plus(first_row_value)
+    folded = [scan.head_values.get((row, index)) for row in folded_rows]
+    distinct = distinct.plus(folded)
+    for row in folded_rows:
+        value = scan.head_values.get((row, index))
+        if value is None:
+            continue
         non_empty += 1
-        types[first_row_kind] = types.get(first_row_kind, 0) + 1
+        kind = scan.head_kinds.get((row, index))
+        types[kind] = types.get(kind, 0) + 1
     # Ties break on the type NAME so that two runs over the same bytes cannot disagree;
     # a dict's insertion order is a fact about which row came first, not about the column.
     dominant = max(types, key=lambda kind: (types[kind], kind)) if types else TYPE_EMPTY
@@ -769,6 +1159,7 @@ def _column(
         index=index,
         letter=column_letter(index),
         name=name,
+        name_source=name_source,
         dominant_type=dominant,
         type_counts=types,
         non_empty=non_empty,
@@ -783,8 +1174,15 @@ def _column(
     )
 
 
-def _render(scan: _Scan, header_row: bool, rows: int, cols: int) -> tuple:
-    """The sheet as one markdown table, or ``None`` and the reason there is none."""
+def _render(scan: _Scan, header_row: HeaderRowScan, rows: int, cols: int) -> tuple:
+    """The sheet as one markdown table, or ``None`` and the reason there is none.
+
+    **The banner rows are not in the body, and they are not lost.** A markdown table has one
+    header row; putting the rows above it into the body would make a title read as a record.
+    They are on :attr:`HeaderRowScan.banner`, the profile node states them in prose, and
+    ``SPRINT_0_4_0.md`` 4.3 is answered at :class:`BannerRow` — this is the rendering half of
+    that answer and not a decision about the rows.
+    """
     if scan.render_bounded:
         return None, (
             "a markdown table of this sheet spends at least one token on each row and one "
@@ -796,11 +1194,12 @@ def _render(scan: _Scan, header_row: bool, rows: int, cols: int) -> tuple:
         return None, "the sheet's used range holds no value, so there is no table to render"
 
     lines = [_markdown_row(row, cols) for row in scan.rendered_rows[:rows]]
-    if header_row:
-        head, body = lines[0], lines[1:]
+    first_data_row = header_row.first_data_row
+    if header_row.row is not None:
+        head = lines[header_row.row - 1]
     else:
         head = _markdown_row(tuple(column_letter(i) for i in range(1, cols + 1)), cols)
-        body = lines
+    body = lines[first_data_row - 1 :]
     separator = "| " + " | ".join("---" for _ in range(cols)) + " |"
     return "\n".join([head, separator, *body]), None
 
@@ -816,22 +1215,44 @@ def _markdown_row(values: tuple, cols: int) -> str:
 
 
 def count_merged_cells(data: bytes, sheet_name: str) -> int:
-    """How many merged ranges the sheet declares, from the worksheet part itself.
+    """How many merged ranges the sheet declares. 8.3's ``merged_cells``.
+
+    A thin reading of :func:`read_merged_cells`, which is the pass. Kept as its own name
+    because 8.3 asks for a count and because this is the call every caller outside this
+    module makes.
+    """
+    return read_merged_cells(data, sheet_name, within_rows=0).count
+
+
+def read_merged_cells(data: bytes, sheet_name: str, *, within_rows: int) -> MergedCells:
+    """The merged ranges the sheet declares, from the worksheet part itself.
 
     ``ReadOnlyWorksheet`` does not carry ``merged_cells`` (module docstring, note 1), and
     opening the workbook without ``read_only`` to get it would materialise every cell as a
     Python object — which is the cost ``OFFICE_SPEC.md`` Part 4 note 2 exists to avoid. So
-    the count comes from ``<mergeCells count="...">`` in the part, read with the standard
-    library.
+    this comes from ``<mergeCells>`` in the part, read with the standard library.
 
     ``count`` is trusted where the attribute is present and the children are counted where
     it is not; the schema makes the attribute optional, and a writer that omits it has not
-    written a broken file.
+    written a broken file. The two can therefore disagree with ``len(ranges)`` and that is a
+    fact about the file rather than an error here.
+
+    ``within_rows`` bounds what is RETAINED, not what is parsed: only ranges lying wholly
+    inside the first ``within_rows`` rows come back, because only those can be the banner
+    :func:`_banner_labels` reads. Zero retains none, which is what
+    :func:`count_merged_cells` asks for. The element is fully materialised by the parse that
+    counts it either way, so the filter costs nothing the count did not already cost.
+
+    A ``ref`` that is not a two-ended A1 rectangle is SKIPPED rather than repaired. A merge
+    is a rectangle by definition; a ``ref`` that is not one came from a writer this module
+    cannot interpret, and inventing a rectangle for it would put a banner over columns
+    nobody merged.
     """
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         path = _worksheet_part(archive, sheet_name)
         with archive.open(path) as stream:
             total = 0
+            ranges: list = []
             for _event, element in ET.iterparse(stream, events=("end",)):
                 if element.tag == f"{{{_S_NS}}}mergeCells":
                     declared = element.get("count")
@@ -840,6 +1261,13 @@ def count_merged_cells(data: bytes, sheet_name: str) -> int:
                         if declared is not None and declared.isdigit()
                         else len(element)
                     )
+                    if within_rows:
+                        ranges = [
+                            entry
+                            for child in element
+                            if (entry := _merged_range(child.get("ref"))) is not None
+                            if entry.max_row <= within_rows
+                        ]
                     element.clear()
                     break
                 # Rows are the bulk of the part and `mergeCells` follows `sheetData`, so
@@ -847,7 +1275,18 @@ def count_merged_cells(data: bytes, sheet_name: str) -> int:
                 # into memory.
                 if element.tag == f"{{{_S_NS}}}row":
                     element.clear()
-            return total
+            return MergedCells(count=total, ranges=tuple(ranges))
+
+
+def _merged_range(ref: Optional[str]) -> Optional[MergedRange]:
+    """``"A5:B6"`` -> a :class:`MergedRange`, or ``None`` for anything else."""
+    match = _MERGE_REF.match(ref or "")
+    if match is None:
+        return None
+    first_col, first_row, second_col, second_row = match.groups()
+    rows = (int(first_row), int(second_row))
+    cols = (column_index(first_col), column_index(second_col))
+    return MergedRange(min_row=min(rows), min_col=min(cols), max_row=max(rows), max_col=max(cols))
 
 
 def _worksheet_part(archive: zipfile.ZipFile, sheet_name: str) -> str:
@@ -898,19 +1337,30 @@ def _worksheet_part(archive: zipfile.ZipFile, sheet_name: str) -> str:
 
 __all__ = [
     "DISTINCT_TRACKED_MAX",
+    "HEADER_RULE_ALL_TEXT",
+    "HEADER_RULE_ANY_TYPE",
+    "HEADER_SCAN_ROWS",
+    "NAME_SOURCE_BANNER",
+    "NAME_SOURCE_HEADER",
     "TYPE_BOOL",
     "TYPE_DATE",
     "TYPE_EMPTY",
     "TYPE_NUMBER",
     "TYPE_TEXT",
     "VALUES_RETAINED_MAX",
+    "BannerRow",
     "ColumnMeasurement",
     "HeaderEvidence",
+    "HeaderRowScan",
+    "MergedCells",
+    "MergedRange",
     "SheetMeasurement",
     "WorksheetPartMissing",
     "canonical",
+    "column_index",
     "column_letter",
     "count_merged_cells",
     "measure_sheet",
+    "read_merged_cells",
     "value_type",
 ]

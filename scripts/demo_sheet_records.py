@@ -112,7 +112,11 @@ def read_mode(data: bytes, *, sheets: list, max_rows: int, limit) -> dict:
             continue
 
         rows = read_rows(data, sheet.name, max_rows=max_rows)
-        records = build_records(rows, header=[column.name for column in measurement.columns])
+        records = build_records(
+            rows,
+            header=[column.name for column in measurement.columns],
+            header_row=measurement.header_row.row,
+        )
         _note(f"  {sheet.name}: {len(records)} record(s) from {len(rows.rows)} row(s)")
         output.append(
             {

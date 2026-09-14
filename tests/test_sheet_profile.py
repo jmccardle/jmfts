@@ -54,6 +54,11 @@ from jmfts_core.models.document import (  # noqa: E402
 )
 from jmfts_core.models.task_queue import WRITE_CHILDREN  # noqa: E402
 from jmfts_core.office.sheets import (  # noqa: E402
+    HEADER_RULE_ALL_TEXT,
+    HEADER_RULE_ANY_TYPE,
+    HEADER_SCAN_ROWS,
+    NAME_SOURCE_BANNER,
+    NAME_SOURCE_HEADER,
     TYPE_DATE,
     TYPE_EMPTY,
     TYPE_NUMBER,
@@ -63,6 +68,7 @@ from jmfts_core.office.sheets import (  # noqa: E402
     column_letter,
     count_merged_cells,
     measure_sheet,
+    read_merged_cells,
 )
 from jmfts_core.repositories.document import DocumentRepository  # noqa: E402
 from jmfts_core.services.ingest_service import IngestService  # noqa: E402
@@ -92,13 +98,17 @@ DOC_WINDOW = 8192
 
 
 def _workbook_bytes() -> bytes:
-    """Four sheets, each one a different thing 8.3 has to be able to measure.
+    """Seven sheets, each one a different thing 8.3 has to be able to measure.
 
     ``Pipeline`` is 8.4's ``records`` example in miniature: a header row, an identifier
     column, a closed set, numbers, dates, and one sparse column. ``Coverage`` is 8.4's
     ``matrix`` example, *including its empty top-left corner* — which is the sheet 8.3's
     own header rule cannot see, and the reason ``HeaderEvidence`` exists. ``Notes`` has a
-    numeric first row, so neither header holds. ``Blank`` was never written to.
+    numeric first row, which 8.3's rule rejects and the header scan's second pass accepts.
+    ``Freeform`` has a hole in every one of its rows, so NEITHER pass finds a header — it
+    is what ``Notes`` used to stand for, and it is a separate sheet because the two facts
+    stopped being the same fact when the second pass landed. ``Blank`` was never written
+    to.
     """
     workbook = openpyxl.Workbook()
 
@@ -116,9 +126,39 @@ def _workbook_bytes() -> bytes:
     coverage.append(["Thermal", None, "X"])
     coverage.merge_cells("A5:B6")
 
+    # A PERIOD HEADER, which is the case the second pass exists for: `2024 | 2025 | 2026`
+    # is a perfectly good field list that 8.3 rejects for being numeric. Every row of it is
+    # numeric, so the all-text pass finds nothing anywhere in the sheet and the any-type
+    # pass takes row 1 — which is the ORDER under test, not merely the rate.
     notes = workbook.create_sheet("Notes")
-    notes.append([2026, "quarterly review"])
-    notes.append(["attendees", "J. Okafor"])
+    notes.append([2024, 2025, 2026])
+    notes.append([120, 150, 180])
+    notes.append([90, 95, 99])
+
+    freeform = workbook.create_sheet("Freeform")
+    freeform.append(["Minutes", None, "draft"])
+    freeform.append([None, "J. Okafor", None])
+    freeform.append(["Action", None, None])
+
+    # A merged title over row 1, a blank row, then the header at row 3. The long tail
+    # `HEADER_SCAN_ROWS` is sized for — FUSE r2:1,646 r3:1,312 r4:1,405 — in miniature.
+    banner = workbook.create_sheet("Banner")
+    banner.append(["Q3 Regional Sales", None, None])
+    banner.append([None, None, None])
+    banner.append(["Deal ID", "Account", "Value"])
+    banner.append(["D-1", "Northwind", 10])
+    banner.append(["D-2", "Contoso", 20])
+    banner.merge_cells("A1:C1")
+
+    # No header under either pass — every row has a hole or a repeat — under two merged
+    # banners that each span part of the width. Step 13's sheet.
+    grouped = workbook.create_sheet("Grouped")
+    grouped.append([None, "2024 Actuals", None, "2025 Plan", None])
+    grouped.append(["North", 1, 1, 4, 4])
+    grouped.append(["North", 7, 7, 9, 9])
+    grouped.append(["South", 7, 7, 9, 9])
+    grouped.merge_cells("B1:C1")
+    grouped.merge_cells("D1:E1")
 
     workbook.create_sheet("Blank")
 
@@ -255,8 +295,10 @@ class TestMeasurements:
 
     def test_header_row_is_all_text_all_distinct_no_numerics(self, pipeline):
         assert pipeline.header_row.verdict is True
-        assert pipeline.header_row.text_cells == 6
-        assert pipeline.header_row.numeric_cells == 0
+        assert pipeline.header_row.row == 1
+        assert pipeline.header_row.rule == HEADER_RULE_ALL_TEXT
+        assert pipeline.header_row.evidence.text_cells == 6
+        assert pipeline.header_row.evidence.numeric_cells == 0
 
     def test_header_col_is_column_a_below_row_one(self, pipeline):
         """`Deal ID` holds four distinct text values below row 1, so column A is a header
@@ -264,12 +306,43 @@ class TestMeasurements:
         assert pipeline.header_col.verdict is True
         assert pipeline.header_col.cells == 4
 
-    def test_a_numeric_first_row_is_not_a_header(self, workbook_bytes):
+    def test_a_numeric_first_row_fails_8_3_and_the_second_pass_takes_it(self, workbook_bytes):
+        """Step 10, and the behaviour change stated where it happens.
+
+        `2024 | 2025 | 2026` is a period header: non-empty and distinct, and not all text.
+        8.3's rule rejects it for the numerics, which is what `all_text is False` still
+        records; the any-type pass accepts it. The gain is the biggest single number in the
+        block — 45.5% to 54.4% of open-web sheets — and what it costs is that a data row of
+        distinct values can now be taken for a header, which is why the rule that WOULD have
+        fired earlier (row 1's contiguous prefix, 85.2%) was measured and rejected instead.
+        """
         notes = measure_sheet(workbook_bytes, "Notes", render_cell_budget=DOC_WINDOW)
 
-        assert notes.header_row.verdict is False
-        assert notes.header_row.numeric_cells == 1
-        assert notes.header_row.all_text is False
+        assert notes.header_row.verdict is True
+        assert notes.header_row.row == 1
+        assert notes.header_row.rule == HEADER_RULE_ANY_TYPE
+        assert notes.header_row.evidence.numeric_cells == 3
+        assert notes.header_row.evidence.all_text is False
+        assert [column.name for column in notes.columns] == ["2024", "2025", "2026"]
+
+    def test_a_row_with_a_hole_is_a_header_under_neither_pass(self, workbook_bytes):
+        """Both passes require every cell of the used width. `Freeform` has a gap in each
+        of its three rows, so it is the sheet that genuinely has no header — and it is what
+        the record path still refuses."""
+        freeform = measure_sheet(workbook_bytes, "Freeform", render_cell_budget=DOC_WINDOW)
+
+        assert freeform.header_row.verdict is False
+        assert freeform.header_row.row is None
+        assert freeform.header_row.rule is None
+        assert freeform.header_row.scanned_rows == 3
+
+    def test_the_scan_stops_at_eight_rows(self, workbook_bytes):
+        """`HEADER_SCAN_ROWS`, asserted rather than assumed. A sheet shorter than the bound
+        is scanned to its own length, which is what `scanned_rows` reports."""
+        assert HEADER_SCAN_ROWS == 8
+        pipeline = measure_sheet(workbook_bytes, "Pipeline", render_cell_budget=DOC_WINDOW)
+        assert pipeline.header_row.scanned_rows == 5
+        assert len(pipeline.header_row.candidates) == 5
 
     def test_interior_cardinality_counts_below_and_right_of_the_headers(self, pipeline):
         """Both headers hold, so the interior is B2:F5."""
@@ -297,9 +370,9 @@ class TestMeasurements:
         assert len(lines) == 2 + 4
 
     def test_a_sheet_with_no_header_row_is_rendered_under_column_letters(self, workbook_bytes):
-        notes = measure_sheet(workbook_bytes, "Notes", render_cell_budget=DOC_WINDOW)
+        freeform = measure_sheet(workbook_bytes, "Freeform", render_cell_budget=DOC_WINDOW)
 
-        assert notes.rendered_markdown.splitlines()[0] == "| A | B |"
+        assert freeform.rendered_markdown.splitlines()[0] == "| A | B | C |"
 
     def test_an_empty_sheet_measures_to_zero_rather_than_dividing_by_it(self, workbook_bytes):
         blank = measure_sheet(workbook_bytes, "Blank", render_cell_budget=DOC_WINDOW)
@@ -450,15 +523,177 @@ class TestTheCrossingTableGap:
         assert coverage.header_row.verdict is False
 
     def test_and_the_reason_is_exactly_the_corner_cell(self, coverage):
-        evidence = coverage.header_row
+        # Row 1's components, which is what `evidence` holds when no pass fired — the row
+        # 8.3 asks about, so a reader who knows only 8.3 sees the number 8.3 promised.
+        evidence = coverage.header_row.evidence
 
         assert evidence.all_non_empty is False
         assert evidence.leading_empty is True
         assert evidence.text_cells == 2
         assert evidence.cells == 3
 
+    def test_the_second_pass_does_not_rescue_it_either(self, coverage):
+        """The any-type rule drops `all_text` and keeps `all_non_empty`, and the corner is
+        an empty cell. So the crossing table is still invisible to both passes, and step 10
+        did not quietly close the gap `HeaderEvidence` exists to record."""
+        assert all(
+            candidate.any_type_verdict is False for candidate in coverage.header_row.candidates
+        )
+
     def test_the_row_labels_are_a_header_by_the_same_rule(self, coverage):
         assert coverage.header_col.verdict is True
+
+
+class TestTheHeaderScanBelowRowOne:
+    """8.3 asked about row 1; the scan asks about rows 1 to 8.
+
+    Measured 2026-09-03 with ``scripts/header_rules.py`` over 30,448 open-web and 8,652
+    git-corpora sheets: 8.3's rule at row 1 fires on 23.9% / 35.5% of them, the same rule
+    over rows 1–8 on 45.5% / 44.7%, and the any-type second pass takes it to 54.4% / 54.8%.
+    ``extract:sheet`` fires on nothing else, so that is the share of sheets that produce
+    record nodes at all.
+    """
+
+    @pytest.fixture(scope="class")
+    def banner(self, workbook_bytes):
+        return measure_sheet(workbook_bytes, "Banner", render_cell_budget=DOC_WINDOW)
+
+    def test_the_header_is_found_at_row_three(self, banner):
+        assert banner.header_row.verdict is True
+        assert banner.header_row.row == 3
+        assert banner.header_row.rule == HEADER_RULE_ALL_TEXT
+        assert [column.name for column in banner.columns] == ["Deal ID", "Account", "Value"]
+        assert {column.name_source for column in banner.columns} == {NAME_SOURCE_HEADER}
+
+    def test_the_rows_above_it_are_the_banner_and_not_data(self, banner):
+        """`SPRINT_0_4_0.md` open question 4.3. They are carried as a measurement rather
+        than discarded, and `first_data_row` is where the data starts."""
+        assert [row.index for row in banner.header_row.banner] == [1, 2]
+        assert banner.header_row.banner[0].values == ("Q3 Regional Sales", None, None)
+        assert banner.header_row.first_data_row == 4
+
+    def test_the_banner_rows_are_out_of_every_column_denominator(self, banner):
+        """The whole reason the row number is a measurement rather than a constant. Five
+        rows, a header at 3, so two data rows — and `body_rows` says so, which is what
+        `fill_ratio` and `is_unique` are taken over."""
+        assert banner.rows == 5
+        assert {column.body_rows for column in banner.columns} == {2}
+        assert _column(banner, "Deal ID").is_unique is True
+        assert _column(banner, "Deal ID").distinct_count == 2
+
+    def test_the_rendered_table_starts_at_the_header(self, banner):
+        """A markdown table has one header row, so the banner is not in the body. It is not
+        lost either — it is on the measurement and in the profile's prose."""
+        lines = banner.rendered_markdown.splitlines()
+
+        assert lines[0] == "| Deal ID | Account | Value |"
+        assert lines[2:] == ["| D-1 | Northwind | 10 |", "| D-2 | Contoso | 20 |"]
+
+    def test_the_prose_says_where_the_header_is_and_what_was_above_it(self, banner):
+        content, _ = build_profile_content(banner, fits=lambda text: len(text) < 4_000)
+
+        assert "Above the data, row 1 reads: Q3 Regional Sales." in content
+        assert "Its row 3 holds a distinct text value in every column, so it names them." in content
+
+    def test_the_two_passes_run_in_order_and_not_interleaved(self, workbook_bytes):
+        """The ordering is the whole of why this is two passes and not one relaxed rule.
+
+        Row 1 here is numeric-and-distinct, so the any-type rule matches it; row 2 is the
+        real all-text header. An interleaved scan would stop at row 1 and name the columns
+        `1`, `2`, `3`. `scripts/header_rules.py` measured what that costs on a neighbouring
+        candidate: the row-1-prefix rule fires EARLIER than the shipped rule on 38.9% of
+        the sheets both accept, and names 1.1 columns there where the shipped rule names
+        7.6.
+        """
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.title = "Ordering"
+        sheet.append([1, 2, 3])
+        sheet.append(["Deal ID", "Account", "Value"])
+        sheet.append(["D-1", "Northwind", 10])
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+
+        measured = measure_sheet(buffer.getvalue(), "Ordering", render_cell_budget=DOC_WINDOW)
+
+        assert measured.header_row.row == 2
+        assert measured.header_row.rule == HEADER_RULE_ALL_TEXT
+        assert [column.name for column in measured.columns] == ["Deal ID", "Account", "Value"]
+
+    def test_every_scanned_row_keeps_its_components(self, banner):
+        """What a calibration sweep replays against: one `HeaderEvidence` per scanned row,
+        so a rule can be re-decided without reading the blob again."""
+        candidates = banner.header_row.candidates
+
+        assert len(candidates) == 5
+        assert [candidate.verdict for candidate in candidates] == [
+            False,
+            False,
+            True,
+            False,
+            False,
+        ]
+
+
+class TestTheBannerLabelsAHeaderlessTable:
+    """Step 13. A header-less sheet's columns are named from a merged banner.
+
+    8.5's profile enumerates a column's distinct values, and without a label it does so
+    under a column letter — a sentence an agent cannot use to write its next query. A
+    merged banner is the one label the FILE states.
+    """
+
+    @pytest.fixture(scope="class")
+    def grouped(self, workbook_bytes):
+        return measure_sheet(workbook_bytes, "Grouped", render_cell_budget=DOC_WINDOW)
+
+    def test_the_sheet_has_no_header_under_either_pass(self, grouped):
+        assert grouped.header_row.verdict is False
+        assert grouped.header_row.row is None
+
+    def test_each_merge_labels_the_columns_it_spans(self, grouped):
+        assert [(column.letter, column.name) for column in grouped.columns] == [
+            ("A", None),
+            ("B", "2024 Actuals"),
+            ("C", "2024 Actuals"),
+            ("D", "2025 Plan"),
+            ("E", "2025 Plan"),
+        ]
+        assert grouped.columns[1].name_source == NAME_SOURCE_BANNER
+        assert grouped.columns[0].name_source is None
+
+    def test_the_banner_row_is_not_data(self, grouped):
+        assert [row.index for row in grouped.header_row.banner] == [1]
+        assert grouped.header_row.first_data_row == 2
+        assert {column.body_rows for column in grouped.columns} == {3}
+
+    def test_the_prose_names_the_banner_without_calling_it_a_column_name(self, grouped):
+        """A banner names the GROUP the column sits in, so `Column "2024 Actuals"` would
+        assert something the file does not say."""
+        content, _ = build_profile_content(grouped, fits=lambda text: len(text) < 4_000)
+
+        assert 'Column B, under the banner "2024 Actuals", holds number' in content
+        assert 'Column "2024 Actuals"' not in content
+
+    def test_a_merge_across_the_whole_width_labels_no_column(self, banner_measurement):
+        """`Banner`'s A1:C1 spans every used column. That is the sheet's TITLE, and a title
+        is not a per-column label — it is carried as a `BannerRow` and said in the prose."""
+        assert all(
+            column.name_source != NAME_SOURCE_BANNER for column in banner_measurement.columns
+        )
+
+    @pytest.fixture(scope="class")
+    def banner_measurement(self, workbook_bytes):
+        return measure_sheet(workbook_bytes, "Banner", render_cell_budget=DOC_WINDOW)
+
+    def test_only_the_ranges_near_the_top_are_retained(self, workbook_bytes):
+        """`read_merged_cells` COUNTS every merge and keeps only the ones that could be a
+        banner. A merge at row 900 is a formatting choice in the middle of the data."""
+        merged = read_merged_cells(workbook_bytes, "Grouped", within_rows=HEADER_SCAN_ROWS)
+
+        assert merged.count == 2
+        assert [(entry.min_col, entry.max_col) for entry in merged.ranges] == [(2, 3), (4, 5)]
+        assert read_merged_cells(workbook_bytes, "Grouped", within_rows=0).ranges == ()
 
 
 class TestMergedCellCount:
@@ -536,6 +771,12 @@ class TestStructuredContent:
             "rendered_fits_token_window",
             "rendered_fits_doc_window",
             "header_row",
+            # WHERE the header is and under which pass. Both are branch inputs since the
+            # scan: `extract:sheet` skips every row at or above `header_row_number`, so a
+            # sweep that re-decides the verdict has to be able to see which row the old one
+            # was taken at.
+            "header_row_number",
+            "header_row_rule",
             "header_col",
             "fill_ratio",
             "interior_cardinality",

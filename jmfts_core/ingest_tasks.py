@@ -81,6 +81,7 @@ from jmfts_core.models.document import (
     USETYPE_RECORD,
     USETYPE_SHEET,
     USETYPE_PROFILE,
+    USETYPE_TABLE,
 )
 from jmfts_core.models.task_queue import WRITE_CHILDREN, WRITE_SELF, WRITE_SUBTREE, TaskQueue
 from jmfts_core.probe import PROBERS_AVAILABLE, detect_format, probe_patterns
@@ -1239,6 +1240,14 @@ TASK_ROWS: tuple[TaskRow, ...] = (
     # An `embed` on a section would raise, because `run_embed` refuses empty content — which
     # is the correct behaviour of that handler and the wrong behaviour of this schedule.
     #
+    # `table` is the fifth, and it is the one leaf here whose text routinely does NOT fit the
+    # token/maxsim window: 8.4's `small_table` is tested against the DOCUMENT window, and
+    # 52.0% of open-web sheets fit 8192 and not 512. The row still names one `with_tokens`,
+    # because the group is the caller's request; `sheet_tasks._write_table` sets it false on
+    # the queue row for a table the token path cannot take, from the measurement that decided
+    # the shape. See that function for why the decision belongs to the node and not to the
+    # row.
+    #
     # No condition beyond the scope. "Every leaf gets one" is what an empty `requires` says.
     TaskRow(
         TASK_EMBED,
@@ -1249,7 +1258,13 @@ TASK_ROWS: tuple[TaskRow, ...] = (
             TASK_STRUCTURE_CONVERSATION,
             TASK_PROFILE_SHEET,
             TASK_EXTRACT_SHEET,
-            usetypes=(USETYPE_CHUNK, USETYPE_RECORD, USETYPE_PROFILE, USETYPE_CELL),
+            usetypes=(
+                USETYPE_CHUNK,
+                USETYPE_RECORD,
+                USETYPE_PROFILE,
+                USETYPE_CELL,
+                USETYPE_TABLE,
+            ),
         ),
         params_key="embed",
     ),

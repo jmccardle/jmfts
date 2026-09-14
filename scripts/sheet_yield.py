@@ -129,14 +129,20 @@ def measure_one(args):
             "cols": m.cols,
             "fill_ratio": m.fill_ratio,
             "header_row": m.header_row.verdict,
+            # The header scan's two new facts. `header_row` stayed a boolean, so every
+            # count below it reads as it did; these say WHERE it was found and under which
+            # of the two passes, which is the difference between the 23.9% this script
+            # first measured and the 54.4% the scan reaches.
+            "header_row_number": m.header_row.row,
+            "header_row_rule": m.header_row.rule,
             "header_col": m.header_col.verdict,
             # The components, so a sweep can redefine the verdict with no blob read.
             # `leading_empty` is the crossing-table corner `HeaderEvidence` records.
-            "header_row_all_text": m.header_row.all_text,
-            "header_row_all_distinct": m.header_row.all_distinct,
-            "header_row_all_non_empty": m.header_row.all_non_empty,
-            "header_row_leading_empty": m.header_row.leading_empty,
-            "header_row_numeric_cells": m.header_row.numeric_cells,
+            "header_row_all_text": m.header_row.evidence.all_text,
+            "header_row_all_distinct": m.header_row.evidence.all_distinct,
+            "header_row_all_non_empty": m.header_row.evidence.all_non_empty,
+            "header_row_leading_empty": m.header_row.evidence.leading_empty,
+            "header_row_numeric_cells": m.header_row.evidence.numeric_cells,
             "rendered": m.rendered_markdown is not None,
             "rendered_unbounded_reason": m.rendered_unbounded_reason,
             "interior_cardinality": m.interior_cardinality,

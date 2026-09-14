@@ -16,16 +16,18 @@ somebody has to parse back.
 **The shape rule here is ``header_row``, and it is not one of 8.8's thresholds.** 8.4 picks
 among four shapes using several numbers that have never been calibrated, and
 :mod:`jmfts_core.sheet_profile` refuses to invent them. This module needs none of them: a
-sheet whose first row holds a distinct text value in every column has record keys, and a
-sheet whose first row does not have none. That is a measured boolean, already computed by
+sheet with a row in its first eight holding a distinct value in every column has record
+keys, and a sheet without one has none. That is a measured boolean, already computed by
 ``profile:sheet``, and it decides only whether records are possible — not whether they are
-the best representation. The other three shapes are still unbuilt and still waiting on the
-corpus.
+the best representation. ``matrix`` and ``unstructured`` are still unbuilt and still waiting
+on the corpus; ``small_table`` is built and is not a competitor, because a sheet that
+matches both shapes gets both (:data:`BOTH_SHAPES_BASIS`).
 
-**Where the keys come from.** The stored profile's column names, not a re-reading of row 1.
-``profile:sheet`` decided what the header row was and recorded the label per column; a
-second derivation here could disagree with it, and then the profile and the records would
-describe different sheets.
+**Where the keys come from.** The stored profile's column names AND the row number it found
+them on, not a re-reading of the sheet. ``profile:sheet`` decided which row was the header —
+it is not necessarily row 1 — and recorded the label per column; a second derivation here
+could disagree with it, and then the profile and the records would describe different
+sheets.
 
 **A row too long to embed becomes a container over its columns**, and that is
 :func:`plan_record` rather than :func:`build_records` — the record is the same either way,
@@ -46,6 +48,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional, Sequence
 
 from jmfts_core.office.cells import RowCells, SheetRows
+from jmfts_core.office.sheets import NAME_SOURCE_HEADER
 
 # The usetype 8.4's `records` shape gives each row node is `USETYPE_RECORD`, and it is
 # DEFINED on the model with every other ingest usetype. See `jmfts_core.models.document`.
@@ -53,11 +56,18 @@ from jmfts_core.office.cells import RowCells, SheetRows
 #: The name of the shape, as 8.4 names it, written onto the sheet node.
 SHAPE_RECORDS = "records"
 
-#: The header row's number. 8.3 defines ``header_row`` as a property of row 1 outright, not
-#: of "whichever row turned out to look like a header", and
-#: :func:`~jmfts_core.office.sheets._header_evidence` is called on row 1. Spelled once so
-#: the skip below and the measurement cannot come to disagree.
-HEADER_ROW_NUMBER = 1
+#: 8.4's first shape: the whole sheet as one markdown table, in one node, embedded as-is.
+#: Written onto the sheet node beside :data:`SHAPE_RECORDS` when both match — see
+#: :data:`BOTH_SHAPES_BASIS`.
+SHAPE_SMALL_TABLE = "small_table"
+
+# `HEADER_ROW_NUMBER = 1` WAS A MODULE CONSTANT HERE and it is gone. 8.3 defined
+# `header_row` as a property of row 1 outright, so the row to skip was a constant and this
+# named it once. The header is now looked for in rows 1 to 8
+# (`jmfts_core.office.sheets.HEADER_SCAN_ROWS`), which makes its row a MEASUREMENT —
+# `sheet.measurements.header_row_number` — and `build_records` takes it as an argument.
+# A default of 1 here would have been a second source of a number the profile already
+# measured, and the one that ran would depend on which caller supplied it.
 
 #: Why this shape was chosen, written onto the sheet node beside it. It replaces
 #: :data:`jmfts_core.sheet_profile.SHAPE_DEFERRED_REASON` on a sheet that got records, and
@@ -66,20 +76,64 @@ HEADER_ROW_NUMBER = 1
 SHAPE_BASIS = (
     "INGEST_SPEC.md 8.4's four-way branch was not run: 8.8 leaves its thresholds unset. "
     "`records` was chosen on the one input that is a measured boolean rather than a "
-    "threshold — 8.3's `header_row`, which is true here, so the sheet's first row supplies "
-    "a key for every column. That decides only that records are POSSIBLE. Whether "
-    "`small_table` or `matrix` would suit this sheet better is still what the calibration "
-    "corpus is for."
+    "threshold — 8.3's `header_row`, which is true here, so the row the header scan found "
+    "supplies a key for every column. That decides only that records are POSSIBLE. Whether "
+    "`matrix` would suit this sheet better is still what the calibration corpus is for; "
+    "`small_table` is no longer a competitor, because a sheet that matches both gets both."
 )
 
 #: Why a sheet got no records. Not a failure: a sheet with no header row has no keys, and
 #: the shapes that cover it (`matrix`, `unstructured`) are unbuilt.
 NO_HEADER_REASON = (
-    "INGEST_SPEC.md 8.3's `header_row` is false for this sheet, so its first row does not "
-    "supply a key for every column and there is no record to write. The shapes 8.4 gives "
-    "such a sheet — `matrix` and `unstructured` — read thresholds 8.8 leaves unset and have "
-    "no handler; `header_row_evidence` on this node is what a calibration sweep replays "
-    "against."
+    "INGEST_SPEC.md 8.3's `header_row` is false for this sheet: neither the all-text rule "
+    "nor the any-type pass found a row in the first 8 that holds a distinct value in every "
+    "column, so nothing supplies a key and there is no record to write. The shapes 8.4 "
+    "gives such a sheet — `matrix` and `unstructured` — read thresholds 8.8 leaves unset "
+    "and have no handler; `header_row_candidates` on this node is what a calibration sweep "
+    "replays against."
+)
+
+#: Why this sheet also got a ``table`` node. 8.4's ``small_table``, and the one input it
+#: needs is a token count against a window rather than one of 8.8's thresholds.
+TABLE_SHAPE_BASIS = (
+    "INGEST_SPEC.md 8.4's `small_table`: the sheet rendered as one markdown table fits the "
+    "embedding document window, which is the model's own limit and therefore the largest "
+    "value that test could be calibrated to. That is a token count against a window, not "
+    "one of 8.8's unset thresholds. The window is 8192 and not 512 because the two are not "
+    "close on the open web: 68.5% of FUSE sheets render inside 8192 and 16.4% inside 512, "
+    "and 52.0% fit the first and not the second (measured 2026-09-03, scripts/"
+    "render_tokens.py over 35,751 FUSE and 9,257 git-corpora sheets)."
+)
+
+#: Why a sheet got no ``table`` node.
+NO_TABLE_REASON = (
+    "the sheet does not render to a markdown table inside the embedding document window, "
+    "so INGEST_SPEC.md 8.4's `small_table` does not match it; `rendered_tokens`, "
+    "`rendered_unbounded_reason` and `rendered_withheld_reason` on this node say which of "
+    "the two ways it missed."
+)
+
+#: Why both shapes are written where both match, rather than the first one 8.4 lists.
+#:
+#: **This AMENDS 8.4, which says "the first match wins".** Measured at the 8192 window over
+#: the same two corpora on 2026-09-03: both shapes match 29.4% of git-corpora sheets and
+#: 12.5% of FUSE sheets, `table` alone matches 56.8% / 56.0%, `records` alone 3.1% / 4.6%.
+#: Across the 2,720 git and 4,462 FUSE contested sheets the median holds 7 and 13 data rows;
+#: 39.9% of the git contested set has five data rows or fewer and 12.9% has exactly one, and
+#: their median render is 168 and 419 tokens. So 8.4's own argument for `small_table` — "a
+#: small table is often exactly the retrieval unit we want, and splitting it destroys it" —
+#: is strongest precisely where the two shapes collide, and a first-match ordering either way
+#: throws away the shape that argument is about. Emitting both costs a second embedding of a
+#: 168-token table beside rows that are indexed anyway.
+#:
+#: NO RETRIEVAL-TIME DEDUPLICATION ACCOMPANIES IT. A table node and its own row nodes are
+#: separate documents; a query matching both returns both, and the order they come back in
+#: is signal. Suppressing one would be opinionated post-processing of a result set.
+BOTH_SHAPES_BASIS = (
+    "INGEST_SPEC.md 8.4 says the first matching shape wins; this sheet matched two and got "
+    "both. A `table` node and its own `record` nodes are separate documents and a query "
+    "matching both returns both — which is the case 8.4's own argument for `small_table` is "
+    "strongest in, because the sheets where both shapes match are small ones."
 )
 
 
@@ -148,17 +202,28 @@ class RecordPlan:
     cells: tuple[Cell, ...]
 
 
-def build_records(rows: SheetRows, *, header: Sequence[Optional[str]]) -> tuple:
+def build_records(rows: SheetRows, *, header: Sequence[Optional[str]], header_row: int) -> tuple:
     """Every row below the header, as records. Rows that hold nothing produce nothing.
 
     ``header`` is positional and 1-based by column, exactly as the stored profile's
     ``columns`` array is: ``header[0]`` names column A. A shorter header than the rows are
     wide raises rather than dropping the overhang — see :class:`HeaderDoesNotCoverTheRow`.
+
+    ``header_row`` is the worksheet row number the profile measured the header at, and every
+    row AT OR ABOVE it is skipped. It used to be the constant 1 and the skip was ``!=``;
+    with the header at row 4, rows 1 to 3 are the banner (``office.sheets.BannerRow``) and
+    are not instances of anything. ``<=`` rather than a set membership because the banner is
+    contiguous by construction: it is what the scan walked past on its way down.
     """
+    if header_row < 1:
+        raise ValueError(
+            f"the header row is {header_row!r}; `build_records` is called only for a sheet "
+            "whose header verdict is true, and such a sheet has a measured row number"
+        )
     return tuple(
         record
         for row in rows.rows
-        if row.index != HEADER_ROW_NUMBER
+        if row.index > header_row
         if (record := _record(row, header)) is not None
     )
 
@@ -286,15 +351,29 @@ def header_labels(columns: Sequence[dict]) -> list:
     ``profile:sheet`` writes ``name`` per column and leaves it ``None`` where the sheet has
     no header row. Reading it back rather than re-deriving it is what keeps the profile and
     the records describing the same sheet.
+
+    **ONLY A HEADER-SOURCED NAME IS A KEY.** A column may also be named from a merged banner
+    (``office.sheets.NAME_SOURCE_BANNER``), which is a label for the GROUP of columns the
+    merge spans — three columns under one banner share one string, and three record keys
+    that are the same string are one key holding the last value. So the source is checked
+    rather than the name, and a banner-named column reads as unnamed here; a row with a
+    value in it then raises `HeaderDoesNotCoverTheRow` rather than writing a record that has
+    silently lost two of its fields.
     """
-    return [column.get("name") for column in columns]
+    return [
+        column.get("name") if column.get("name_source") == NAME_SOURCE_HEADER else None
+        for column in columns
+    ]
 
 
 __all__ = [
-    "HEADER_ROW_NUMBER",
+    "BOTH_SHAPES_BASIS",
     "NO_HEADER_REASON",
+    "NO_TABLE_REASON",
     "SHAPE_BASIS",
     "SHAPE_RECORDS",
+    "SHAPE_SMALL_TABLE",
+    "TABLE_SHAPE_BASIS",
     "Cell",
     "CellDidNotSplit",
     "HeaderDoesNotCoverTheRow",

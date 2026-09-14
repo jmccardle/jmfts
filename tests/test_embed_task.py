@@ -34,6 +34,7 @@ from jmfts_core.models.document import (
     USETYPE_CELL,
     USETYPE_RECORD,
     USETYPE_PROFILE,
+    USETYPE_TABLE,
 )
 from jmfts_core.models.task_queue import TASK_PENDING, WRITE_SELF, TaskQueue
 from jmfts_core.models.token_embedding import TokenEmbedding
@@ -329,6 +330,13 @@ class TestTheEmbedHandler:
         own text — so it needs the row for the same reason a chunk does. A cell that is
         itself too long carries none, gets `chunk` children, and is reached by this scope's
         FIRST entry rather than by the last.
+
+        `table` is the fifth, and it is the leaf that does not fit the TOKEN window — 8.4's
+        `small_table` is tested against the document window, and 52.0% of open-web sheets
+        render inside 8192 tokens and not inside 512. The row still names one
+        `with_tokens`, because the group is what the caller asked for;
+        `sheet_tasks._write_table` is what sets it false on the queue row for a table the
+        token path cannot take.
         """
         scope = next(r for r in TASK_ROWS if r.task == TASK_EMBED).scope
         assert scope.usetypes == (
@@ -336,11 +344,13 @@ class TestTheEmbedHandler:
             USETYPE_RECORD,
             USETYPE_PROFILE,
             USETYPE_CELL,
+            USETYPE_TABLE,
         )
         assert USETYPE_SECTION not in scope.usetypes
         assert scope.matches(TASK_STRUCTURE_DECLARED, USETYPE_CHUNK)
         assert not scope.matches(TASK_STRUCTURE_DECLARED, USETYPE_SECTION)
         assert scope.matches(TASK_EXTRACT_SHEET, USETYPE_CELL)
+        assert scope.matches(TASK_EXTRACT_SHEET, USETYPE_TABLE)
 
     def test_a_node_with_no_content_raises_rather_than_completing(self, db_session):
         """Not a skip. The task was enqueued for text, and a node that has none is a chunk
