@@ -34,6 +34,7 @@ at the moment they do.
 | `extract:tables` | the file node | `children` | `has_text_layer`, `pages_with_tables` | — | `extract:text` |
 | `extract:images` | the file node | `children` | `has_images` | — | — |
 | `citation` | the file node | `subtree` | `@page_geometry` | — | `structure:declared`, `structure:inferred` |
+| `anchor:source` | the file node | `subtree` | `@source_address` | — | `structure:declared`, `structure:inferred` |
 | `extract:facts` | the file node | `self` | `options.facts.enabled`, `has_text_layer` | `char_count < options.facts.min_characters` | `structure:declared`, `structure:inferred`, `structure:conversation` |
 | `embed` | `children` nodes produced by `structure:declared`, `structure:inferred`, `structure:conversation`, `profile:sheet`, `extract:sheet`, usetype `chunk`, `record`, `profile`, `cell`, `table` | `self` | — | — | — |
 
@@ -45,6 +46,7 @@ of the node above (legal only as a read).
 
 | task | reads | writes | cost |
 |---|---|---|---|
+| `anchor:source` | `extraction@self`, `text@self`, `blob@self`, `source_span@subtree` | `source_anchor@subtree` | `cpu` |
 | `citation` | `extraction@self`, `text@self`, `blob@self`, `source_span@subtree` | `source_anchor@subtree` | `cpu` |
 | `derive:rule` | — | `text@self` | `cpu` |
 | `embed` | `text@self` | `embedding@self` | `model` |

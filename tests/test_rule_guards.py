@@ -39,6 +39,7 @@ from jmfts_core.ingest_tasks import (
     OP_GT,
     OP_LT,
     PATTERNS_NOT_PROBED,
+    TASK_ANCHOR_SOURCE,
     TASK_EXTRACT_FACTS,
     TASK_EXTRACT_TEXT,
     TASK_ROWS,
@@ -216,9 +217,16 @@ class TestTheTwoUnknownPolicies:
         # that table and nothing else, so a rollup rung is not in the answer — see
         # `jmfts_core.index_tasks` for what that costs and `SPRINT_JOBS.md` Phase 7 for
         # where it ends. What this test is about is untouched: the two `.docx` fields.
+        #
+        # `anchor:source` joined the list with `SPRINT_0_6_0.md` Block G step 34 and it
+        # belongs here rather than being filtered out: `OFFICE_SPEC.md` Part 11 step 9's row
+        # requires the same `has_text_layer` this test supplies, so it is eligible for
+        # exactly the documents this test is about. Its absence would mean a `.docx` that
+        # ingests and points at nothing.
         assert _eligible("docx", {HAS_TEXT_LAYER: True}) == [
             TASK_EXTRACT_TEXT,
             TASK_STRUCTURE_INFERRED,
+            TASK_ANCHOR_SOURCE,
         ]
 
 
