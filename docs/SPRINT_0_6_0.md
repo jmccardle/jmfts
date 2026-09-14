@@ -464,6 +464,21 @@ them as Postgres large objects (`repositories/blob.py:1`) and `read_bytes` has e
 callers today, all task handlers (`citation_tasks.py:221`, `conversation_tasks.py:81`,
 `ingest_tasks.py:2522`). Nothing under `jmfts_core/rest/` reads a blob.
 
+**What steps 20 to 22 did NOT build, recorded 2026-09-13 when they landed.** `OFFICE_SPEC.md`
+Part 7 sketches three things beyond the brief these steps were given, and all three are
+deliberate omissions rather than oversights:
+
+* **a `highlight` parameter on `/image`.** The overlay is IC-9 and it is client-side, drawn
+  over the same anchor IC-4 puts on the search hit. Burning a rectangle into a rendered PNG
+  makes the highlight uncacheable and un-dismissable, and the page already has the geometry.
+* **the rectangle in points returned beside `/region`'s PNG.** `BinaryPayload` is bytes and
+  their type. The coordinates are the `source_anchor` row, which `/evidence` already serves
+  and which the hit already carries.
+* **a text span within a node's content** — a query-time `search_for` scoped to that node's
+  rectangle. This one is a real capability and it is simply not in this sprint. It is the
+  recovery mechanism office formats need (Part 5's "How a rectangle is recovered" searches a
+  rendition), so it belongs with Block G step 33 rather than here.
+
 **Step 22 serves a spreadsheet region as cells, not as an image.** `_cells_bounds`
 (`services/document_service.py:154`) already resolves a rectangle three ways in the spec's
 order — what the caller named, the node's own anchor, the measured used range — and
