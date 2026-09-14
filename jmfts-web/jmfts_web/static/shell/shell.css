@@ -108,7 +108,9 @@ th { color: var(--dim); font-weight: 600; width: 16rem; }
 .dim { color: var(--dim); }
 
 /* ------------------------------------------------------------------- renderers (IC-8) */
-.render-plain, .render-code, .render-markdown-source, .render-transcript-source {
+/* `.render-markdown-source` and `.render-transcript-source` were here and are gone: step 29
+ * finished both renderers, so nothing produces either class any more. */
+.render-plain, .render-code, .render-md-code {
   margin: 0; padding: 10px 12px; background: var(--soft); border-radius: 4px;
   overflow-x: auto; white-space: pre-wrap; font-size: .9em;
 }
@@ -116,6 +118,69 @@ th { color: var(--dim); font-weight: 600; width: 16rem; }
   margin: 0 0 8px; padding: 6px 10px; font-size: .88em;
   border-left: 3px solid var(--bad); background: var(--soft); color: var(--dim);
 }
+
+/* Markdown (step 29). Headings are toned down from the shell's own h1/h2, which name the
+ * page rather than a place inside a document. */
+.render-markdown > :first-child { margin-top: 0; }
+.render-md-heading { font-size: 1.05rem; text-transform: none; letter-spacing: 0;
+  color: var(--fg); margin: 20px 0 6px; }
+h1.render-md-heading { font-size: 1.25rem; }
+h5.render-md-heading, h6.render-md-heading { font-size: .95rem; color: var(--dim); }
+.render-md-paragraph { margin: 0 0 10px; }
+.render-md-quote {
+  margin: 0 0 10px; padding: 2px 0 2px 12px; border-left: 3px solid var(--line);
+  color: var(--dim);
+}
+.render-md-list { margin: 0 0 10px; padding-left: 22px; }
+.render-md-item { margin: 2px 0; }
+.render-md-rule { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
+.render-md-code-span { padding: 1px 4px; background: var(--soft); border-radius: 3px; }
+.render-md-table { border-collapse: collapse; margin: 0 0 12px; display: block;
+  overflow-x: auto; }
+.render-md-table th, .render-md-table td {
+  border: 1px solid var(--line); padding: 3px 8px; width: auto; text-align: left;
+}
+.render-md-table .align-right { text-align: right; }
+.render-md-table .align-center { text-align: center; }
+.render-md-refused-link { text-decoration: underline dotted var(--bad); }
+.render-md-image-ref { border: 1px dashed var(--line); border-radius: 4px; padding: 1px 6px; }
+
+/* Transcripts (step 29): one section per turn, the speaker above it. */
+.render-turn { border-left: 3px solid var(--line); padding: 0 0 0 12px; margin: 0 0 14px; }
+.render-turn-unmarked { border-left-color: var(--bad); }
+.render-turn-role {
+  margin: 0 0 4px; font-size: .78rem; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--dim); font-weight: 600;
+}
+
+/* The three surfaces (step 29). `.render-status` is what a deferred renderer shows while it
+ * is asking, and what carries the failure's own message when it does not get an answer. */
+.render-page, .render-region, .render-cells, .render-office, .render-sheet {
+  margin: 0 0 16px;
+}
+.render-status { margin: 0 0 8px; font-size: .9em; }
+.render-caption { margin: 6px 0 0; font-size: .88em; color: var(--dim); }
+.render-picture { display: block; max-width: 100%; height: auto; border: 1px solid var(--line); }
+.render-download { margin: 8px 0; }
+.render-scroll { overflow-x: auto; max-width: 100%; }
+
+/* A spreadsheet grid, with a FIXED cell size — `render/sheet.js` sets the numbers in the
+ * markup and hands the same ones to `gridSurface()`. The overlay's transform is linear, so a
+ * column that sized itself to its contents would put every box to its right in the wrong
+ * place. `table-layout: fixed` plus `nowrap` is what holds the grid to the arithmetic. */
+.render-sheet-grid { border-collapse: collapse; table-layout: fixed; }
+.render-sheet-grid th, .render-sheet-grid td {
+  border: 1px solid var(--line); padding: 2px 6px; width: auto; font-size: .88em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left;
+}
+.render-sheet-gutter, .render-sheet-column {
+  background: var(--soft); color: var(--dim); text-align: center; font-weight: 600;
+}
+.render-sheet-formula { color: var(--accent); }
+.render-sheet-caption { margin: 0 0 6px; font-size: .88em; }
+/* The grid is as wide as its columns and scrolls inside `.render-scroll`; clamping it to the
+ * viewport would shrink the cells out from under the box's percentages. */
+.overlay-surface.render-grid-surface { max-width: none; }
 
 /* --------------------------------------------------------------- highlight overlay (IC-9) */
 .overlay-surface { position: relative; display: inline-block; max-width: 100%; }

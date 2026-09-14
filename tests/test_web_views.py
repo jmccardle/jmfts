@@ -866,8 +866,11 @@ RENDERER_HARNESS = textwrap.dedent("""
     });
     const doc = { id: 7, title: "t", usetype: "document" };
 
-    const out = { names: rendererNames(), showing: {}, rendered: {}, refusals: {} };
-    for (const name of rendererNames()) out.showing[name] = rendererFor(name).showing;
+    const out = { names: rendererNames(), showing: {}, needs: {}, rendered: {}, refusals: {} };
+    for (const name of rendererNames()) {
+      out.showing[name] = rendererFor(name).showing;
+      out.needs[name] = [...rendererFor(name).needs];
+    }
 
     out.rendered.plain = serialize(render("a\\nb", presentation("plain"), doc));
     out.rendered.code = serialize(render("x=1", presentation("code", { language: "py" }), doc));
@@ -881,39 +884,50 @@ RENDERER_HARNESS = textwrap.dedent("""
     };
     refuse("unknown renderer", () => render("x", presentation("mermaid"), doc));
     refuse("json-table on prose", () => render("not json", presentation("json-table"), doc));
+    // A renderer that reads the appliance, called by a view that passed no context at all.
+    refuse("no client", () => render("", presentation("pdf-page"), doc));
     console.log(JSON.stringify(out));
     """)
 
 
 @needs_node
-def test_a_renderer_that_is_not_finished_says_so_on_the_page(tmp_path):
-    """Step 25 ships the interface; step 29 ships the renderers, and the gap is visible.
+def test_every_renderer_declares_what_it_shows_and_what_it_needs(tmp_path):
+    """Step 25 shipped the interface and step 29 shipped the renderers; this is the ledger.
 
-    Three of the five are complete because what they claim to do is all there is to do.
-    ``markdown`` and ``transcript`` are not, and rather than let them look finished they
-    declare ``showing`` and ``render()`` puts that sentence on the page. The notice is not the
-    renderer's to remove: a step-29 author sets ``showing: null`` and it goes, so finishing a
-    renderer and forgetting to take the notice down is not a state that exists.
+    ``showing`` was step 25's device for a renderer that is not finished — null when it
+    renders what its name says, and otherwise a sentence ``render()`` puts on the page, so
+    that "finished the renderer and forgot to take the notice down" is not a state that
+    exists. All nine read null now, which is what finishing the two unfinished ones looks like
+    from here.
+
+    ``needs`` is step 29's addition and it is the same shape of declaration for a different
+    fact: four of the nine draw something that is not in ``rendered_content`` — a page image, a
+    cropped rectangle, a grid of cells — and cannot be rendered without a client. Declared, so
+    that a view calling one without a context is refused with a sentence naming what to pass
+    rather than reaching ``undefined.get_document_image``.
     """
     result = _node(tmp_path, RENDERER_HARNESS)
 
     assert sorted(result["names"]) == sorted(RENDERERS)
-    complete = {name for name, showing in result["showing"].items() if showing is None}
-    assert complete == {"plain", "code", "json-table"}
+    unfinished = {name: showing for name, showing in result["showing"].items() if showing}
+    assert unfinished == {}, (
+        "a renderer is declaring what it is ACTUALLY showing, which means it is not finished: "
+        f"{unfinished}"
+    )
 
-    for name in ("markdown", "transcript"):
-        assert "step 29" in result["showing"][name], (
-            f"the {name} renderer must say what it is actually showing and where the real one "
-            "is scheduled"
-        )
+    from_content = {name for name, needs in result["needs"].items() if needs == []}
+    assert from_content == {"plain", "code", "json-table", "markdown", "transcript"}
+    from_appliance = {name for name, needs in result["needs"].items() if needs == ["client"]}
+    assert from_appliance == {"pdf-page", "image", "sheet-region", "office"}
 
+    # Step 25's notice wrapper is gone from these two, because there is nothing to warn about
+    # any more: `# H` is a heading and not a line of source with a hash on it.
     markdown = result["rendered"]["markdown"]
-    assert markdown["class"] == "render-partial"
-    assert markdown["children"][0]["class"] == "render-notice"
-    assert "SOURCE" in markdown["children"][0]["text"]
-    assert markdown["children"][1]["text"] == "# H"
+    assert markdown["class"] == "render-markdown"
+    assert markdown["children"][0]["class"] == "render-md-heading"
+    assert markdown["children"][0]["tag"] == "h1"
+    assert markdown["children"][0]["text"] == "H"
 
-    # The complete three are not wrapped, because there is nothing to warn about.
     assert result["rendered"]["plain"]["class"] == "render-plain"
     assert result["rendered"]["plain"]["text"] == "a\nb"
     code = result["rendered"]["code"]
@@ -932,6 +946,12 @@ def test_a_renderer_that_is_not_finished_says_so_on_the_page(tmp_path):
     assert result["refusals"]["unknown renderer"][0] == "UnknownRendererError"
     assert "mermaid" in result["refusals"]["unknown renderer"][1]
     assert result["refusals"]["json-table on prose"][0] == "RenderError"
+
+    # The refusal a view meets if it forgets the fourth argument. It names the missing key and
+    # what to pass, because the author of the view is the one who has to act on it.
+    missing = result["refusals"]["no client"]
+    assert missing[0] == "RenderError"
+    assert "client" in missing[1] and "context" in missing[1]
 
 
 # ------------------------------------------------------------------ IC-9: the highlight overlay
