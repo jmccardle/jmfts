@@ -25,8 +25,8 @@ caught one layer down:
 * **What is withheld is said with the real numbers.** A sheet region larger than the grid this
   library will paint carries a sentence naming how many of its rows are on screen.
 * **Which representation is on the page is stated from a named row.** ``sourceNotice`` reads
-  whether ``file.rendition_ref`` is present and says so; nothing catches a failed call and
-  substitutes extracted text for a picture.
+  whether the ``rendition`` evidence row is present and says so; nothing catches a failed call
+  and substitutes extracted text for a picture.
 
 These need no database and no browser. Where ``node`` is on PATH they execute the bundle's ES
 modules against the same stubbed DOM ``tests/test_web_views.py`` uses, plus the two things a
@@ -597,9 +597,13 @@ FIGURE_HARNESS = textwrap.dedent("""
     ask("not a page", { id: 1, usetype: "file" }, bare, -2);
 
     // The sentence that says which representation of a document is on the page.
-    const file = EVIDENCE["1"].evidence.file;
+    const evidence = EVIDENCE["1"].evidence;
+    const file = evidence.file;
+    // The row, not a key inside `file` — `INGEST_SPEC.md` 3.3 forbids writing a derivation
+    // into the record of what was received. `hasOwnProperty`, because a row present and
+    // empty is a rendition and `evidence.rendition` being falsy would call it absent.
     out.notices.extracted = serialize(surfaces.sourceNotice({
-      rendition: Object.prototype.hasOwnProperty.call(file, "rendition_ref"),
+      rendition: Object.prototype.hasOwnProperty.call(evidence, "rendition"),
       filename: file.filename, mime: file.detected_mime,
     }));
     out.notices.rendition = serialize(surfaces.sourceNotice({
@@ -880,8 +884,14 @@ def test_the_page_says_which_representation_of_a_document_it_is_showing(figures)
     A fallback in the anti-pattern sense CATCHES a failure and substitutes a result, so that a
     reader cannot tell the substitute from the real thing. Nothing here does that: no call is
     made to a route that would refuse, and no exception is recovered from. What is read is a
-    named row — ``file.rendition_ref``, which ``OFFICE_SPEC.md`` Part 6 names — and BOTH
-    answers are sentences on the page, written before anything is drawn.
+    named row — the ``rendition`` row step 32 writes, spelled once at
+    ``RenditionRepository.EVIDENCE_NAME`` — and BOTH answers are sentences on the page,
+    written before anything is drawn.
+
+    NOT ``file.rendition_ref``. ``OFFICE_SPEC.md`` Part 6 names that key and this test asserted
+    it until step 32 landed; the merge commit that changed it records why, and the short version
+    is that ``INGEST_SPEC.md`` 3.3 says the ``file`` block "never changes after upload", so
+    nothing may write a derivation into it. Part 6 is the document to correct.
 
     The markdown is not a substitute for the document either. It is the document as this
     appliance read it: the text that was chunked, embedded and indexed, and the thing a search
@@ -890,8 +900,8 @@ def test_the_page_says_which_representation_of_a_document_it_is_showing(figures)
     """
     extracted = figures["notices"]["extracted"]["text"]
     assert "NOT a rendered page" in extracted
-    assert "file.rendition_ref" in extracted
-    assert "render:pdf" in extracted and "Block G step 32" in extracted
+    assert "no `rendition` row" in extracted
+    assert "render:pdf" in extracted and "JMFTS_CONVERT_URL" in extracted
     assert "report.docx, application/vnd.ms-word" in extracted
 
     # The other answer is a sentence too, rather than the absence of one.
