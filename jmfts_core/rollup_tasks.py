@@ -87,7 +87,6 @@ from jmfts_core.entity_roots import ENTITIES_ROOT_USETYPE
 from jmfts_core.index_tasks import PARAM_OUTSTANDING, outstanding_by_index
 from jmfts_core.ingest_options import resolve_options
 from jmfts_core.ingest_tasks import (
-    OPTIONS_KEY,
     TASK_ANCHOR_RENDER,
     TASK_INDEX_BM25,
     TASK_STRUCTURE_SEMANTIC,
@@ -95,6 +94,7 @@ from jmfts_core.ingest_tasks import (
     TASK_SUMMARIZE_LLM,
     TASK_SUMMARIZE_TREE,
     TaskOutcome,
+    collection_option_layers,
     register_task_handler,
 )
 from jmfts_core.llm_client import complete_sync
@@ -107,11 +107,9 @@ from jmfts_core.models.document import (
     DocumentLink,
 )
 from jmfts_core.models.task_queue import WRITE_SELF, WRITE_SUBTREE, TaskQueue
-from jmfts_core.evidence import ABSENT
 from jmfts_core.repositories.document import DocumentRepository
 from jmfts_core.repositories.evidence import (
     EvidenceRepository,
-    evidence_of,
     evidence_value,
 )
 from jmfts_core.repositories.rendition import KIND_PDF, RenditionRepository
@@ -462,33 +460,51 @@ def child_ids(session: Session, parent_id: int) -> list[int]:
 
 
 def rollup_options(session: Session, node: Document) -> dict:
-    """The ``rollup`` options this node is rolled up under.
+    """The ``rollup`` options this node is rolled up under. ``SPRINT_JOBS.md`` 5.1.
 
-    Read from the nearest ancestor that recorded any — the upload writes them on the file
-    node, and the segments created underneath it inherit what that upload asked for rather
-    than whatever the profile defaults have become since. A node with no such ancestor
-    resolves to the task defaults, which is the documented meaning of "no overrides".
+    EVERY LAYER FROM THE ROOT DOWN, not the nearest one wholesale. The old walk returned
+    the first ancestor carrying an ``options`` row and passed that row's contents as the
+    complete override set, which was right for as long as the only row it could land on
+    was a file node's — an upload writes the whole resolved set there, so "nearest" and
+    "merged" were the same answer. Step 15 ended that: ``PUT
+    /documents/{id}/ingest-options`` writes a PARTIAL declaration, it is refused on a file
+    node and on a rule's output, so a collection is the only node it can write — and
+    :meth:`IngestRollupPlanner.__call__` visits every ancestor in the ingest tree,
+    collections included. A caller who put ``max_children`` on ``/papers`` and ``penalty``
+    on ``/papers/2026`` got only ``penalty``, with ``max_children`` silently back at the
+    task default nobody asked for.
 
-    The format is taken from the same ancestor's ``matched`` block, so a format profile
-    that deviates applies to its rollup as well as to its structuring.
+    :func:`~jmfts_core.ingest_tasks.collection_option_layers` is that walk and it is called
+    here rather than reimplemented. Passing ``node.id`` where the upload passes a parent id
+    is the same question asked one level lower: every layer from the root through this node
+    itself, root-first, so the nearer one is applied last and wins its own keys and only
+    its own. A file node's complete row is the last layer under a segment, so it still
+    decides everything — which is why the segment case is unchanged.
+
+    EMPTY ROWS ARE SKIPPED, and the walk is what makes that consistent. The old code tested
+    ``node`` for PRESENCE and its ancestors for TRUTHINESS, so a cleared declaration — the
+    route says an empty object is how one is cleared — stopped the walk when it sat on the
+    node and was stepped over when it sat above. Contributing no layer is the right reading
+    of both: a collection that declares nothing defers to whatever declared above it.
+
+    The format comes from the nearest node carrying a ``matched`` block, so a format
+    profile that deviates applies to its rollup as well as to its structuring. That is the
+    file node under a segment and nothing at all above one, which is correct: a collection
+    has no bytes and no format.
     """
-    owner = _options_owner(session, node)
-    owned = evidence_of(session, owner.id) if owner is not None else {}
-    stored = owned.get(OPTIONS_KEY)
-    fmt = (owned.get("matched") or {}).get("format", "")
-    return resolve_options(fmt, stored)["rollup"]
+    fmt = _matched_format(session, node)
+    layers = collection_option_layers(session, node.id)
+    return resolve_options(fmt, None, inherited=layers)["rollup"]
 
 
-def _options_owner(session: Session, node: Document) -> Optional[Document]:
-    """``node`` itself if it records options, else the nearest ancestor that does."""
+def _matched_format(session: Session, node: Document) -> str:
+    """The format of the ingested file ``node`` belongs to, or ``""`` above one."""
     evidence = EvidenceRepository(session)
-    if evidence.read(node.id, OPTIONS_KEY) is not ABSENT:
-        return node
-    for ancestor_id in reversed(node.path or []):
-        ancestor = session.get(Document, ancestor_id)
-        if ancestor is not None and evidence.read(ancestor.id, OPTIONS_KEY):
-            return ancestor
-    return None
+    for node_id in [node.id, *reversed(node.path or [])]:
+        matched = evidence.read(node_id, "matched")
+        if isinstance(matched, dict) and matched.get("format"):
+            return str(matched["format"])
+    return ""
 
 
 # ---------------------------------------------------------------------------

@@ -35,6 +35,7 @@ from jmfts_core.principal_context import CurrentPrincipal, reset_principal, set_
 from jmfts_core.repositories.document import DocumentRepository
 from jmfts_core.repositories.evidence import EvidenceRepository
 from jmfts_core.rest.main import app
+from jmfts_core.rollup_tasks import rollup_options
 from jmfts_core.services.ingest_service import IngestService
 
 PAPERS = {"structure": {"max_tokens": 120}}
@@ -130,6 +131,81 @@ class TestTheAncestorWalk:
         db_session.flush()
         # Root-first, because the nearer layer must be applied LAST to win a key contest.
         assert collection_option_layers(db_session, year.id) == (PAPERS, YEAR)
+
+
+class TestTheRollupWalkReadsTheSameLayers:
+    """``rollup_options`` over a COLLECTION node, which is where nearest-wins now shows.
+
+    ``collection_option_layers``'s docstring says ``_options_owner`` using one owner's set
+    wholesale is "correct while there is only ever one", and until this sprint there only
+    ever was one: the walk started at a segment, and the first ancestor carrying an
+    ``options`` row was the file node, whose row is the COMPLETE resolved set the upload
+    wrote. ``PUT /documents/{id}/ingest-options`` is what ends that. It writes a PARTIAL
+    declaration, it is refused on a file node and on a rule's output, so the only nodes it
+    can write are collections — and ``IngestRollupPlanner.__call__`` visits every ancestor
+    in the ingest tree, collections included.
+
+    So the walk now reaches a node whose row is a fragment, reads it as though it were the
+    whole answer, and drops every layer above it.
+    """
+
+    def test_a_collections_own_layer_does_not_mask_its_parents(self, db_session):
+        papers = _folder(db_session, "papers")
+        db_session.flush()
+        year = _folder(db_session, "2026", parent=papers)
+        db_session.flush()
+        evidence = EvidenceRepository(db_session)
+        evidence.write(papers.id, OPTIONS_KEY, {"rollup": {"max_children": 4}})
+        evidence.write(year.id, OPTIONS_KEY, {"rollup": {"penalty": 7}})
+        db_session.flush()
+
+        options = rollup_options(db_session, year)
+
+        # The nearer layer wins its OWN key and nothing else. Both settings were asked for
+        # by a caller who named two different collections, and 5.1 point 1 is that both
+        # survive; nearest-wins answers 16 here, which is the task default and was never
+        # asked for by anyone.
+        assert options["penalty"] == 7
+        assert options["max_children"] == 4
+
+    def test_a_cleared_collection_falls_through_to_the_layer_above(self, db_session):
+        papers = _folder(db_session, "papers")
+        db_session.flush()
+        year = _folder(db_session, "2026", parent=papers)
+        db_session.flush()
+        evidence = EvidenceRepository(db_session)
+        evidence.write(papers.id, OPTIONS_KEY, {"rollup": {"max_children": 4}})
+        # An empty declaration is how the route clears one — it says so — so this is a
+        # reachable state and not a malformed row.
+        evidence.write(year.id, OPTIONS_KEY, {})
+        db_session.flush()
+
+        # `_options_owner` tested the node itself for PRESENCE and its ancestors for
+        # TRUTHINESS, so an empty row stopped the walk here and returned pure defaults
+        # while the identical row on an ancestor was stepped over.
+        assert rollup_options(db_session, year)["max_children"] == 4
+
+    def test_a_segment_under_an_uploaded_file_is_unchanged(self, db_session):
+        """The case that was already right, pinned so the fix cannot trade it away."""
+        papers = _folder(db_session, "papers")
+        db_session.flush()
+        EvidenceRepository(db_session).write(papers.id, OPTIONS_KEY, {"rollup": {"penalty": 9}})
+        db_session.flush()
+        doc_id = _upload(db_session, b"one two three four five\n", "a.txt", parent_id=papers.id)
+        file_node = db_session.get(Document, doc_id)
+        segment = DocumentRepository(db_session).create(
+            title="segment",
+            content="x",
+            parent_id=file_node.id,
+            usetype="chunk",
+            auto_embed=False,
+            embed_tokens=False,
+        )
+        db_session.flush()
+
+        # The file node's row is the complete resolved set the upload wrote, and it already
+        # carries the collection's deviation. The walk must still reach exactly that answer.
+        assert rollup_options(db_session, segment)["penalty"] == 9
 
 
 class TestTheUploadResolvesUnderItsCollection:

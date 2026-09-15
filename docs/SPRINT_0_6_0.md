@@ -447,6 +447,7 @@ the next two, and they are the two that are unblocked.
 |---|---|---|---|
 | 14 | Phase 5: multiplicity and the cost fold, so `EXPLAIN` says how much rather than only what | `SPRINT_JOBS.md` Part 7 | medium |
 | 15 | Phase 4's leftover: the route and the ancestor walk for per-collection configuration | `SPRINT_JOBS.md` 5.1 | medium |
+| 36 | `structure:conversation` declares the fan-out bound 2.4 requires, and `Atom` refuses one that does not | `SPRINT_JOBS.md` 2.4, 9.1 | medium, and blocked on question 4.11 |
 
 **Neither is blocked and both were deferred for the same reason twice.** `docs/SPRINT_0_5_0.md`
 put them in a stretch section that would run only if Block A's step 5 came back cheap; it came
@@ -458,6 +459,32 @@ per-collection configuration out of phase 6 rather than into itself: a collectio
 subtree, so a setting on a node reaches the documents beneath it, and the ancestor walk that
 does it already runs one level down in `rollup_tasks._options_owner`. RBAC, which is already
 subtree-scoped, answers who may set it.
+
+**Step 36 is the defect step 14 found and named rather than fixed.** Six atoms declare
+`write_mode=children`; five declare a `Fanout` and a `ChildKey`, and `structure:conversation`
+declares neither. The failing test a reader can write from this row needs no fixture: assert
+that every atom whose `write_mode` is `WRITE_CHILDREN` declares both, and it is red today at
+one name. `Atom.__post_init__` already refuses the half-declared case — `fanout` without
+`child_key` or the reverse — and cannot see this one, because an atom that declares neither
+looks exactly like one that writes no children. `write_mode` is what tells them apart, so the
+invariant belongs beside the other two and the check is three lines.
+
+The consequence is already written down and already reported. `_fold_cost` gives an atom with
+no bound `Count(0, None)`, marks every scope that names it open, and `_not_counted` prints the
+reason — so `EXPLAIN` over a transcript answers `?` for nodes and for embeddings rather than a
+number. That is the design working: 7.2 says an unmeasurable count is reported and never
+guessed. What is wrong is that this count is measurable and nobody wrote the bound.
+
+**It is blocked on question 4.11 and must not be guessed.** The atom writes one chunk per turn
+plus one per part of an over-window turn, and `_split_oversized` sizes those parts with
+`settings.embedding_token_window`, which is a `Settings` field in no option group — so
+`Fanout.bound(evidence, params)` cannot reach it. A bound over only `matched.patterns`'s
+uncapped measurements is true and useless: turns are at most `line_count`, and parts are at
+most `char_count`, which for a 1 MB transcript claims a million chunks where the answer is
+about two thousand. 2.4's own argument against `⌈N/max_children⌉` rules that out. Note that
+`conversation_message_lines` is NOT the way out either: `_conversation_turns` stops at
+`CONVERSATION_SCAN_LINES = 64`, so it reads 64 for a transcript of any size above that, and a
+ceiling short by every turn after the sixty-fourth is the one failure a ceiling may not have.
 
 **One debt step 14 inherits and does not pay.** `Fact.locus` has no term for a write into
 another tree and three shipped tasks write there. It is recorded at `docs/INGEST_SPEC.md` 5.3,
@@ -1150,3 +1177,41 @@ different repository layout. Three candidates.
 **Absent an answer, the first**, because the argument that kept it internal — process, not
 specification — stopped being true when the process moved. A runbook nobody following it can
 open is not being held back, it is being lost.
+
+### 4.11 What divides, for `structure:conversation`'s fan-out bound
+
+Step 36 needs a ceiling on the chunk nodes the conversation rung writes, and `Fanout.bound`
+takes exactly two arguments: the declared evidence, and the resolved options. The rung writes
+one chunk per turn and one more per part of every turn that exceeds the embedding window, and
+`_split_oversized` sizes those parts with `settings.embedding_token_window` — 512 today, a
+`Settings` field that appears in no option group and so reaches neither argument.
+
+What is reachable is not enough. `matched.patterns.line_count` and `char_count` are measured
+over the whole file and are free, because probe already decodes it; `line_count` bounds turns
+exactly, since the format is JSONL and a turn is a line. Parts are the half with no divisor:
+without the window the only true statement is that each part holds at least one character, so
+the ceiling is `char_count`, which claims a million chunks for a 1 MB transcript where the
+answer is about two thousand. 2.4 rejects a ceiling like that in as many words.
+
+What the answer changes: whether `EXPLAIN` over a transcript can say how many nodes and how
+many embeddings it will write, instead of `?`. Three candidates.
+
+* **Make the window an ingest option.** `embedding_token_window` joins the `structure` group,
+  the bound divides by `params`, and every other bound's shape is preserved. Cost: it enters
+  `param_fingerprint`, so changing the model's window makes every recorded task fingerprint
+  differ from the one a re-run computes. That is arguably correct — a different window really
+  does mean a different chunking — and it is a behaviour change to 6.1's "enqueue only the
+  difference" that would want its own measurement.
+* **Let the bound read `get_settings()`.** Three lines, no fingerprint change. Cost: a
+  scheduling input that `reads` does not name and the audit cannot see, in the one field whose
+  docstring says a bound reaching for undeclared evidence "would be a scheduling decision made
+  from evidence the plan does not know it needs". The audit would pass while the claim it
+  makes stops being true.
+* **Have probe count the turns.** `_conversation_turns` already parses message lines and stops
+  at `CONVERSATION_SCAN_LINES = 64`; an uncapped count would bound turns exactly and still
+  leave parts unbounded, so it does not answer this on its own. Cost: a `json.loads` per line
+  of every text file in Tier 1, which "depends on nothing, calls no model, and always runs".
+
+**Absent an answer, none of the three**, and step 36 stays open with the invariant unwritten.
+Guessing a divisor here would put a number into `EXPLAIN` that no measurement supports, which
+is the one thing 7.2 forbids by name.
