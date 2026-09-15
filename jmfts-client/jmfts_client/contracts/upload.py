@@ -112,6 +112,60 @@ class FileUploadResponse(BaseModel):
     )
 
 
+class CollectionOptionsRequest(BaseModel):
+    """What a collection asks for on its behalf and on its descendants'.
+
+    ``SPRINT_JOBS.md`` 5.1. A collection is a SUBTREE, not a row in a bindings table, so
+    configuring one is writing a setting on a node — and "who may configure this
+    collection" becomes "who may write to this node", which RBAC has already answered.
+
+    **This is a PARTIAL set, unlike the one an upload records.** A file node's `options`
+    row is the complete resolved set the run used; this is a declaration of what to
+    deviate, so a folder can name `structure.max_tokens` and leave everything else to the
+    layer below. That is what lets a nested collection refine its parent without restating
+    it. An empty object is a real answer — this collection deviates in nothing — and it is
+    also how a declaration is cleared, because there is nothing a separate verb would say.
+
+    **It is a default for NEW uploads, not a live policy.** A document ingested before this
+    changed keeps what it was ingested with, which is the honest consequence of resolving
+    at upload time rather than at plan time; re-applying is a re-ingest, and the recorded
+    row is what makes the difference computable.
+    """
+
+    options: dict = Field(
+        description=(
+            'Option overrides in the shape `POST /ingest/file` takes them — `{"structure": '
+            '{"max_tokens": 60}}`. Validated exactly as a request\'s are, so an option that '
+            "does not exist is a 400 here for the same reason it is a 400 there."
+        )
+    )
+
+
+class CollectionOptionsResponse(BaseModel):
+    """What one node declares, what it inherits, and what an upload under it starts from."""
+
+    document_id: int
+    options: dict = Field(
+        description=(
+            "What THIS node declares. `{}` when it declares nothing, which is the same "
+            "answer as a node that has never been configured — a collection that deviates "
+            "in nothing and one that was never asked are the same default."
+        )
+    )
+    inherited: dict = Field(
+        description=(
+            "The collections ABOVE this one, merged root-first. `{}` at the top of a tree."
+        )
+    )
+    effective: dict = Field(
+        description=(
+            "`inherited` layered with `options` — where an upload directly under this node "
+            "starts, before the format profile and before its own overrides. Still a "
+            "partial set: the complete one needs a format, and the format is the bytes'."
+        )
+    )
+
+
 class IngestFrontierResponse(BaseModel):
     """Progress for an in-flight tree. ``INGEST_SPEC.md`` 2.4.
 

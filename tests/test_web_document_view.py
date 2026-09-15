@@ -86,6 +86,17 @@ OOXML_ANCHOR = {
     "through": "/p:sld/p:cSld/p:spTree/p:sp[4]",
     "continues": ["ppt/notesSlides/notesSlide3.xml"],
 }
+#: ``anchor:render``'s shape (``citation_tasks.py:999``) — the OTHER anchor of the same
+#: passage, and the one that can be drawn. A page and a rectangle in the PDF ``render:pdf``
+#: produced, with ``of="rendition"`` saying whose pagination that page number belongs to.
+#: The box is the same rectangle ``PDF_ANCHOR`` carries, so the two draw identically and the
+#: only thing that differs on the page is what it is CALLED — which is the point.
+RENDER_ANCHOR = {
+    "kind": "pdf",
+    "of": "rendition",
+    "page": 3,
+    "bbox": [72.0, 118.4, 540.0, 262.9],
+}
 
 
 def _box(node: dict) -> dict:
@@ -321,6 +332,11 @@ PARAM_HARNESS = textwrap.dedent("""
 
     attempt("none", { id: "7" });
     attempt("anchor", { id: "7", anchor: JSON.stringify(%(anchor)s) });
+    // The office hand-off: both anchors on one fragment. `render` is the rectangle recovered
+    // from the rendition and `anchor` is the address it is a picture of.
+    attempt("rendition", {
+      id: "7", anchor: JSON.stringify(%(ooxml)s), render: JSON.stringify(%(render)s),
+    });
     attempt("unresolved", {
       id: "7", unresolved: JSON.stringify({ code: "no_source_span", reason: "the chunk predates it" }),
     });
@@ -335,6 +351,14 @@ PARAM_HARNESS = textwrap.dedent("""
     out.rows.unresolved = view.evidenceFromRows({ document_id: 7, evidence: {
       "source_anchor.unresolved": { code: "no_text_layer", reason: "the page is a scan" } } });
     out.rows.nothingRan = view.evidenceFromRows({ document_id: 7, evidence: {} });
+    // The rendition pair's own three states, which are not the source pair's.
+    out.rows.rendered = view.evidenceFromRows({ document_id: 7, evidence: {
+      source_anchor: %(ooxml)s, render_anchor: %(render)s } });
+    out.rows.renderUnresolved = view.evidenceFromRows({ document_id: 7, evidence: {
+      source_anchor: %(ooxml)s,
+      "render_anchor.unresolved": { code: "not_found", reason: "the text did not match" } } });
+    out.rows.renderRanAndPlacedNothing = view.evidenceFromRows({ document_id: 7, evidence: {
+      source_anchor: %(ooxml)s, render_anchor: null } });
     try { view.evidenceFromRows({ document_id: 7 }); out.refusals.noEvidence = null; }
     catch (error) { out.refusals.noEvidence = [error.name, error.message]; }
 
@@ -347,7 +371,13 @@ PARAM_HARNESS = textwrap.dedent("""
 def params(tmp_path_factory):
     if NODE is None:
         pytest.skip("no JavaScript runtime on PATH")
-    return _node(tmp_path_factory.mktemp("params"), PARAM_HARNESS, anchor=json.dumps(PDF_ANCHOR))
+    return _node(
+        tmp_path_factory.mktemp("params"),
+        PARAM_HARNESS,
+        anchor=json.dumps(PDF_ANCHOR),
+        ooxml=json.dumps(OOXML_ANCHOR),
+        render=json.dumps(RENDER_ANCHOR),
+    )
 
 
 def test_the_detail_route_is_the_one_the_search_view_links_to(params):
@@ -365,19 +395,38 @@ def test_the_detail_route_is_the_one_the_search_view_links_to(params):
     the encoding in ``shell/citation.js``, under the shell because a route argument is routing —
     so what this asserts now is a seam rather than a coincidence.
     """
-    assert params["parsed"]["none"] == {"documentId": 7, "anchor": None, "unresolved": None}
+    assert params["parsed"]["none"] == {
+        "documentId": 7,
+        "anchor": None,
+        "unresolved": None,
+        "rendition": {"anchor": None, "unresolved": None},
+    }
     assert params["parsed"]["anchor"]["anchor"] == PDF_ANCHOR
     assert params["parsed"]["unresolved"]["unresolved"]["code"] == "no_source_span"
 
     # Both keys come back even when null, because `highlight()` refuses to be called without
-    # both: passing only `anchor` has not said whether the caller looked for the other row.
-    assert set(params["parsed"]["none"]) == {"documentId", "anchor", "unresolved"}
+    # both: passing only `anchor` has not said whether the caller looked for the other row. TWO
+    # PAIRS, for the same reason one pair over: an office passage's citation is an exact address
+    # AND a rectangle recovered from a rendition, and each of them has to be separately a legal
+    # argument to `highlight()` — which four flat keys would not have been.
+    assert set(params["parsed"]["none"]) == {"documentId", "anchor", "unresolved", "rendition"}
+    assert set(params["parsed"]["none"]["rendition"]) == {"anchor", "unresolved"}
+    assert params["parsed"]["rendition"]["rendition"]["anchor"] == RENDER_ANCHOR
+    assert params["parsed"]["rendition"]["anchor"] == OOXML_ANCHOR, (
+        "the two travel together and neither replaces the other: the address is what the "
+        "passage is, the rectangle is where it appears on a page of our rendering"
+    )
 
     # Which of those nulls means "the hit had none" and which means "nobody looked" is the
     # presence of the KEY, and that is the one thing that decides whether to spend a call.
     assert params["brought"] == {
         "none": False,
         "anchor": True,
+        # All FOUR keys count, because a node can carry a rendition rectangle and no source
+        # anchor at all — a format that reaches a page only through a rendition and whose
+        # package `anchor:source` does not read. Asking only about the source pair would make
+        # that hit pay for a call whose answer it is already holding.
+        "rendition": True,
         "unresolved": True,
         "not json": True,
         "no id": True,
@@ -417,14 +466,43 @@ def test_a_row_that_is_absent_and_a_row_that_is_null_are_different_answers(param
     them is worth waiting for. ``DocumentEvidenceResponse`` says a name present with a null
     value IS PRESENT, so the reader is told which it met.
     """
+    empty = {"anchor": None, "unresolved": None, "attempted": False}
     assert params["rows"]["present"]["anchor"] == PDF_ANCHOR
-    assert params["rows"]["ranAndFound"] == {"anchor": None, "unresolved": None, "attempted": True}
+    assert params["rows"]["ranAndFound"] == {
+        "anchor": None,
+        "unresolved": None,
+        "attempted": True,
+        "rendition": empty,
+    }
     assert params["rows"]["nothingRan"] == {
         "anchor": None,
         "unresolved": None,
         "attempted": False,
+        "rendition": empty,
     }
     assert params["rows"]["unresolved"]["unresolved"]["code"] == "no_text_layer"
+
+    # THE SAME THREE QUESTIONS OF THE RENDITION PAIR, because with two pairs there are four
+    # absences and not two. "A rectangle was recovered", "a rectangle was looked for in the
+    # rendition and not found", "the rung ran and recorded neither" and "nothing has paginated
+    # this document" are four answers, and a page holding one flag for all of them could not
+    # have told a reader which one they were waiting on.
+    assert params["rows"]["rendered"]["rendition"] == {
+        "anchor": RENDER_ANCHOR,
+        "unresolved": None,
+        "attempted": True,
+    }
+    assert params["rows"]["renderUnresolved"]["rendition"]["unresolved"]["code"] == "not_found"
+    assert params["rows"]["renderUnresolved"]["rendition"]["attempted"] is True
+    assert params["rows"]["renderRanAndPlacedNothing"]["rendition"] == {
+        "anchor": None,
+        "unresolved": None,
+        "attempted": True,
+    }, "a row written with a null value is a run that happened, which is not an absent row"
+    assert params["rows"]["present"]["rendition"] == empty, (
+        "a PDF's chunk has no rendition pair at all — `pdf_for` serves a source PDF's own "
+        "bytes and never renders one, so `attempted` is false and not merely empty"
+    )
 
 
 # ------------------------------------------------------------------- IC-9: the two surfaces
@@ -503,10 +581,59 @@ PANEL_HARNESS = textwrap.dedent("""
       node: { usetype: "file" }, anchor: null, mime: "application/vnd.oasis.opendocument.text" });
     out.planned.unknownFile = view.plannedSurface({ node: { usetype: "file" }, anchor: null });
     out.planned.ooxml = view.plannedSurface({ node: { usetype: "chunk" }, anchor: ANCHORS.ooxml });
+    // The office beeline's last link: the same exactly-addressed passage, now with a rectangle
+    // recovered from a rendition beside it. And the two orderings that are decisions rather
+    // than accidents — an exact source rectangle beats a recovered one, a recovered one beats
+    // no rectangle, and a worksheet is still cells whatever has been paginated.
+    out.planned.rendition = view.plannedSurface({
+      node: { usetype: "chunk" }, anchor: ANCHORS.ooxml, rendition: ANCHORS.render });
+    out.planned.renditionOnly = view.plannedSurface({
+      node: { usetype: "chunk" }, anchor: null, rendition: ANCHORS.render });
+    out.planned.renditionSpan = view.plannedSurface({
+      node: { usetype: "chunk" }, anchor: ANCHORS.span, rendition: ANCHORS.render });
+    out.planned.exactBeatsRecovered = view.plannedSurface({
+      node: { usetype: "chunk" }, anchor: ANCHORS.pdf, rendition: ANCHORS.render });
+    out.planned.cellsBeatsRendition = view.plannedSurface({
+      node: { usetype: "chunk" }, anchor: ANCHORS.cells, rendition: ANCHORS.render });
 
+    // A rendition page, drawn by the same panel that draws a source page, from the rendition
+    // pair. What differs is the caption, and it differs because `PdfAnchor.of` says so.
+    calls.length = 0;
+    const office = await view.pagePanel({
+      client, documentId: 7, page: ANCHORS.render.page, dpi: %(dpi)s, label: "The proposal.docx",
+      evidence: { anchor: ANCHORS.render, unresolved: null }, params: { id: "7" },
+    });
+    out.calls.rendition = [...calls];
+    out.panels.rendition = serialize(office.element);
+    out.results.rendition = office.result;
+
+    const RENDER_UNRESOLVED = { code: "not_found_in_rendition", reason: "the text did not match" };
     out.address = serialize(view.ooxmlWhere(ANCHORS.ooxml));
     out.addressPlain = serialize(view.ooxmlWhere(
       { kind: "ooxml", part: "word/document.xml", path: "/w:document/w:body/w:p[42]" }));
+    // The four rendition states, under one and the same exact address.
+    out.addresses = {
+      nothingPaginated: serialize(view.ooxmlWhere(
+        ANCHORS.ooxml, { anchor: null, unresolved: null, attempted: false })),
+      boxed: serialize(view.ooxmlWhere(
+        ANCHORS.ooxml, { anchor: ANCHORS.render, unresolved: null, attempted: true })),
+      notFound: serialize(view.ooxmlWhere(
+        ANCHORS.ooxml, { anchor: null, unresolved: RENDER_UNRESOLVED, attempted: true })),
+      ranEmpty: serialize(view.ooxmlWhere(
+        ANCHORS.ooxml, { anchor: null, unresolved: null, attempted: true })),
+    };
+    // What goes UNDER a rectangle, for the three things a node with a rendition can carry.
+    out.beside = {
+      ooxml: serialize(view.sourceAddress({
+        anchor: ANCHORS.ooxml,
+        rendition: { anchor: ANCHORS.render, unresolved: null, attempted: true } })),
+      span: serialize(view.sourceAddress({
+        anchor: ANCHORS.span,
+        rendition: { anchor: ANCHORS.render, unresolved: null, attempted: true } })),
+      none: serialize(view.sourceAddress({
+        anchor: null,
+        rendition: { anchor: ANCHORS.render, unresolved: null, attempted: true } })),
+    };
 
     const summary = (evidence) => serialize(view.anchorSummary(evidence));
     out.summaries = {
@@ -516,6 +643,17 @@ PANEL_HARNESS = textwrap.dedent("""
       ranAndFound: summary({ anchor: null, unresolved: null, attempted: true }),
       unknownKind: summary({ anchor: { kind: "waveform" }, unresolved: null }),
       ooxml: summary({ anchor: ANCHORS.ooxml, unresolved: null }),
+      ooxmlBoxed: summary({
+        anchor: ANCHORS.ooxml, unresolved: null,
+        rendition: { anchor: ANCHORS.render, unresolved: null, attempted: true } }),
+      // A rectangle and nothing else: the rendition pair speaking where the source pair is
+      // silent, which a summary reading only the source pair would have shown as "no anchor".
+      boxOnly: summary({
+        anchor: null, unresolved: null, attempted: false,
+        rendition: { anchor: ANCHORS.render, unresolved: null, attempted: true } }),
+      notFoundInRendition: summary({
+        anchor: null, unresolved: null, attempted: false,
+        rendition: { anchor: null, unresolved: RENDER_UNRESOLVED, attempted: true } }),
     };
     console.log(JSON.stringify(out));
     """)
@@ -534,6 +672,7 @@ def panels(tmp_path_factory):
                 "cells": CELLS_ANCHOR,
                 "span": SPAN_ANCHOR,
                 "ooxml": OOXML_ANCHOR,
+                "render": RENDER_ANCHOR,
             }
         ),
         png=base64.b64encode(png_bytes(*PAGE_PIXELS)).decode(),
@@ -710,13 +849,12 @@ def test_an_office_passage_is_named_exactly_rather_than_boxed_or_called_missing(
     a gap — an office document has no pages until ``render:pdf`` paginates it, and recovering
     geometry from that rendition is Block G step 33.
 
-    **Step 33 has since landed, and this view does not consume it yet.** ``anchor:render`` now
-    writes a ``render_anchor`` row carrying a page and a rectangle, and ``_pdf_anchor`` serves it,
-    so ``GET /documents/{id}/region?anchor=true`` on a ``.docx`` crops to the real rectangle
-    today. What this panel draws is still the address, because the view reads ``source_anchor``
-    and nothing has taught it the second row. That is a gap between the appliance and the page
-    rather than a decision, and it is the last link in the office beeline. This paragraph is
-    where it is recorded; the assertions below are unchanged and still describe what ships.
+    **This is now the branch for an office passage with no rectangle ANYWHERE.** When there is
+    one — ``anchor:render`` wrote a ``render_anchor`` row — the page draws it and this address
+    goes underneath as the thing the rectangle is a picture of; see
+    ``test_an_office_passage_with_a_rendition_is_boxed_and_says_whose_page_it_is``. What this
+    panel is for is the state the sentence below describes, and the four readings of that
+    sentence are what ``test_the_four_rendition_absences_read_differently`` pins.
 
     So this panel has to separate two absences that a viewer is strongly tempted to draw
     identically: **"we know exactly where this is and cannot draw it yet"** against **"we have no
@@ -743,11 +881,17 @@ def test_an_office_passage_is_named_exactly_rather_than_boxed_or_called_missing(
     assert "ppt/notesSlides/notesSlide3.xml" in text
 
     # And the sentence that says which absence this is. It names the rung that RECOVERED the
-    # address (so nothing is missing) and the step that would draw the box (so the reader knows
-    # what they are waiting for), and it points at the other absence by name.
+    # address (so nothing is missing) and the two rungs that would draw the box together with
+    # the setting an appliance needs for the first of them (so the reader knows what they are
+    # waiting for and can do something about it), and it points at the other absence by name.
     assert "anchor:source" in text
-    assert "step 33" in text
+    assert "render:pdf" in text and "anchor:render" in text
+    assert "JMFTS_CONVERT_URL" in text
     assert "source_anchor.unresolved" in text
+    assert "step 33" not in text, (
+        "this sentence named a sprint step in the future tense; the step shipped and this page "
+        "now reads its row, so what is left to say is which of four states this node is in"
+    )
 
     # An anchor that does not run on says nothing about running on, rather than saying it empty.
     plain = panels["addressPlain"]["text"]
@@ -759,6 +903,126 @@ def test_an_office_passage_is_named_exactly_rather_than_boxed_or_called_missing(
     # wording, and NOT the "no geometry for this kind" line an unknown kind gets.
     assert "ppt/slides/slide3.xml" in panels["summaries"]["ooxml"]["text"]
     assert "older than the appliance" not in panels["summaries"]["ooxml"]["text"]
+
+
+def test_an_office_passage_with_a_rendition_is_boxed_and_says_whose_page_it_is(panels):
+    """THE OFFICE BEELINE'S LAST LINK: a `.docx` citation gets a RECTANGLE in the browser.
+
+    The appliance has been able to crop one since Block G step 33 — ``anchor:render`` writes a
+    ``render_anchor`` row and ``_pdf_anchor`` tries it first — and the browser asked for nothing
+    but ``source_anchor``, so an office hit reached this view carrying its exact ``ooxml``
+    address, the overlay correctly refused to draw an XPath, and the page printed the address
+    under a rectangle that existed in the database and that nothing fetched.
+
+    **Drawing it is half the fix and LABELLING it is the other half.** Authority runs opposite
+    to drawability here: the ``ooxml`` address is computed from the uploaded bytes, cannot be
+    wrong and cannot be drawn; the rectangle is a position in a PDF LibreOffice produced from a
+    document with no pages of its own, is the only one that can be drawn, and can be wrong. So
+    the page draws the rectangle, says "page 4 of this appliance's rendering" rather than "page
+    4", and keeps the address as the durable citation — which is what a reader who opens the
+    file in Word and finds the passage on page 5 needs to have been told in advance.
+
+    One transform, one box: this is ``pagePanel`` with the rendition pair, not a second drawing
+    path. IC-9's claim is that the geometry never branches on what it is drawing on, and a
+    rendition page is the same ``pdf-page`` surface a source page is.
+    """
+    assert panels["planned"]["rendition"] == {"kind": "rendition"}
+    # ORDER IS THE DECISION, and it is stated in both directions. An exact rectangle beats a
+    # recovered one (a source PDF's own geometry is not improved by a rendering of it, and this
+    # appliance never writes both). A recovered one beats no rectangle at all, which is the
+    # whole of this lane. A worksheet is still cells, because step 22 decided that a
+    # spreadsheet region is answered as cells rather than as a picture of cells.
+    assert panels["planned"]["renditionOnly"] == {"kind": "rendition"}
+    assert panels["planned"]["renditionSpan"] == {"kind": "rendition"}
+    assert panels["planned"]["exactBeatsRecovered"] == {"kind": "page"}
+    assert panels["planned"]["cellsBeatsRendition"] == {"kind": "cells"}
+
+    # One call, at the anchor's own page — `/image` serves a page of the RENDITION for an
+    # office node because `pdf_for` already made that choice on the appliance side.
+    assert panels["calls"]["rendition"] == [["image", {"document_id": 7, "page": 3, "dpi": 150}]]
+    assert panels["results"]["rendition"]["status"] == "box"
+
+    # The same box the same transform puts on a source page, to four decimal places.
+    assert _box(panels["panels"]["rendition"]) == pytest.approx(
+        {"left": 11.7647, "top": 14.9495, "width": 76.4706, "height": 18.2449}, abs=1e-4
+    )
+
+    # And the label, which is the half that is not geometry.
+    caption = panels["panels"]["rendition"]["text"]
+    assert "Page 4 of this appliance's rendering" in caption
+    assert "no pages of its own" in caption
+    assert "Page 4, rendered at 150 dpi." not in caption, "that is a SOURCE page's caption"
+
+
+def test_the_four_rendition_absences_read_differently(panels):
+    """Four states, four sentences — and the reason two fields were not enough.
+
+    ``views/document.js`` already separated an absent ``source_anchor`` row, one written with a
+    null value, and a ``source_anchor.unresolved`` row. With a second pair there are more: a
+    rectangle recovered, a rectangle looked for in a rendition and NOT found, a rung that ran
+    and recorded neither, and nothing having paginated the document at all. The last is the
+    common case — an appliance with no LibreOffice configured produces no renditions — and it is
+    the only one a reader can act on, so it names the setting.
+
+    A page that showed the same thing for all four would be hiding the interesting ones, which
+    is this sprint's defect class in the one place the sprint is about.
+    """
+    said = {key: panels["addresses"][key]["text"] for key in panels["addresses"]}
+
+    # Every one of them says the address is exact and complete. That does not stop being true
+    # when a rectangle turns up, and it does not start being false when one fails to.
+    for key, text in said.items():
+        assert "anchor:source" in text, key
+        assert "/p:sld/p:cSld/p:spTree/p:sp[2] of ppt/slides/slide3.xml" in text, key
+
+    assert "render:pdf" in said["nothingPaginated"]
+    assert "JMFTS_CONVERT_URL" in said["nothingPaginated"]
+    assert "source_anchor.unresolved" in said["nothingPaginated"]
+
+    assert "picture of this address" in said["boxed"]
+    assert "cannot be wrong and cannot be drawn" in said["boxed"]
+    assert "can be drawn and can be wrong" in said["boxed"]
+    assert "Cite the address" in said["boxed"]
+
+    assert "A rectangle WAS looked for" in said["notFound"]
+    assert "the text did not match" in said["notFound"], "the recorded reason, verbatim"
+    assert "not_found_in_rendition" in said["notFound"]
+    assert "costs the picture, not the citation" in said["notFound"]
+
+    assert "recorded neither a rectangle nor a reason" in said["ranEmpty"]
+    assert "nothing further to wait for" in said["ranEmpty"].lower()
+
+    # The four really are four: no two of them are the same sentence.
+    assert len(set(said.values())) == 4
+
+    # And a summary reading only the source pair would have called each of these "no anchor".
+    assert "rectangle recovered from a rendition" in panels["summaries"]["boxOnly"]["text"]
+    assert "not found" in panels["summaries"]["notFoundInRendition"]["text"]
+    assert "missing picture, not a" in panels["summaries"]["notFoundInRendition"]["text"]
+    assert "picture of this address" in panels["summaries"]["ooxmlBoxed"]["text"]
+
+
+def test_what_goes_under_a_rectangle_is_what_the_rectangle_is_a_picture_of(panels):
+    """The rectangle never stands alone, because a rectangle is not a citation.
+
+    A page of this appliance's rendering is where a passage APPEARS; what it IS is the address
+    computed from the uploaded bytes. Three things a node with a rendition can carry, and the
+    third is the one worth writing a function for: **nothing**. A page that printed no sentence
+    there would show a box with no statement of what it is a box of, which is a confidently
+    placed rectangle with no provenance — the failure the overlay contract is shaped against,
+    arriving from the other side.
+    """
+    assert "ppt/slides/slide3.xml" in panels["beside"]["ooxml"]["text"]
+
+    span = panels["beside"]["span"]["text"]
+    assert "picture of this passage" in span
+    assert "characters 6 to 11" in span
+    assert "durable citation" in span
+
+    none = panels["beside"]["none"]["text"]
+    assert "no address in the source document itself" in none
+    assert "anchor:source" in none, "and which rung would write one"
+    assert "another" in none and "paginate" in none
 
 
 def test_the_surface_is_chosen_before_anything_is_fetched(panels):

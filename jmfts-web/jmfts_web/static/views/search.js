@@ -47,7 +47,11 @@
 // THE ANCHOR IS CARRIED, NOT REDRAWN. IC-4 puts `source_anchor` and `source_anchor_unresolved`
 // on every hit precisely so a result list does not have to call `/documents/{id}/evidence` per
 // hit before it can offer "show me where". Step 31 draws the box; this page's job is to show
-// which of the states a hit is in and to hand BOTH rows to the detail view without losing them.
+// which of the states a hit is in and to hand ALL FOUR rows to the detail view without losing
+// them — four because an office document's citation is two anchors, an exact `ooxml` address
+// in the source package and a rectangle recovered from the rendition (`render_anchor`), and a
+// hit that carried only the first would send a `.docx` whose rectangle EXISTS to a page that
+// can only find out by making the call this field exists to remove.
 // THE ENCODING OF THAT HAND-OFF IS NO LONGER HERE: it is `shell/citation.js`, which both this
 // view and the detail view import. It lived here and in `views/document.js` at once, identical
 // but for an error class name, because the two lanes that wrote it could not import each other;
@@ -143,12 +147,20 @@ export const READS = Object.freeze({
     "routing.method",
     "routing.reason",
   ]),
+  // SIX, AND THE LAST TWO ARE THE OFFICE HALF OF IC-4. A `.docx` hit carries an exact `ooxml`
+  // address in `source_anchor` AND a rectangle recovered from this appliance's rendition in
+  // `render_anchor`; both are read here rather than fetched per hit, which is the round trip
+  // the whole field exists to remove. Declared, so an appliance older than this page fails in
+  // `reader()` with "the contract in jmfts-client is the authority" rather than badging every
+  // office hit as unrendered because a field it never sent came back undefined.
   "search.SearchResultItem": Object.freeze([
     "document",
     "score",
     "method",
     "source_anchor",
     "source_anchor_unresolved",
+    "render_anchor",
+    "render_anchor_unresolved",
   ]),
   "document.DocumentResponse": Object.freeze([
     "id",
@@ -371,6 +383,16 @@ export const CAPABILITIES_OP = "MetaService.capabilities";
  * know exactly where this is and cannot draw it yet" from "we have no idea where this is",** and
  * one word for both is how that distinction stops existing.
  *
+ * `RENDERED` IS THE FIFTH, AND IT IS WHAT `ADDRESSED` BECOMES ONCE SOMETHING HAS PAGINATED THE
+ * DOCUMENT. The same exactly-addressed passage, plus a `render_anchor` row: a page and a
+ * rectangle `anchor:render` recovered by finding the passage in the PDF `render:pdf` produced.
+ * It is a separate word from `ANCHORED` on purpose, because **authority runs opposite to
+ * drawability here**. An `ANCHORED` hit's rectangle is the document's own geometry and cannot
+ * be wrong. A `RENDERED` hit's rectangle is LibreOffice's pagination of a document that has no
+ * pages of its own — it can be drawn and it can be wrong, and a reader who opens the `.docx` in
+ * Word may find the passage on the next page. One word for both would make "page 3" and "page 3
+ * of our rendering" the same claim on the one page that is in a position to tell them apart.
+ *
  * The last three are states only a LIST can be in, because it looks at many hits and one of
  * them may be malformed. `CONTRADICTORY` is both rows at once, which `evidence.py` says the
  * appliance cannot produce; `UNREADABLE` is an anchor this front end cannot describe — an
@@ -383,6 +405,7 @@ export const CAPABILITIES_OP = "MetaService.capabilities";
 export const ANCHOR_STATE = Object.freeze({
   ANCHORED: "anchored",
   ADDRESSED: "addressed",
+  RENDERED: "rendered",
   UNRESOLVED: HIGHLIGHT_STATUS.UNRESOLVED,
   NONE: HIGHLIGHT_STATUS.NONE,
   CONTRADICTORY: "contradictory",
@@ -394,16 +417,28 @@ const isObject = (value) => value !== null && typeof value === "object" && !Arra
 /**
  * Classify one hit's anchor, and say where it points in words.
  *
+ * FOUR ROWS, TWO PAIRS, AND THE SECOND PAIR ONLY EVER ADDS. The source pair decides what this
+ * passage IS; the rendition pair decides whether a rectangle can be drawn for it. They are read
+ * together here because the badge has to answer one question with both of them in view — an
+ * `ooxml` address with a recovered rectangle beside it is not the same offer as the same
+ * address with nothing beside it, and a page that badged them identically would hide the
+ * difference until somebody clicked.
+ *
  * @param {object} hit a `SearchResultItem`
  * @returns {{state: string, where: string, detail: string|null, anchor: object|null,
- *            unresolved: object|null}}
+ *            unresolved: object|null, rendition: {anchor: object|null, unresolved: object|null}}}
  */
 export function anchorState(hit) {
   const anchor = readHit(hit, "source_anchor");
   const unresolved = readHit(hit, "source_anchor_unresolved");
+  const rendition = {
+    anchor: readHit(hit, "render_anchor"),
+    unresolved: readHit(hit, "render_anchor_unresolved"),
+  };
+  const answer = (state) => ({ ...state, rendition });
 
   if (anchor !== null && unresolved !== null) {
-    return {
+    return answer({
       state: ANCHOR_STATE.CONTRADICTORY,
       where: "anchor and unresolved row both present",
       detail:
@@ -411,92 +446,199 @@ export function anchorState(hit) {
         "is not, so one of these two evidence rows is wrong and this page cannot tell which.",
       anchor,
       unresolved,
-    };
+    });
+  }
+  if (rendition.anchor !== null && rendition.unresolved !== null) {
+    // The same rule one anchor over — `evidence.py:519` registers `render_anchor.unresolved`
+    // `within` `render_anchor` and says it is "present exactly when the anchor is not". Both
+    // at once is a contradiction the appliance should not be able to produce, and preferring
+    // one of them here is how it would stay unnoticed on the office path specifically.
+    return answer({
+      state: ANCHOR_STATE.CONTRADICTORY,
+      where: "render_anchor and its unresolved row both present",
+      detail:
+        "jmfts_core/evidence.py:519 says the render_anchor.unresolved row is present exactly " +
+        "when the rectangle is not, so one of these two rows is wrong and this page cannot " +
+        "tell which.",
+      anchor,
+      unresolved,
+    });
   }
 
+  // The recovered rectangle, checked before it is offered. A `render_anchor` is written by one
+  // task and it writes `kind: "pdf"` with a page; anything else did not come from
+  // `anchor:render`, and badging a hit "rendered" off a row this page cannot read would
+  // promise a box the detail view would then refuse to draw.
+  const drawable =
+    isObject(rendition.anchor) &&
+    rendition.anchor.kind === "pdf" &&
+    Number.isInteger(rendition.anchor.page);
+  const brokenRendition =
+    rendition.anchor !== null && !drawable
+      ? "this node's render_anchor row is not a pdf anchor with a 0-based page, and " +
+        "anchor:render is the only thing that writes one"
+      : null;
+
   if (anchor === null) {
-    if (unresolved === null) {
-      return {
-        state: ANCHOR_STATE.NONE,
-        where: "no anchor",
-        detail:
-          "Nothing was recorded and nothing was lost. citation runs on PDFs and is advisory, " +
-          "so a node without an anchor is not a node that failed.",
-        anchor: null,
-        unresolved: null,
-      };
+    if (brokenRendition) return answer(unreadable(rendition.anchor, brokenRendition));
+    // A rectangle and no source address: a format that reaches a page only through a rendition
+    // and whose package `anchor:source` does not read. The rectangle is the whole of what is
+    // known and it is the appliance's rendering — and where there IS a recorded reason for the
+    // missing address, it is carried rather than dropped, because "there is no address" and
+    // "the address could not be recovered, and here is why" are the two facts this whole
+    // feature turns on and a rectangle turning up does not merge them.
+    if (drawable) return answer(rendered(null, rendition.anchor, unresolved));
+    if (unresolved !== null) return answer(unresolvedState(unresolved, "no rectangle"));
+    if (rendition.unresolved !== null) {
+      return answer(unresolvedState(rendition.unresolved, "not found in the rendition"));
     }
-    const code = typeof unresolved.code === "string" ? unresolved.code : "(no code)";
-    const reason = typeof unresolved.reason === "string" ? unresolved.reason : "(no reason)";
-    return {
-      state: ANCHOR_STATE.UNRESOLVED,
-      where: `no rectangle: ${code}`,
-      // The sentence is carried through verbatim. It was written for a human to read at
-      // `citation_tasks.py:284`; rewriting it here would replace an explanation with a shrug.
-      detail: reason,
+    return answer({
+      state: ANCHOR_STATE.NONE,
+      where: "no anchor",
+      detail:
+        "Nothing was recorded and nothing was lost. citation runs on PDFs and is advisory, " +
+        "so a node without an anchor is not a node that failed.",
       anchor: null,
-      unresolved,
-    };
+      unresolved: null,
+    });
   }
 
   if (!isObject(anchor)) {
-    return unreadable(anchor, `a source_anchor row is an object; got ${typeof anchor}`);
+    return answer(unreadable(anchor, `a source_anchor row is an object; got ${typeof anchor}`));
   }
+  if (brokenRendition) return answer(unreadable(rendition.anchor, brokenRendition));
   switch (anchor.kind) {
     case "pdf":
       if (!Number.isInteger(anchor.page)) {
-        return unreadable(anchor, "a pdf anchor names a 0-based integer page; this one does not");
+        return answer(
+          unreadable(anchor, "a pdf anchor names a 0-based integer page; this one does not")
+        );
       }
-      return placed(anchor, `0-based page ${anchor.page}`);
+      // THE SOURCE RECTANGLE WINS WHEN THERE IS ONE, and it wins because it is the document's
+      // own geometry rather than a rendering of it. A node with both is not something this
+      // appliance produces — `pdf_for` serves a source PDF's own bytes and never renders one —
+      // so the second clause says so rather than choosing silently.
+      return answer(
+        placed(
+          anchor,
+          `0-based page ${anchor.page}`,
+          drawable
+            ? "This node carries a recovered rectangle as well. Nothing in this appliance " +
+                "writes both, because a document that is already a PDF is never rendered into " +
+                "one; the exact one is what this page draws."
+            : null
+        )
+      );
     case "cells":
       if (typeof anchor.sheet !== "string" || typeof anchor.ref !== "string") {
-        return unreadable(anchor, "a cells anchor is {sheet, ref}, both strings");
+        return answer(unreadable(anchor, "a cells anchor is {sheet, ref}, both strings"));
       }
-      return placed(anchor, `${anchor.sheet}!${anchor.ref}`);
+      return answer(placed(anchor, `${anchor.sheet}!${anchor.ref}`));
     case "span":
       if (!Number.isInteger(anchor.char_start) || !Number.isInteger(anchor.char_end)) {
-        return unreadable(anchor, "a span anchor is {char_start, char_end}, both integers");
+        return answer(unreadable(anchor, "a span anchor is {char_start, char_end}, both integers"));
       }
-      return placed(anchor, `chars ${anchor.char_start}–${anchor.char_end}`);
+      if (drawable) return answer(rendered(anchor, rendition.anchor));
+      return answer(placed(anchor, `chars ${anchor.char_start}–${anchor.char_end}`));
     case "ooxml":
       if (typeof anchor.part !== "string" || typeof anchor.path !== "string") {
-        return unreadable(anchor, "an ooxml anchor is {part, path}, both strings");
+        return answer(unreadable(anchor, "an ooxml anchor is {part, path}, both strings"));
       }
-      return addressed(anchor, `${anchor.path} of ${anchor.part}`);
+      if (drawable) return answer(rendered(anchor, rendition.anchor));
+      return answer(addressed(anchor, `${anchor.path} of ${anchor.part}`, rendition.unresolved));
     default:
-      return unreadable(
-        anchor,
-        `anchor kind ${JSON.stringify(anchor.kind)} is not one of pdf, cells, span, ooxml — ` +
-          "this front end is older than the appliance that wrote it."
+      return answer(
+        unreadable(
+          anchor,
+          `anchor kind ${JSON.stringify(anchor.kind)} is not one of pdf, cells, span, ooxml — ` +
+            "this front end is older than the appliance that wrote it."
+        )
       );
   }
 }
 
-const placed = (anchor, where) => ({
+const placed = (anchor, where, detail = null) => ({
   state: ANCHOR_STATE.ANCHORED,
   where,
-  detail: null,
+  detail,
   anchor,
   unresolved: null,
 });
 
 /**
- * Exactly located, and not drawable. See `ANCHOR_STATE.ADDRESSED`.
+ * Exactly located, drawable on a rendering this appliance made. See `ANCHOR_STATE.RENDERED`.
  *
- * The detail is a statement about this front end and about the schedule, not about the
- * document: nothing is missing from the record, and what is missing is the rendition a
- * rectangle would be measured against.
+ * The `where` is the RENDERING's page and says so in three words, because that is the claim a
+ * reader is about to act on and "page 3" would be the appliance making the document's claim on
+ * its behalf. The detail carries the source address, which is the part that cannot be wrong.
  */
-const addressed = (anchor, where) => ({
+const rendered = (anchor, box, sourceUnresolved = null) => ({
+  state: ANCHOR_STATE.RENDERED,
+  where: `0-based page ${box.page} of our rendering`,
+  detail:
+    (anchor === null
+      ? "This passage has a rectangle recovered from this appliance's rendition of the " +
+        "document and no address in the source itself" +
+        (sourceUnresolved === null
+          ? ". "
+          : `: ${sourceUnresolved.reason ?? "(no reason)"} ` +
+            `(${sourceUnresolved.code ?? "(no code)"}). `)
+      : `This passage is at ${describeSourceAnchor(anchor)}, which is the durable citation, ` +
+        "and the rectangle is a picture of it. ") +
+    "The page number is LibreOffice's pagination of a document that has none of its own " +
+    "(render:pdf), and the rectangle was recovered by finding the passage in it " +
+    "(anchor:render) — so it can be drawn and it can be wrong, where the address cannot be " +
+    "wrong and cannot be drawn.",
+  anchor,
+  unresolved: sourceUnresolved,
+});
+
+/** The two source anchors that can sit under a recovered rectangle, in a badge's words. */
+const describeSourceAnchor = (anchor) =>
+  anchor.kind === "ooxml"
+    ? `${anchor.path} of ${anchor.part}`
+    : `chars ${anchor.char_start}–${anchor.char_end}`;
+
+/**
+ * Exactly located, and no rectangle anywhere. See `ANCHOR_STATE.ADDRESSED`.
+ *
+ * The detail is a statement about this APPLIANCE, not about the document and no longer about
+ * the schedule: nothing is missing from the record, and what is missing is a rendition to
+ * measure a rectangle against. It said "Block G step 33" in the future tense until that step
+ * shipped and this page learnt to read its row; the two states it now separates — nothing has
+ * paginated this document, and a rectangle was looked for in the rendition and not found — are
+ * the reason the sentence had to stop being about a step number.
+ */
+const addressed = (anchor, where, renditionUnresolved = null) => ({
   state: ANCHOR_STATE.ADDRESSED,
   where,
   detail:
     "This passage is addressed exactly, in the source package's own structure, and has no " +
-    "rectangle: an office document has no pages until render:pdf paginates it. Recovering a " +
-    "box from that rendition is docs/SPRINT_0_6_0.md Block G step 33.",
+    "rectangle: an office document has no pages until render:pdf paginates it. " +
+    (renditionUnresolved === null
+      ? "This appliance has no rectangle recovered from a rendition of this document — either " +
+        "render:pdf has not run on it, or there is no converter configured (JMFTS_CONVERT_URL)."
+      : `A rectangle WAS looked for in this appliance's rendition and not found: ` +
+        `${renditionUnresolved.reason ?? "(no reason)"} ` +
+        `(${renditionUnresolved.code ?? "(no code)"}). The address above is unaffected.`),
   anchor,
   unresolved: null,
 });
+
+/** No anchor, and a row saying why. `what` names WHICH rectangle was not recovered. */
+const unresolvedState = (unresolved, what, anchor = null) => {
+  const code = typeof unresolved.code === "string" ? unresolved.code : "(no code)";
+  const reason = typeof unresolved.reason === "string" ? unresolved.reason : "(no reason)";
+  return {
+    state: ANCHOR_STATE.UNRESOLVED,
+    where: `${what}: ${code}`,
+    // The sentence is carried through verbatim. It was written for a human to read at
+    // `citation_tasks.py:284`; rewriting it here would replace an explanation with a shrug.
+    detail: reason,
+    anchor,
+    unresolved,
+  };
+};
 
 const unreadable = (anchor, detail) => ({
   state: ANCHOR_STATE.UNREADABLE,
@@ -530,12 +672,24 @@ const unreadable = (anchor, detail) => ({
  */
 export const PRESETS_PATH = "/presets";
 
-/** The three values one hit hands over. `null` for a row the hit does not carry. */
+/**
+ * The FIVE values one hit hands over. `null` for a row the hit does not carry.
+ *
+ * Two pairs and an id, in the shape `render/surfaces.js`'s `anchorPair` returns, so the detail
+ * view reads one record whether it came from a hit or from `GET /documents/{id}/evidence`. The
+ * rendition pair rides along for the same reason the source pair does — without it a `.docx`
+ * hit whose rectangle exists would arrive at a page that has to call `/evidence` to find out,
+ * which is the round trip IC-4 put these rows on the hit to remove.
+ */
 function citationOf(hit) {
   return {
     documentId: readDocument(readHit(hit, "document"), "id"),
     anchor: readHit(hit, "source_anchor"),
     unresolved: readHit(hit, "source_anchor_unresolved"),
+    rendition: {
+      anchor: readHit(hit, "render_anchor"),
+      unresolved: readHit(hit, "render_anchor_unresolved"),
+    },
   };
 }
 

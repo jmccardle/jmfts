@@ -18,12 +18,25 @@ from __future__ import annotations
 
 from jmfts_client.contracts.explain import (
     AnalyzedFile,
+    CountResponse,
     ExplainedTaskResponse,
     ExplainIngestResponse,
+    PlanCostResponse,
+    UnmeasuredResponse,
 )
 
-from jmfts_core.ingest_tasks import ExplainedPlan, ExplainedTask
+from jmfts_core.ingest_tasks import Count, ExplainedPlan, ExplainedTask, PlanCost
 from jmfts_core.probe import FormatDetection
+
+
+def count_response(count: Count) -> CountResponse:
+    """The wire form of one interval. ``SPRINT_JOBS.md`` 7.1.
+
+    ``high`` crosses as ``null`` when the fold could not measure it, which is the same
+    distinction the dataclass carries and not a JSON convenience: a number there would be a
+    ceiling this appliance is claiming, and 7.2 is that it never claims one it did not take.
+    """
+    return CountResponse(low=count.low, high=count.high)
 
 
 def task_response(task: ExplainedTask) -> ExplainedTaskResponse:
@@ -40,6 +53,28 @@ def task_response(task: ExplainedTask) -> ExplainedTaskResponse:
         requires=list(task.requires),
         forbids=list(task.forbids),
         params=task.params,
+        multiplicity=count_response(task.multiplicity),
+        writes=count_response(task.writes),
+        writes_usetype=task.writes_usetype,
+        writes_basis=task.writes_basis,
+    )
+
+
+def cost_response(cost: PlanCost) -> PlanCostResponse:
+    """The wire form of the cost fold. Part 7."""
+    return PlanCostResponse(
+        tasks=count_response(cost.tasks),
+        nodes=count_response(cost.nodes),
+        by_cost_class={name: count_response(count) for name, count in cost.by_cost_class.items()},
+        unmeasured=[
+            UnmeasuredResponse(
+                evidence=entry.evidence,
+                needed_by=entry.needed_by,
+                written_by=entry.written_by,
+            )
+            for entry in cost.unmeasured
+        ],
+        not_counted=list(cost.not_counted),
     )
 
 
@@ -53,6 +88,7 @@ def explain_response_from_plan(plan: ExplainedPlan) -> ExplainIngestResponse:
         patterns_ignored=list(plan.patterns_ignored),
         options=plan.options,
         tasks=[task_response(task) for task in plan.tasks],
+        cost=cost_response(plan.cost),
     )
 
 

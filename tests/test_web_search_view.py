@@ -179,6 +179,33 @@ def test_the_view_brings_its_own_stylesheet_and_index_html_is_untouched():
     assert 'new URL("./search.css", import.meta.url)' in _source()
 
 
+def test_the_three_located_states_do_not_look_alike(tmp_path):
+    """A state the page computes and draws identically to another is a state it does not have.
+
+    ``anchored``, ``addressed`` and ``rendered`` are three different answers to "can I see where
+    this came from" — the document's own rectangle, an exact address with no rectangle anywhere,
+    and an exact address with a rectangle recovered from THIS APPLIANCE'S rendering. All three
+    are good news and all three take the accent colour, which is exactly why the border style
+    has to separate them: a new state whose badge class had no rule would render as the plain
+    badge, and a reader scanning a result list would be told nothing by the thing that is meant
+    to tell them.
+    """
+    css = (STATIC / "views" / "search.css").read_text(encoding="utf-8")
+    styles = {}
+    for state in ("anchored", "addressed", "rendered"):
+        selector = f".search-badge.{state}"
+        assert selector in css, f"{state} has no badge rule, so it draws as the default badge"
+        body = css.split(selector, 1)[1].split("}", 1)[0]
+        # CSS's own default for a bordered element is `solid`, so a rule that names no
+        # border-style is the solid one rather than an unstyled one.
+        styles[state] = (
+            "solid"
+            if "border-style" not in body
+            else body.split("border-style:")[1].split(";")[0].strip()
+        )
+    assert len(set(styles.values())) == 3, styles
+
+
 # ---------------------------------------------------------- the fields the contracts carry
 
 
@@ -276,6 +303,13 @@ UNRESOLVED = {"code": "no_source_span", "reason": "the chunk predates source spa
 #: ``471e8f7``. Exactly addressed and with no rectangle by construction, which is a fourth state
 #: for this page rather than a fourth spelling of "anchored" — see ``ANCHOR_STATE.ADDRESSED``.
 OOXML_ANCHOR = {"kind": "ooxml", "part": "word/document.xml", "path": "/w:document/w:body/w:p[42]"}
+#: ``anchor:render``'s shape — the SAME passage's rectangle, recovered from the rendition
+#: ``render:pdf`` produced. ``of="rendition"`` is the field that says whose pagination the page
+#: number belongs to, and it rides on the anchor so that a badge stays right after the value has
+#: travelled through a URL fragment.
+RENDER_ANCHOR = {"kind": "pdf", "of": "rendition", "page": 1, "bbox": [90.0, 220.0, 505.0, 310.0]}
+#: The other branch of the same rung: a rendition exists and this passage was not findable in it.
+RENDER_UNRESOLVED = {"code": "not_found_in_rendition", "reason": "the text did not match"}
 
 
 def _hits() -> list[SearchResultItem]:
@@ -646,17 +680,22 @@ ANCHOR_HARNESS = textwrap.dedent("""
     const { readDetailParams, CitationRouteError } =
       await import("%(static)s/shell/citation.js");
 
-    const hit = (anchor, unresolved) => ({
+    // FOUR ROWS, because a `SearchResultItem` carries four: the source pair and the rendition
+    // pair. `reader()` refuses a field this view has not declared AND a field the response does
+    // not carry, so a hit built with two would fail here rather than badge every office hit
+    // wrong — which is the discipline working, and the reason this helper grew two arguments.
+    const hit = (anchor, unresolved, render = null, renderUnresolved = null) => ({
       document: { id: 1, title: "t", usetype: "chunk", content: "c",
                   content_source: "stored", produced_by: null },
       score: 1, method: "vector",
       source_anchor: anchor, source_anchor_unresolved: unresolved,
+      render_anchor: render, render_anchor_unresolved: renderUnresolved,
     });
     const ANCHORS = %(anchors)s;
 
     const out = { states: {}, vocabulary: ANCHOR_STATE, roundTrip: {}, refusals: {} };
-    const state = (label, anchor, unresolved) => {
-      const answer = anchorState(hit(anchor, unresolved));
+    const state = (label, anchor, unresolved, render = null, renderUnresolved = null) => {
+      const answer = anchorState(hit(anchor, unresolved, render, renderUnresolved));
       out.states[label] = { state: answer.state, where: answer.where, detail: answer.detail };
     };
     state("anchored", ANCHORS.pdf, null);
@@ -669,9 +708,19 @@ ANCHOR_HARNESS = textwrap.dedent("""
     state("unknown kind", { kind: "waveform" }, null);
     state("malformed pdf", { kind: "pdf", bbox: [1, 2, 3, 4] }, null);
     state("malformed ooxml", { kind: "ooxml", part: "word/document.xml" }, null);
+    // The office states the rendition pair adds.
+    state("rendered", ANCHORS.ooxml, null, ANCHORS.render);
+    state("rendered span", ANCHORS.span, null, ANCHORS.render);
+    state("box only", null, null, ANCHORS.render);
+    state("box with a lost address", null, ANCHORS.unresolved, ANCHORS.render);
+    state("not in rendition", ANCHORS.ooxml, null, null, ANCHORS.renderUnresolved);
+    state("render contradictory", ANCHORS.ooxml, null, ANCHORS.render, ANCHORS.renderUnresolved);
+    state("malformed render", ANCHORS.ooxml, null, { kind: "pdf", bbox: [1, 2, 3, 4] });
 
     out.roundTrip.anchored = readDetailParams(detailParams(hit(ANCHORS.pdf, null)));
     out.roundTrip.bare = readDetailParams(detailParams(hit(null, null)));
+    out.roundTrip.office = readDetailParams(
+      detailParams(hit(ANCHORS.ooxml, null, ANCHORS.render)));
 
     const refuse = (label, fn) => {
       try { fn(); out.refusals[label] = null; }
@@ -688,8 +737,8 @@ ANCHOR_HARNESS = textwrap.dedent("""
 
 
 @needs_node
-def test_the_three_anchor_absences_are_three_different_answers(tmp_path):
-    """ "No anchor" and "no anchor could be recovered" are not the same fact.
+def test_every_anchor_state_a_hit_can_be_in_is_its_own_answer(tmp_path):
+    """ "No anchor" and "no anchor could be recovered" are not the same fact, and nor are four more.
 
     ``jmfts_core/evidence.py:453`` says the unresolved row is present exactly when the anchor is
     not, so a page that drew nothing for both would be hiding the second — the same rule
@@ -697,6 +746,12 @@ def test_the_three_anchor_absences_are_three_different_answers(tmp_path):
     rather than spelling them again. Both rows at once is a contradiction the appliance should
     not be able to produce; it is SHOWN in the bad colour rather than thrown, because a hit with
     a broken evidence row is still a hit and the six beside it are fine.
+
+    **This was three states, then four, and is now five plus two faults.** The rendition pair
+    (``render_anchor``, ``render_anchor.unresolved``) is what a ``.docx`` hit carries in addition
+    to its exact address, and it decides whether "show me where" is on offer for that hit — which
+    is a question a result list has to answer for ten hits at once, and therefore one the hit has
+    to arrive carrying rather than one a per-hit ``/evidence`` call finds out.
     """
     anchors = json.dumps(
         {
@@ -705,6 +760,8 @@ def test_the_three_anchor_absences_are_three_different_answers(tmp_path):
             "span": {"kind": "span", "char_start": 100, "char_end": 240},
             "ooxml": OOXML_ANCHOR,
             "unresolved": UNRESOLVED,
+            "render": RENDER_ANCHOR,
+            "renderUnresolved": RENDER_UNRESOLVED,
         }
     )
     result = _node(tmp_path, ANCHOR_HARNESS.replace("%(anchors)s", anchors))
@@ -735,8 +792,12 @@ def test_the_three_anchor_absences_are_three_different_answers(tmp_path):
     # whole citation feature turns on stops existing.
     assert states["ooxml"]["state"] == "addressed"
     assert states["ooxml"]["where"] == "/w:document/w:body/w:p[42] of word/document.xml"
-    assert "step 33" in states["ooxml"]["detail"], "it says what would draw the box, and when"
     assert states["ooxml"]["state"] != states["unresolved"]["state"]
+    # It used to say "Block G step 33" — the step that would draw the box, in the future tense.
+    # That step shipped and this page reads its row, so what it has to say instead is WHY this
+    # particular node has no rectangle, which is a fact about this appliance and not a date.
+    assert "step 33" not in states["ooxml"]["detail"]
+    assert "JMFTS_CONVERT_URL" in states["ooxml"]["detail"]
 
     assert states["unknown kind"]["state"] == "unreadable"
     assert "older than the appliance" in states["unknown kind"]["detail"]
@@ -745,14 +806,61 @@ def test_the_three_anchor_absences_are_three_different_answers(tmp_path):
     # this page cannot read, which is a different answer again from one it can.
     assert states["malformed ooxml"]["state"] == "unreadable"
 
+    # THE FIFTH ANSWER: exactly addressed AND drawable, on a rendering this appliance made. A
+    # separate word from `anchored` because authority runs opposite to drawability — an
+    # `anchored` hit's rectangle is the document's own geometry and cannot be wrong, and this
+    # one's is LibreOffice's pagination of a document that has no pages of its own.
+    assert states["rendered"]["state"] == "rendered"
+    assert states["rendered"]["where"] == "0-based page 1 of our rendering"
+    assert "/w:document/w:body/w:p[42] of word/document.xml" in states["rendered"]["detail"]
+    assert "durable citation" in states["rendered"]["detail"]
+    assert "can be drawn and it can be wrong" in states["rendered"]["detail"]
+    assert states["rendered span"]["state"] == "rendered"
+    assert states["box only"]["state"] == "rendered"
+    assert "no address in the source itself" in states["box only"]["detail"]
+    # A rectangle turning up does not merge the two source absences. "There is no address" and
+    # "the address could not be recovered, and here is why" stay different answers, so the
+    # recorded reason is carried onto a hit that has a box anyway.
+    assert states["box with a lost address"]["state"] == "rendered"
+    assert UNRESOLVED["reason"] in states["box with a lost address"]["detail"]
+
+    # And the state that is neither: a rendition exists, the passage was not found in it. The
+    # address is still exact, so this is not "we have no idea where this is" — the badge says
+    # `addressed` and the reason names the rendition rather than the source.
+    assert states["not in rendition"]["state"] == "addressed"
+    assert "not found" in states["not in rendition"]["detail"]
+    assert "the text did not match" in states["not in rendition"]["detail"]
+    assert "unaffected" in states["not in rendition"]["detail"]
+
+    # The same contradiction rule, one anchor over (`evidence.py:519`), and the same refusal to
+    # pick a side. A `render_anchor` this page cannot read is `unreadable` rather than a hit
+    # badged "rendered" whose box the detail view would then decline to draw.
+    assert states["render contradictory"]["state"] == "contradictory"
+    assert "519" in states["render contradictory"]["detail"]
+    assert states["malformed render"]["state"] == "unreadable"
+    assert "anchor:render" in states["malformed render"]["detail"]
+
     # The hand-off round-trips, and BOTH keys come back even when both are null — the shape
-    # `highlight()` refuses to be called without.
+    # `highlight()` refuses to be called without. TWO PAIRS now, for the office case.
+    empty = {"anchor": None, "unresolved": None}
     assert result["roundTrip"]["anchored"] == {
         "documentId": 1,
         "anchor": PDF_ANCHOR,
         "unresolved": None,
+        "rendition": empty,
     }
-    assert result["roundTrip"]["bare"] == {"documentId": 1, "anchor": None, "unresolved": None}
+    assert result["roundTrip"]["bare"] == {
+        "documentId": 1,
+        "anchor": None,
+        "unresolved": None,
+        "rendition": empty,
+    }
+    assert result["roundTrip"]["office"] == {
+        "documentId": 1,
+        "anchor": OOXML_ANCHOR,
+        "unresolved": None,
+        "rendition": {"anchor": RENDER_ANCHOR, "unresolved": None},
+    }, "the rectangle survives the URL, which is what stops a reload downgrading a citation"
 
     # A torn fragment is not "no anchor". Reading it as one is how a highlight silently stops
     # appearing on a link somebody edited by hand.

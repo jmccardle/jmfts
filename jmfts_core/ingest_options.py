@@ -73,7 +73,7 @@ reports options the run will not use is a wrong answer, not a partial one.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 from jmfts_core.chunking import ChunkStrategy
 
@@ -644,23 +644,68 @@ def _apply(resolved: dict[str, dict], overrides: dict, *, fmt: str, source: str)
             )
         checks = OPTION_CHECKS[group]
         for name, value in values.items():
+            # The source is NAMED in both refusals, and 5.1's ancestor walk is why it had
+            # to be. With several layers, a caller told "unknown option structure.max_tokn"
+            # about a set they did not write goes looking for a bug in their own request —
+            # so the message says which layer, the way the two refusals above already did.
             if name not in resolved[group]:
                 raise ValueError(
-                    f"unknown option {group}.{name}; options in {group!r} are "
+                    f"unknown option {group}.{name} in {source}; options in {group!r} are "
                     f"{sorted(resolved[group])}"
                 )
             problem = checks[name](value)
             if problem is not None:
-                raise ValueError(f"option {group}.{name}: {problem}")
+                raise ValueError(f"option {group}.{name}: {problem} (in {source})")
             resolved[group][name] = value
 
 
-def resolve_options(fmt: str, overrides: Optional[dict] = None) -> dict[str, dict]:
-    """The options one document is ingested with. Three layers, resolved in order::
+def merge_option_layers(*layers: Optional[dict]) -> dict[str, dict]:
+    """Combine partial override sets into one, later layers winning per OPTION.
+
+    Per option and not per group, which is the whole of ``SPRINT_JOBS.md`` 5.1 point 1: a
+    collection that sets ``structure.max_tokens`` and a child collection that sets
+    ``structure.chunk_strategy`` must both survive, and a group-level replacement would
+    silently drop the first.
+
+    STILL A PARTIAL SET. This does not resolve — it says what a stack of declarations asks
+    for, without the task defaults or the format profile beneath it, because those need a
+    format and a declaration has no bytes. :func:`resolve_options` is what turns it into
+    the complete set a run uses, and ``tests/test_collection_options.py`` holds the two to
+    the same answer: merging then resolving and resolving with ``inherited=`` must agree,
+    or the forecast and the run would layer differently.
+
+    Nothing is validated here. Every caller either hands the result to
+    :func:`resolve_options` or is reporting what is already stored.
+    """
+    merged: dict[str, dict] = {}
+    for layer in layers:
+        for group, values in (layer or {}).items():
+            merged.setdefault(group, {}).update(values)
+    return merged
+
+
+def resolve_options(
+    fmt: str,
+    overrides: Optional[dict] = None,
+    *,
+    inherited: Sequence[Optional[dict]] = (),
+) -> dict[str, dict]:
+    """The options one document is ingested with. Layers, resolved in order::
 
         TASK_PARAM_DEFAULTS[group]        the task's parameters — valid wherever it runs
           <- INGEST_PROFILES[fmt][group]  this format deviates
-            <- overrides                  this request deviates
+            <- inherited, root-first      each collection above it deviates
+              <- overrides                this request deviates
+
+    **``inherited`` MAKES THE LAYER COUNT N, AND ``SPRINT_JOBS.md`` 5.1 IS WHY.** A
+    collection is a subtree, so a setting on a node reaches the documents beneath it — and
+    a caller who puts ``structure.max_tokens`` on ``/papers`` and ``facts.enabled`` on
+    ``/papers/2026`` must get both. Nearest-wins would give them only the second, which
+    means a collection could not refine its parent without restating it, and a restatement
+    is the copy-drift ``DECLARED_STRUCTURE`` and ``INGEST_OWNED_KEYS`` are both on the
+    record for. ROOT-FIRST, because the nearer layer has to be applied last to win a key
+    contest. Every layer is validated exactly as a request's is: a set that was valid when
+    it was written stays valid, and checking it again costs a dict walk.
 
     The ONE place options are merged. ``plan_after_probe`` calls it, so does the upload
     that records them, so will 11.2's ``EXPLAIN`` — and the result is always a COMPLETE set
@@ -684,6 +729,9 @@ def resolve_options(fmt: str, overrides: Optional[dict] = None) -> dict[str, dic
     profile = get_profile(fmt)
     if profile:
         _apply(resolved, profile, fmt=fmt, source="the format profile")
+    for depth, layer in enumerate(inherited):
+        if layer:
+            _apply(resolved, layer, fmt=fmt, source=f"a collection's options (level {depth})")
     if overrides:
         _apply(resolved, overrides, fmt=fmt, source="ingest options")
     return resolved

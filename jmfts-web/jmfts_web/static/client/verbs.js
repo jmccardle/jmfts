@@ -531,6 +531,15 @@ export class JmftsClient extends JmftsTransport {
   }
 
   /**
+   * What a collection asks of the documents ingested under it
+   *
+   * `GET /documents/{document_id}/ingest-options` — IngestService.get_collection_options
+   */
+  get_collection_options(args = {}) {
+    return this.call("IngestService.get_collection_options", args);
+  }
+
+  /**
    * Ingest content through a named pipeline
    *
    * `POST /ingest` — IngestService.ingest_content
@@ -546,6 +555,15 @@ export class JmftsClient extends JmftsTransport {
    */
   list_registered_pipelines(args = {}) {
     return this.call("IngestService.list_registered_pipelines", args);
+  }
+
+  /**
+   * Set what a collection asks of the documents ingested under it
+   *
+   * `PUT /documents/{document_id}/ingest-options` — IngestService.set_collection_options
+   */
+  set_collection_options(args = {}) {
+    return this.call("IngestService.set_collection_options", args);
   }
 
   /**

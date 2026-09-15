@@ -1368,6 +1368,7 @@ export const OPERATIONS = Object.freeze(
     "path_params": [],
     "path_slash_params": [],
     "query_params": [
+      "parent_id",
       "private"
     ],
     "body_param": null,
@@ -1433,6 +1434,30 @@ export const OPERATIONS = Object.freeze(
     ],
     "summary": "Progress for an in-flight ingestion: nodes settled, in flight, failed"
   },
+  "IngestService.get_collection_options": {
+    "op_id": "IngestService.get_collection_options",
+    "operation_id": "IngestService_get_collection_options_documents__document_id__ingest_options_get",
+    "python_verb": "get_collection_options",
+    "method": "GET",
+    "path": "/documents/{document_id}/ingest-options",
+    "path_params": [
+      "document_id"
+    ],
+    "path_slash_params": [],
+    "query_params": [],
+    "body_param": null,
+    "body_media_type": null,
+    "form_params": [],
+    "file_params": [],
+    "binary": false,
+    "response_media_type": "application/json",
+    "success_status": 200,
+    "security_scheme": "JMFTSToken",
+    "tags": [
+      "ingest"
+    ],
+    "summary": "What a collection asks of the documents ingested under it"
+  },
   "IngestService.ingest_content": {
     "op_id": "IngestService.ingest_content",
     "operation_id": "IngestService_ingest_content_ingest_post",
@@ -1476,6 +1501,30 @@ export const OPERATIONS = Object.freeze(
       "ingest"
     ],
     "summary": "List the entry points POST /ingest accepts"
+  },
+  "IngestService.set_collection_options": {
+    "op_id": "IngestService.set_collection_options",
+    "operation_id": "IngestService_set_collection_options_documents__document_id__ingest_options_put",
+    "python_verb": "set_collection_options",
+    "method": "PUT",
+    "path": "/documents/{document_id}/ingest-options",
+    "path_params": [
+      "document_id"
+    ],
+    "path_slash_params": [],
+    "query_params": [],
+    "body_param": "request",
+    "body_media_type": "application/json",
+    "form_params": [],
+    "file_params": [],
+    "binary": false,
+    "response_media_type": "application/json",
+    "success_status": 200,
+    "security_scheme": "JMFTSToken",
+    "tags": [
+      "ingest"
+    ],
+    "summary": "Set what a collection asks of the documents ingested under it"
   },
   "IngestService.upload_file": {
     "op_id": "IngestService.upload_file",

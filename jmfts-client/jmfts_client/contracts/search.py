@@ -327,6 +327,45 @@ class SearchResultItem(BaseModel):
         description="The source_anchor.unresolved row: why no anchor was recovered.",
     )
 
+    #: THE OTHER ANCHOR, for the same reason the first one is here. A ``.docx`` hit carries an
+    #: exact ``ooxml`` address in :attr:`source_anchor` and — once ``render:pdf`` has paginated
+    #: it and ``anchor:render`` has recovered geometry from that rendition — a page and a
+    #: rectangle in ``render_anchor``, a :class:`~jmfts_client.contracts.anchor.PdfAnchor` whose
+    #: ``of`` is ``"rendition"``. ``OFFICE_SPEC.md`` Part 5's "Two anchors, not one".
+    #:
+    #: **Added because without it the office half of IC-4 is not paid.** The round trip this
+    #: field removes is the same one :attr:`source_anchor` removes, one format over: a result
+    #: list deciding whether to offer "show me where" for ten office hits would otherwise call
+    #: ``GET /documents/{id}/evidence`` ten times, and a hit that navigated carrying only its
+    #: source address would take a page that can draw a rectangle to a page that says there
+    #: isn't one. Four rows, still ONE batched read — ``_items`` widens
+    #: :meth:`EvidenceRepository.read_many_named` by two names rather than adding a query.
+    #:
+    #: ``None`` is the ordinary case and will stay the ordinary case: an appliance with no
+    #: LibreOffice configured produces no renditions at all, and a source PDF never has one
+    #: because it needs none.
+    render_anchor: Optional[dict] = Field(
+        default=None,
+        description="The render_anchor evidence row: a page and a rectangle recovered from "
+        "this appliance's rendition of the document. Approximate, and says so with "
+        'of="rendition".',
+    )
+
+    #: Why this hit has no rectangle in the rendition, when one was looked for and not found.
+    #: The ``render_anchor.unresolved`` row, present exactly when :attr:`render_anchor` is not
+    #: (``jmfts_core/evidence.py:519``). Partial recovery is a COMPLETED task
+    #: (``OFFICE_SPEC.md`` Part 5), so this is an ordinary outcome and not an error.
+    #:
+    #: **Four fields, four absences, and a viewer needs all four.** "Nothing has paginated this
+    #: document", "a rectangle was looked for in the rendition and not found", "this passage is
+    #: addressed exactly and has no rectangle" and "nothing was ever recorded here" are four
+    #: different answers, and two fields can only carry two of them.
+    render_anchor_unresolved: Optional[dict] = Field(
+        default=None,
+        description="The render_anchor.unresolved row: why no rectangle was recovered from "
+        "the rendition.",
+    )
+
 
 class SearchResponse(BaseModel):
     """Search response.

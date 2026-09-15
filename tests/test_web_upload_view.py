@@ -45,9 +45,12 @@ from jmfts_client.contracts.explain import (
     AlreadyStored,
     AnalyzedFile,
     AnalyzeIngestResponse,
+    CountResponse,
     ExplainedTaskResponse,
     ExplainIngestResponse,
+    PlanCostResponse,
     ProbeFailure,
+    UnmeasuredResponse,
 )
 from jmfts_client.contracts.ingest import IngestResponse, PipelineInfo
 from jmfts_client.contracts.upload import FileUploadResponse, IngestFrontierResponse
@@ -80,17 +83,35 @@ CONTRACTS: dict[str, type[BaseModel]] = {
 # ------------------------------------------------------------------------------- fixtures
 
 
+#: The two counts every plan row carries since the cost fold (``SPRINT_JOBS.md`` Part 7).
+#: STATED HERE RATHER THAN DEFAULTED ON THE CONTRACT: `[1, 1]` is right for a root-scoped
+#: row and silently wrong for a `profile:sheet`, which runs once per sheet — a default on
+#: the wire model would be a plausible number for a question the server had not answered.
+ONCE = CountResponse(low=1, high=1)
+NEVER = CountResponse(low=0, high=0)
+
+
+def _row(**fields) -> ExplainedTaskResponse:
+    """One plan row, with counts that suit its outcome unless the caller states others."""
+    fields.setdefault("multiplicity", ONCE if fields["outcome"] == "enqueued" else NEVER)
+    fields.setdefault("writes", NEVER)
+    return ExplainedTaskResponse(**fields)
+
+
 def _plan(*, known: bool = True, source: str = "probed") -> ExplainIngestResponse:
     """A forecast with one row of every outcome that decides, plus one that does not."""
     return ExplainIngestResponse(
         format="xlsx",
         prober_available=True,
+        # A misspelling, not a measurement: `sheet_count` stopped being an ignored key when
+        # `structure:sheets`' fan-out bound started dividing by it (Part 7), so a fixture
+        # naming it here would describe an answer the appliance no longer gives.
+        patterns_ignored=["has_text_lyer"],
         patterns_known=known,
         patterns_source=source,
-        patterns_ignored=["sheet_count"],
         options={"structure": {"max_tokens": 120}},
         tasks=[
-            ExplainedTaskResponse(
+            _row(
                 task="probe",
                 outcome="enqueued",
                 after=[],
@@ -99,7 +120,7 @@ def _plan(*, known: bool = True, source: str = "probed") -> ExplainIngestRespons
                 params={},
                 write_mode="self",
             ),
-            ExplainedTaskResponse(
+            _row(
                 task="structure:sheets",
                 outcome="enqueued",
                 after=["probe"],
@@ -107,8 +128,11 @@ def _plan(*, known: bool = True, source: str = "probed") -> ExplainIngestRespons
                 forbids=[],
                 params={"max_tokens": 120},
                 write_mode="children",
+                writes=CountResponse(low=3, high=3),
+                writes_usetype="sheet",
+                writes_basis="one node per sheet",
             ),
-            ExplainedTaskResponse(
+            _row(
                 task="profile:sheet",
                 outcome="enqueued",
                 scope="@children_of(structure:sheets):sheet",
@@ -116,8 +140,12 @@ def _plan(*, known: bool = True, source: str = "probed") -> ExplainIngestRespons
                 requires=[],
                 forbids=[],
                 params={},
+                multiplicity=CountResponse(low=3, high=3),
+                writes=CountResponse(low=3, high=3),
+                writes_usetype="profile",
+                writes_basis="always 1",
             ),
-            ExplainedTaskResponse(
+            _row(
                 task="extract:text",
                 outcome="impossible",
                 reason="xlsx declares no text layer, whatever the bytes are",
@@ -126,7 +154,7 @@ def _plan(*, known: bool = True, source: str = "probed") -> ExplainIngestRespons
                 forbids=[],
                 params={},
             ),
-            ExplainedTaskResponse(
+            _row(
                 task="extract:facts",
                 outcome="skipped",
                 reason="no LLM is configured",
@@ -135,7 +163,7 @@ def _plan(*, known: bool = True, source: str = "probed") -> ExplainIngestRespons
                 forbids=[],
                 params={},
             ),
-            ExplainedTaskResponse(
+            _row(
                 task="citation",
                 outcome="conditional" if not known else "not_applicable",
                 if_condition_holds="enqueued" if not known else None,
@@ -144,8 +172,26 @@ def _plan(*, known: bool = True, source: str = "probed") -> ExplainIngestRespons
                 requires=["has_page_geometry"],
                 forbids=[],
                 params={},
+                multiplicity=CountResponse(low=0, high=None) if not known else NEVER,
             ),
         ],
+        cost=PlanCostResponse(
+            tasks=CountResponse(low=8, high=None),
+            nodes=CountResponse(low=6, high=None),
+            by_cost_class={
+                "cpu": CountResponse(low=7, high=None),
+                "model": CountResponse(low=0, high=None),
+                "llm": NEVER,
+            },
+            unmeasured=[
+                UnmeasuredResponse(
+                    evidence="sheet.measurements.rows",
+                    needed_by="extract:sheet",
+                    written_by="profile:sheet writes it (measurements)",
+                )
+            ],
+            not_counted=["these totals are Part 4's table only"],
+        ),
     )
 
 

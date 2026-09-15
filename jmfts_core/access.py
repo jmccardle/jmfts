@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 from jmfts_core.database import get_session
 from jmfts_core.models.document import Document, DocumentLink
 from jmfts_core.models.principal import AccessGrant, ApiToken, Principal
+from jmfts_core.models.triple import Triple
 from jmfts_core.principal_context import CurrentPrincipal, get_current_principal
 
 
@@ -362,8 +363,9 @@ def require_add_child(
 def require_edge_write(
     session: Session,
     source_id: int,
-    target_id: int,
+    target_id: Optional[int],
     principal: Optional[CurrentPrincipal] = None,
+    action: str = "create a link from",
 ) -> None:
     """Enforce CREATING an edge ``source → target``: write on source, read on target.
 
@@ -383,6 +385,12 @@ def require_edge_write(
     Takes ids rather than ``Document`` rows so that the bypass path — owner, unbound
     in-process callers, and every deployment with no grants — does not pay for two loads
     it will not read. That matters: ``summarization.py`` mints one bridge edge per pair.
+
+    ``target_id`` is Optional because :func:`require_triple_write` shares this body and a
+    triple's object may be a LITERAL, which is not a document and has no read rule of its
+    own. ``document_links.target_id`` is NOT NULL, so the link path never passes None.
+    ``action`` names the verb in the 403 so that the other edge table's denial does not
+    read as "create a link from".
     """
     if principal is None:
         principal = get_current_principal()
@@ -392,7 +400,9 @@ def require_edge_write(
     if source is None or not can_read(session, source, principal):
         raise LookupError(f"Document {source_id} not found")
     if not can_write(session, source, principal):
-        raise AccessDeniedError(source_id, "create a link from")
+        raise AccessDeniedError(source_id, action)
+    if target_id is None:
+        return
     target = session.get(Document, target_id)
     if target is None or not can_read(session, target, principal):
         raise LookupError(f"Document {target_id} not found")
@@ -439,6 +449,93 @@ def require_edge_delete(
         # message is about the EDGE rather than about which end it was reached by.
         raise AccessDeniedError(link.source_id, "delete a link on")
     raise LookupError(f"Link {link.id} not found")
+
+
+# --- The same two gates on the other edge table: triples ---------------------------
+#
+# `SPRINT_0_6_0.md` step 35. A triple is a directed edge between two documents and the
+# argument of Part 4 question 4.1 does not change because the table does, so the rule is
+# the one above: WRITE on the subject, READ on the object. These are named doors onto
+# `require_edge_write` / the `require_edge_delete` rule rather than a second
+# implementation of either — the whole point of the step is that it is the SAME answer.
+#
+# The one thing the other table cannot express is a LITERAL object
+# (`ck_triples_object_exactly_one`): "Paris" is a value, not a node, and there is no
+# document behind it to read-gate. The READ side already decided that — `query_triples`
+# checks the subject and lets a null `object_id` through (repositories/triple.py:325), and
+# `TripleService.get_triple` says the same at :439 — so the write side saying anything else
+# would make a fact assertable and then invisible, or refusable for want of a row nobody
+# can point at. WRITE on the subject is the whole gate for a literal fact, and that leaks
+# nothing: the literal discloses no other principal's tree.
+
+
+def require_triple_write(
+    session: Session,
+    subject_id: int,
+    object_id: Optional[int],
+    principal: Optional[CurrentPrincipal] = None,
+) -> None:
+    """Enforce ASSERTING ``subject predicate object``: write on subject, read on object.
+
+    ``object_id is None`` is a literal object and the subject's check is the whole gate;
+    see the section comment above. Failure spellings are :func:`require_edge_write`'s,
+    because they are the same function.
+    """
+    require_edge_write(session, subject_id, object_id, principal, action="assert a fact about")
+
+
+def require_triple_retract(
+    session: Session,
+    triple: Triple,
+    action: str = "retract",
+    principal: Optional[CurrentPrincipal] = None,
+) -> None:
+    """Enforce RETRACTING ``triple`` — delete, invalidate, or supersede.
+
+    :func:`require_edge_delete`'s rule, read off ``triples.derived_by`` instead of
+    ``document_links.derived_by``; the column means the same thing in both tables and is
+    the only record of authorship either row carries.
+
+    * ``derived_by IS NOT NULL`` — a rule derived this fact FROM its subject, so write on
+      the subject is what it takes. Accepting write on the object instead would be a verb
+      that reports success and changes nothing, because the rule puts the row back on its
+      next run (``shacl_rules.apply_derivation``).
+    * ``derived_by IS NULL`` — nothing recorded who asserted it, so write on EITHER
+      endpoint is enough. A literal object has no second endpoint, so the subject is it.
+
+    Existence-hiding, and the 404 says **"Triple not found"** verbatim — the same string
+    ``TripleService`` raises for a triple that genuinely is not there. A gate whose 404
+    body differed from the real one would hand back the existence it was hiding.
+    """
+    if principal is None:
+        principal = get_current_principal()
+    if _bypass(principal):
+        return
+    subject = session.get(Document, triple.subject_id)
+    if subject is None:
+        # The FK says this cannot happen; "not found" is the honest answer if it does.
+        raise LookupError("Triple not found")
+    object_ = session.get(Document, triple.object_id) if triple.object_id is not None else None
+    if triple.object_id is not None and object_ is None:
+        raise LookupError("Triple not found")
+    if triple.derived_by is not None:
+        if not can_read(session, subject, principal):
+            raise LookupError("Triple not found")
+        if not can_write(session, subject, principal):
+            raise AccessDeniedError(triple.subject_id, f"{action} a derived fact about")
+        return
+    if can_write(session, subject, principal) or (
+        object_ is not None and can_write(session, object_, principal)
+    ):
+        return
+    if can_read(session, subject, principal) or (
+        object_ is not None and can_read(session, object_, principal)
+    ):
+        # The subject names the denial for the reason the source does on a link: a fact is
+        # written subject-first everywhere else, and the message is about the FACT rather
+        # than about which end the caller reached it by.
+        raise AccessDeniedError(triple.subject_id, f"{action} a fact about")
+    raise LookupError("Triple not found")
 
 
 # --- Identity: token → principal resolution + owner-only management guard ----------

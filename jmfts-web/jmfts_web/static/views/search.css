@@ -52,12 +52,21 @@
   border: 1px solid var(--line); font-size: .78em;
 }
 .view-search .search-badge.anchored { border-color: var(--accent); color: var(--accent); }
-/* Located exactly, not drawable — `ANCHOR_STATE.ADDRESSED`, which today is every `.docx` and
-   `.pptx` hit. The accent, because the record is complete and nothing failed; DASHED, because
-   the box this colour otherwise promises is Block G step 33 and not on this page. Neither
-   `anchored` nor the bad colour is honest about it, which is the whole reason for the state. */
+/* Located exactly, not drawable — `ANCHOR_STATE.ADDRESSED`, which is a `.docx` or `.pptx` hit
+   on an appliance that has not paginated it. The accent, because the record is complete and
+   nothing failed; DASHED, because the box this colour otherwise promises is not on this page.
+   Neither `anchored` nor the bad colour is honest about it, which is the whole reason for the
+   state. */
 .view-search .search-badge.addressed {
   border-color: var(--accent); border-style: dashed; color: var(--accent);
+}
+/* Located exactly AND drawable, on a rendering this appliance made — `ANCHOR_STATE.RENDERED`.
+   Solid like `anchored`, because a rectangle really is on offer; DOTTED rather than plain,
+   because the rectangle is LibreOffice's pagination and not the document's own, and a badge
+   that looked identical to `anchored` would make the page's one honest distinction — whose
+   page number this is — visible only to somebody who clicked. */
+.view-search .search-badge.rendered {
+  border-color: var(--accent); border-style: dotted; color: var(--accent);
 }
 .view-search .search-badge.unresolved,
 .view-search .search-badge.contradictory,
