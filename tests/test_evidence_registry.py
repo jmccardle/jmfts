@@ -150,15 +150,28 @@ class TestShape:
         rendition's BYTES, which are a large object in ``document_renditions``. An OID is a
         physical address the repository maintains, and this registry is what a caller may read
         and PATCH.
+
+        A SIXTH TIME, the same day again, and it is Block G step 33: ``render_anchor`` and
+        ``render_anchor.unresolved``, the pair ``anchor:render`` writes onto a chunk
+        (``OFFICE_SPEC.md`` Part 5, Part 11 step 8). 49 → 51, 34 → 36, dicts 19 → 21, bare
+        scalars unmoved for the fourth time running.
+
+        Two entries and not one, and it is the SAME rule the ``source_anchor`` pair is
+        registered under — 3.2's "two keys, never one with a null", because "this passage is
+        at page 3 of the rendition" and "this passage could not be found in the rendition"
+        are different facts. What is new is why it is a pair SEPARATE from that one rather
+        than more writers of it: a ``.docx`` carries both at once, an exact ``ooxml`` address
+        and a recovered rectangle, and both tasks are ``subtree``-scoped over the same chunks
+        — so one name would not blur the two, it would have the second overwrite the first.
         """
         stored = [
             e for e in REGISTRY.values() if e.store.kind == STORE_EVIDENCE and not e.store.path
         ]
         dicts = [e for e in stored if e.type == TYPE_DICT]
         stated = {
-            "registry entries": (len(REGISTRY), 49),
-            "evidence rows": (len(stored), 34),
-            "rows that are dicts": (len(dicts), 19),
+            "registry entries": (len(REGISTRY), 51),
+            "evidence rows": (len(stored), 36),
+            "rows that are dicts": (len(dicts), 21),
             "rows that are bare scalars": (len(stored) - len(dicts), 15),
         }
         wrong = {k: v for k, v in stated.items() if v[0] != v[1]}
@@ -458,6 +471,18 @@ UNREACHABLE_HERE = {
         "written by `convert:ooxml`, same reason, and additionally only for a legacy "
         "binary — none of this fixture's files is one"
     ),
+    # Block G step 33's pair, and they are unreachable here TWICE OVER. The weaker reason is
+    # the one above: `anchor:render` reads the rendition `render:pdf` did not produce. The
+    # stronger one is `effective_content`'s, and it is why setting JMFTS_CONVERT_URL would
+    # NOT bring these two back the way it brings back `rendition` — the task is offered by
+    # `IngestRollupPlanner` at the settling boundary rather than by a row of Part 4's table
+    # (`ingest_tasks.TASK_ANCHOR_RENDER` argues why it cannot be one), and `drain_queue` runs
+    # NO_ROLLUP. `tests/test_render_anchors.py` is the run that reaches both rows.
+    "render_anchor": (
+        "written by `anchor:render`, which the rollup planner offers and `drain_queue` runs "
+        "NO_ROLLUP — and which reads a rendition this suite has no LibreOffice to make"
+    ),
+    "render_anchor.unresolved": "the other branch of the same task, same two reasons",
 }
 
 

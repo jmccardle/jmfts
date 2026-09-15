@@ -88,6 +88,7 @@ from jmfts_core.index_tasks import PARAM_OUTSTANDING, outstanding_by_index
 from jmfts_core.ingest_options import resolve_options
 from jmfts_core.ingest_tasks import (
     OPTIONS_KEY,
+    TASK_ANCHOR_RENDER,
     TASK_INDEX_BM25,
     TASK_STRUCTURE_SEMANTIC,
     TASK_SUMMARIZE,
@@ -113,6 +114,7 @@ from jmfts_core.repositories.evidence import (
     evidence_of,
     evidence_value,
 )
+from jmfts_core.repositories.rendition import KIND_PDF, RenditionRepository
 from jmfts_core.repositories.task_queue import TaskQueueRepository
 from jmfts_core.segmentation import Segment, enforce_segment_bounds, pelt_segment
 from jmfts_core.settling import TaskSpec, enqueue_batch
@@ -188,10 +190,12 @@ class IngestRollupPlanner:
     summarize of that root's whole contents — which is why, until it was checked, a derived
     root could not be a parent for anything a rollup did not create.
 
-    **FOUR RUNGS, IN ORDER, ONE PER VISIT.** ``index:bm25`` first where a covering index is
-    behind, then ``structure:semantic`` while the node is too
+    **FIVE RUNGS, IN ORDER, ONE PER VISIT.** ``index:bm25`` first where a covering index is
+    behind, then ``anchor:render`` where this node has a rendition whose rectangles nothing
+    has recovered (``OFFICE_SPEC.md`` Part 11 step 8), then ``structure:semantic`` while the
+    node is too
     wide, then ``summarize`` for its ``effective_content``, then ``summarize:tree`` to hang
-    that summary in the derived tree (``SPRINT_0_5_0.md`` Block C step 11). The fourth is
+    that summary in the derived tree (``SPRINT_0_5_0.md`` Block C step 11). The last is
     gated on the EVIDENCE rather than on the attempt, unlike the three above it: a
     ``summarize`` that reported ``skipped`` is attempted and wrote no summary, so a queue
     row asking to hang one could only ever report ``skipped`` in turn — and a plan that
@@ -253,6 +257,26 @@ class IngestRollupPlanner:
             if (TASK_INDEX_BM25, param_fingerprint(spec.params)) not in attempted:
                 return (spec,)
 
+        # THE SECOND RUNG, AND THE SECOND ONE THAT IS HERE BECAUSE A ROW COULD NOT SAY WHAT
+        # IT WAITS FOR. `OFFICE_SPEC.md` Part 11 step 8: the rectangle a passage occupies on
+        # a page of the rendition. Its precondition is a conjunction — the chunks exist AND a
+        # rendition exists — and `ingest_tasks.TASK_ANCHOR_RENDER` argues the half that makes
+        # it unstateable as a `TaskRow`: `after render:pdf` would gate the claim on that row
+        # being COMPLETED, `render:pdf` is advisory and fails permanently on every appliance
+        # with no LibreOffice, and a task that can never be claimed is a task that is
+        # permanently unfinished — so the file node would never settle and would never enter
+        # an index. Here the question is already answered: the walk reaches this node only
+        # once every task under it has finished, whichever way it finished.
+        #
+        # Offered SECOND, ahead of the two rungs that need a model or an LLM, for the reason
+        # `index:bm25` is offered first: it needs neither, and ordering it behind `summarize`
+        # would make a citation wait on an endpoint that has nothing to do with it.
+        rendition = RenditionRepository(session).get(node.id, KIND_PDF)
+        if rendition is not None:
+            spec = _anchor_render_spec(rendition.content_hash, len(children))
+            if (TASK_ANCHOR_RENDER, param_fingerprint(spec.params)) not in attempted:
+                return (spec,)
+
         if len(children) > options["max_children"]:
             spec = _segment_spec(children, options)
             if (TASK_STRUCTURE_SEMANTIC, param_fingerprint(spec.params)) not in attempted:
@@ -296,6 +320,35 @@ def _index_bm25_spec(outstanding: int) -> TaskSpec:
         task_type=TASK_INDEX_BM25,
         write_mode=WRITE_SELF,
         params={PARAM_OUTSTANDING: outstanding},
+    )
+
+
+def _anchor_render_spec(rendition_hash: str, child_count: int) -> TaskSpec:
+    """``subtree``, for ``citation``'s reason word for word.
+
+    The chunks this annotates are its children only when a region had no title; under a
+    titled section they are grandchildren, and the same document routinely has both. That is
+    the mode `TASK_ROWS` declares for the other two anchor tasks, and declaring the narrower
+    one here would let this run concurrently with an ``embed`` on a chunk it is writing to.
+
+    ``rendition_hash`` IS THE PARAM THAT MATTERS, and it is the one 6.1's diff needs: what
+    makes these rectangles wrong is the rendition being replaced, which is exactly what
+    ``SPRINT_0_6_0.md`` 4.9 says happens after a LibreOffice upgrade (``RenditionRepository
+    .store`` replaces rather than refusing). A new rendition is a new hash, so the pair is new
+    and the task is offered again; an unchanged one is not, so a settle walk that passes this
+    node fifty times queues nothing.
+
+    ``child_count`` beside it for :func:`_summarize_spec`'s reason, and it is deliberately not
+    claimed to be complete: it moves when the tree is restructured under this node and it does
+    NOT move when a re-extraction produces the same number of differently-cut chunks. What
+    covers that case is that re-extraction rewrites the chunks' ``source_span`` rows and
+    ``anchor:source`` runs again — a re-anchor of the rendition is a third thing somebody has
+    to ask for, and pretending a count stands in for it would be the quieter wrong answer.
+    """
+    return TaskSpec(
+        task_type=TASK_ANCHOR_RENDER,
+        write_mode=WRITE_SUBTREE,
+        params={"rendition_hash": rendition_hash, "child_count": child_count},
     )
 
 

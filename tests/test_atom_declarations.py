@@ -191,7 +191,7 @@ class TestRegistryAndDeclarations:
         # second path would be the one that skips the declaration.
         assert set(TASK_HANDLERS) == set(ATOMS)
 
-    def test_twenty_five_atoms_ship(self):
+    def test_twenty_six_atoms_ship(self):
         # SPRINT_JOBS.md Part 2 counted twelve, and an earlier draft said "about fifteen".
         # The number is pinned so that adding a handler is a decision about the design
         # rather than a line that slips in — which is what it was: the thirteenth is
@@ -270,7 +270,32 @@ class TestRegistryAndDeclarations:
         # call. What the conversion costs is a property of the pool behind
         # `JMFTS_CONVERT_URL`, which no cost class in this vocabulary can say — the same gap
         # `ROADMAP.md` gap 10 describes for the queue's one integer priority.
-        assert len(ATOMS) == 25
+        #
+        # THE TWENTY-SIXTH ARRIVED 2026-09-14 with 0.6.0 Block G step 33: `anchor:render`,
+        # `OFFICE_SPEC.md` Part 11 step 8 — the rectangle a passage occupies on a page of the
+        # rendition the atom above produced. Two things about it are decisions rather than
+        # lines that slipped in, and they pull in opposite directions.
+        #
+        # * Its `consumes` is `anchor:source`'s plus `rendition@self`, and that one extra
+        #   fact is the entire reason the two are separate atoms rather than one with a
+        #   format branch. `anchor:source` runs on the uploaded bytes and always can;
+        #   this one cannot run at all until a task that needs LibreOffice has succeeded.
+        #   One atom over both would declare a dependency on a rendition for documents that
+        #   never have one, and `unproduced()` would be the only thing that noticed.
+        # * It is the SECOND atom that is not a row of `TASK_ROWS` while being part of an
+        #   ordinary upload's fan-out (`propose:links` is the first), and the reason is the
+        #   same shape: a row's `after` cannot state its real precondition. Here that
+        #   precondition is a conjunction — the chunks exist AND a rendition exists — whose
+        #   second half, written as `after render:pdf`, would gate the claim on a COMPLETED
+        #   row of an ADVISORY task. On an appliance with no LibreOffice that row fails
+        #   permanently, this task could never be claimed, a pending task is unfinished, and
+        #   the file node would never settle. `IngestRollupPlanner` offers it at the settling
+        #   boundary instead, where both halves are already answered.
+        #
+        # It is therefore not in `_file_node_batch()` and has no `EXPECTED_DIVERGENCE` entry,
+        # which is NOT a claim that it does not read `source_span@subtree` — it does, exactly
+        # as its two siblings do. It is outside the batch the comparison is made over.
+        assert len(ATOMS) == 26
 
     def test_every_evidence_name_is_written_by_something(self):
         # An atom waiting on evidence nothing produces would never be schedulable, and the

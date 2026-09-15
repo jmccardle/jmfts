@@ -359,6 +359,21 @@ register(
     nullable=True,
     doc="the page and rectangles a chunk came from. Absent when it could not be placed.",
 )
+# OFFICE_SPEC.md Part 5's OTHER anchor, Part 11 step 8. A ROW OF ITS OWN AND NOT A KEY
+# INSIDE `source_anchor`, and the two reasons are the same two the pair above records under
+# 2.5's finding 5. First, a `.docx` carries both at once — an exact `ooxml` address from
+# `anchor:source` and a recovered rectangle from `anchor:render` — and both tasks are
+# `subtree`-scoped over the same chunks, so one name would have the second silently overwrite
+# the first. Second, they assert different KINDS of fact: an address into the uploaded package
+# cannot be wrong, and a rectangle recovered by matching text against a PDF LibreOffice
+# produced can be, which is what a reader has to be able to tell.
+register(
+    "render_anchor",
+    type=TYPE_DICT,
+    store=Store(STORE_EVIDENCE, row="render_anchor"),
+    nullable=True,
+    doc="the page and rectangle a chunk occupies in the RENDITION. Recovered, not exact.",
+)
 # OFFICE_SPEC.md Part 6's two derived artefacts. The BYTES are in `document_renditions` and
 # not in these rows: an OID is a physical address the repository maintains, and evidence is
 # caller-readable and caller-PATCHable. So the rule these two follow is the one `blob`
@@ -500,6 +515,18 @@ register(
     within="source_anchor",
     nullable=True,
     doc="why a chunk got no anchor, by code and reason. Present exactly when `anchor` is not.",
+)
+#: The same pair for the same reason, one anchor over. `render_anchor.unresolved` is where
+#: "this passage is not findable in the rendition" lives, and Part 5 makes that outcome
+#: ORDINARY rather than an error — "partial recovery is the expected outcome, not a failure"
+#: — so it has to be a fact the node states rather than an absence a reader guesses at.
+register(
+    "render_anchor.unresolved",
+    type=TYPE_DICT,
+    store=Store(STORE_EVIDENCE, row="render_anchor.unresolved"),
+    within="render_anchor",
+    nullable=True,
+    doc="why a chunk got no rectangle in the rendition. Present exactly when the anchor is not.",
 )
 register(
     "embedding.tokens",

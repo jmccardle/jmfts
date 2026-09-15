@@ -103,11 +103,12 @@ CREATE INDEX IF NOT EXISTS idx_document_evidence_stale ON document_evidence (nam
     WHERE state = 'stale';
 
 -- ---------------------------------------------------------------------------
--- The move. Thirty-four keys out of the column, into rows, and then off the column.
+-- The move. Thirty-six keys out of the column, into rows, and then off the column.
 --
--- FIVE OF THE THIRTY-FOUR MOVE NOTHING AND ARE LISTED ANYWAY. `cell` was registered on
--- 2026-09-08, and `table`, `column_links`, `rendition` and `conversion` all on 2026-09-14
--- (the last two from `OFFICE_SPEC.md` Part 6, Block G step 32) — every one long after this
+-- SEVEN OF THE THIRTY-SIX MOVE NOTHING AND ARE LISTED ANYWAY. `cell` was registered on
+-- 2026-09-08, and `table`, `column_links`, `rendition`, `conversion`, `render_anchor` and
+-- `render_anchor.unresolved` all on 2026-09-14 (the last four from `OFFICE_SPEC.md` Part 6
+-- and Part 5, Block G steps 32 and 33) — every one long after this
 -- migration, so no database has a node carrying any of them in `structured_content` and
 -- their copies find zero rows. `table`
 -- was caught by the full suite at 0.6.0's M1 gate and not by the lane that registered it,
@@ -118,6 +119,10 @@ CREATE INDEX IF NOT EXISTS idx_document_evidence_stale ON document_evidence (nam
 -- `rendition` and `conversion` were caught INSIDE their lane instead, which is the same
 -- reading with the opposite sign: the audit is what makes registering a row and forgetting
 -- this list a red test rather than a key left behind on the next database migrated.
+-- `render_anchor` and its `.unresolved` sibling, one step later, went into this list in the
+-- SAME EDIT as their registry entries, with no red test in between. That is the third
+-- reading and the one this paragraph was aiming at: an audit that has fired twice in two
+-- lanes stops being a thing the next lane rediscovers and starts being a step it knows.
 -- The list is generated from the
 -- REGISTRY rather than from what any particular database holds — `test_evidence_rows.py`
 -- enforces that in both directions — because a name absent here is a key this migration
@@ -155,6 +160,8 @@ INSERT INTO _evidence_keys (column_key, name) VALUES
     ('part_index', 'part_index'),
     ('profile', 'profile'),
     ('record', 'record'),
+    ('render_anchor', 'render_anchor'),
+    ('render_anchor.unresolved', 'render_anchor.unresolved'),
     ('rendition', 'rendition'),
     ('row_index', 'row_index'),
     ('rung', 'rung'),

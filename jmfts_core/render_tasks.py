@@ -7,8 +7,9 @@ result means.
 
 **``render:pdf`` produces the page a rectangle can be drawn on.** An office document has no
 pages until something paginates it, so until this runs there is nothing for
-``/documents/{id}/image`` to serve and nothing for step 33's ``citation`` to recover a
-rectangle against. Part 6 gives three reasons to store the result rather than convert on
+``/documents/{id}/image`` to serve and nothing for step 33's ``anchor:render`` to recover a
+rectangle against. (Step 33 predicted ``citation`` pointed at a rendition and shipped a
+SEPARATE task instead; :data:`~jmfts_core.ingest_tasks.TASK_ANCHOR_RENDER` says why.) Part 6 gives three reasons to store the result rather than convert on
 demand, and the first is the one that shapes the fleet: after this task every renderable
 document in the system is a PDF, so serving a citation image is ``pymupdf`` over stored bytes
 and **no node on the query path needs LibreOffice at all**.

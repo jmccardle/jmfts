@@ -38,17 +38,48 @@ from pydantic import BaseModel, ConfigDict, Field
 ANCHOR_ROW = "source_anchor"
 ANCHOR_UNRESOLVED_ROW = "source_anchor.unresolved"
 
+#: The OTHER anchor's two rows — ``OFFICE_SPEC.md`` Part 5's "Two anchors, not one", Block G
+#: step 33. A ``.docx`` carries an exact ``ooxml`` address in ``source_anchor`` AND a
+#: rectangle RECOVERED from its rendition in ``render_anchor``, and they are two rows because
+#: they are two facts with different truth conditions. A client reads them the same way it
+#: reads the pair above, with :func:`parse_anchor`; what it gets back from the second is a
+#: :class:`PdfAnchor` whose ``of`` is ``"rendition"``.
+RENDER_ANCHOR_ROW = "render_anchor"
+RENDER_ANCHOR_UNRESOLVED_ROW = "render_anchor.unresolved"
+
 
 class PdfAnchor(BaseModel):
     """A page and a rectangle in a PDF.
 
-    Written by ``citation_tasks.anchor_for_span``. The shape is
-    ``{"kind": "pdf", "page": 3, "bbox": [72.0, 118.4, 540.0, 262.9]}``.
+    Written by ``citation_tasks.anchor_for_span`` (a source PDF's own text layer) and by
+    ``citation_tasks.anchor_for_rendition_span`` (an office document's rendition). The shape
+    is ``{"kind": "pdf", "page": 3, "bbox": [72.0, 118.4, 540.0, 262.9]}``, with ``of``
+    saying which of the two.
     """
 
     model_config = ConfigDict(frozen=True)
 
     kind: Literal["pdf"] = "pdf"
+
+    #: WHICH PDF, and therefore how much the rectangle can be trusted. ``"source"`` — the
+    #: default, and what every anchor written before Block G step 33 means — is the
+    #: document's own text layer, where the coordinates are the ones extraction computed and
+    #: are exact. ``"rendition"`` is a page LibreOffice paginated (``OFFICE_SPEC.md`` Part 6),
+    #: where the rectangle was RECOVERED by matching the passage's text and is approximate:
+    #: two LibreOffice versions paginate differently, and the recovery can fail outright, in
+    #: which case there is a ``render_anchor.unresolved`` row and no anchor at all.
+    #:
+    #: **It defaults rather than being required, and that is not laziness.** Making it
+    #: required would change what every stored ``source_anchor`` row means — they were all
+    #: written before the field existed, they are all a source PDF's own geometry, and a
+    #: default that says so is the only reading under which an old row and a new one parse
+    #: alike. The server writes the key only for a rendition anchor, for the same reason.
+    #:
+    #: A viewer that draws a rectangle should say which it has. "Page 3" and "page 3 of our
+    #: rendering of this document" are different claims, and the second one stops being
+    #: surprising the moment a reader opens the ``.docx`` in Word and finds the passage on
+    #: page 4.
+    of: Literal["source", "rendition"] = "source"
 
     #: **0-based**, matching ``page_offsets`` and ``pages_with_tables`` in the same
     #: extraction record. A viewer that labels pages for a human adds one; nothing in the
@@ -114,10 +145,17 @@ class OoxmlAnchor(BaseModel):
     table. A rectangle on a rendered page is the OTHER anchor and is recorded separately.
 
     **This has no rectangle, and that is not a gap.** A ``.docx`` has no pages until something
-    paginates it, so nothing here can be drawn on a page image until a rendition exists
-    (``render:pdf``, Block G step 32) and something recovers geometry from it (step 33). What
-    an overlay can do today is say WHERE the passage is in the document's own structure, which
-    is the same answer a span highlight gives a format with no pages.
+    paginates it, so nothing here can be drawn on a page image on its own. The rectangle is
+    the OTHER anchor: once ``render:pdf`` (Block G step 32) has produced a rendition and
+    ``anchor:render`` (step 33) has recovered geometry from it, the same chunk also carries a
+    :class:`PdfAnchor` with ``of="rendition"`` in its :data:`RENDER_ANCHOR_ROW`.
+
+    **When a node has both, this one is what it IS and that one is where to LOOK.** They do
+    not compete: this address cannot be wrong and cannot be drawn, the rectangle can be drawn
+    and can be wrong. So an overlay draws the rectangle and names this as the thing the
+    rectangle is a picture of — and when the rectangle is absent, this is still the answer to
+    "where did that come from", which is the same answer a span highlight gives a format with
+    no pages.
     """
 
     model_config = ConfigDict(frozen=True)

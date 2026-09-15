@@ -227,6 +227,30 @@ TASK_ANCHOR_SOURCE = "anchor:source"
 TASK_RENDER_PDF = "render:pdf"
 TASK_CONVERT_OOXML = "convert:ooxml"
 
+#: ``OFFICE_SPEC.md`` Part 5's THIRD anchor and Part 11 step 8: the rectangle a passage
+#: occupies on a page of the rendition above, recovered by matching the node's own text
+#: against the PDF LibreOffice produced. :func:`jmfts_core.citation_tasks.run_anchor_render`.
+#:
+#: **NOT A ROW OF** :data:`TASK_ROWS`, and it is the second task in the appliance that is
+#: decided by what probe measured and still cannot be one (``propose:links`` is the first).
+#: Its real precondition is a conjunction this table cannot state: the chunks exist AND a
+#: rendition exists. The first half is what ``after_any`` on the two structure rungs says;
+#: the second is ``after render:pdf`` — and stating THAT would hang every office document on
+#: an appliance with no LibreOffice. ``render:pdf`` is advisory, so a permanent failure of it
+#: leaves the node settling normally, while the claim gate counts COMPLETED dependency rows
+#: and would leave this task pending forever — and a pending task is unfinished, so the file
+#: node could never settle and would never enter an index. The task is offered by
+#: :class:`~jmfts_core.rollup_tasks.IngestRollupPlanner` at the settling boundary instead,
+#: where "the subtree is complete and the rendition question has been answered" is a fact
+#: rather than a race. ``SPRINT_0_6_0.md`` Block B step 7 moved ``index:bm25`` there for a
+#: structurally identical reason: a row could not say what the task actually waits for.
+#:
+#: Advisory, by the same rule as the two anchors above: a chunk with no rectangle is a chunk,
+#: the absence is recorded on it, and the passage still has its exact ``ooxml`` address. The
+#: spelling is pinned to :data:`~jmfts_core.models.task_queue.ADVISORY_TASK_TYPES` by
+#: ``tests/test_render_anchors.py``.
+TASK_ANCHOR_RENDER = "anchor:render"
+
 #: ``INGEST_SPEC.md`` 11.5 — put this file's subtree into every BM25 index whose root is
 #: the file node or one of its ancestors. The last row of 11.1's parity table, and the one
 #: that ``SPRINT_JOBS.md`` 15.4 S5 could not leave open: ``POST /ingest`` used to index its

@@ -211,6 +211,21 @@ EV_SOURCE_SPAN = "source_span"
 #: the ``source_anchor`` evidence row on a chunk: the page and the rectangles.
 EV_SOURCE_ANCHOR = "source_anchor"
 
+#: the ``render_anchor`` evidence row on a chunk: the page and the rectangle the passage
+#: occupies IN A RENDITION. ``OFFICE_SPEC.md`` Part 5's "Two anchors, not one", Part 11
+#: step 8.
+#:
+#: A SEPARATE NAME FROM :data:`EV_SOURCE_ANCHOR`, and the separation is the whole step. The
+#: source anchor is exact, permanent and computed from the uploaded bytes; this one is
+#: RECOVERED, by matching the node's own text against a PDF LibreOffice produced, so it is
+#: approximate, it depends on which LibreOffice produced it, and it can fail to be computed
+#: for a passage while succeeding for the one beside it. A ``.docx`` carries BOTH — an
+#: ``ooxml`` address from ``anchor:source`` and a rectangle from ``anchor:render`` — so one
+#: name would not merely blur the two, it would have the second task overwrite the first
+#: (both are ``subtree``-scoped over the same chunks). Part 5: "Storing both under one key
+#: would make a recovered rectangle indistinguishable from an exact one."
+EV_RENDER_ANCHOR = "render_anchor"
+
 #: the ``rendition`` evidence row on a file node: what LibreOffice paginated this document
 #: into, how many pages it came to and how big each one is. ``OFFICE_SPEC.md`` Part 6.
 #:
@@ -253,6 +268,7 @@ EVIDENCE: frozenset[str] = frozenset(
         EV_EFFECTIVE_CONTENT,
         EV_SOURCE_SPAN,
         EV_SOURCE_ANCHOR,
+        EV_RENDER_ANCHOR,
         EV_RENDITION,
         EV_CONVERSION,
     }
