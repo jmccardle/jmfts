@@ -48,6 +48,7 @@ of the node above (legal only as a read).
 
 | task | reads | writes | cost |
 |---|---|---|---|
+| `anchor:render` | `extraction@self`, `text@self`, `blob@self`, `rendition@self`, `source_span@subtree` | `render_anchor@subtree` | `cpu` |
 | `anchor:source` | `extraction@self`, `text@self`, `blob@self`, `source_span@subtree` | `source_anchor@subtree` | `cpu` |
 | `citation` | `extraction@self`, `text@self`, `blob@self`, `source_span@subtree` | `source_anchor@subtree` | `cpu` |
 | `convert:ooxml` | `matched@self`, `blob@self` | `conversion@self` | `cpu` |
@@ -81,7 +82,7 @@ per-document planner asks for them: the upload path enqueues `probe` and whichev
 `fetch:*` the entry point names, the settling walk asks for the rollups, and the rest are
 operations a caller invokes directly.
 
-`derive:rule`, `fetch:arxiv`, `fetch:path`, `fetch:url`, `index:bm25`, `probe`, `propose:links`, `structure:semantic`, `summarize`, `summarize:llm`, `summarize:tree`, `validate:shape`
+`anchor:render`, `derive:rule`, `fetch:arxiv`, `fetch:path`, `fetch:url`, `index:bm25`, `probe`, `propose:links`, `structure:semantic`, `summarize`, `summarize:llm`, `summarize:tree`, `validate:shape`
 
 ## Retrieval visibility
 

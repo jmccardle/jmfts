@@ -36,6 +36,8 @@ from jmfts_core.chunking import ChunkStrategy, chunk_text
 from jmfts_client.contracts.anchor import (
     ANCHOR_ROW,
     ANCHOR_UNRESOLVED_ROW,
+    RENDER_ANCHOR_ROW,
+    RENDER_ANCHOR_UNRESOLVED_ROW,
     CellsAnchor,
     OoxmlAnchor,
     PdfAnchor,
@@ -1561,6 +1563,41 @@ class DocumentService:
         highlight the text it is already showing.
         """
         evidence = EvidenceRepository(self.session).read_all(document_id)
+
+        # THE RECOVERED RECTANGLE IS TRIED FIRST, and the order is the answer to "which of
+        # the two does a viewer draw". A node can carry both: an exact `ooxml` address from
+        # `anchor:source` and a rectangle from `anchor:render`. They are not competing
+        # answers to one question, they are answers to two — "what is this passage" and
+        # "where does it appear on a page" — and this verb asks only the second, which the
+        # source address cannot answer for any format that reaches a page through a
+        # rendition. So: draw the rectangle, and let the source address be what the
+        # rectangle is a picture OF. `GET /documents/{id}/evidence` serves both rows, so
+        # nothing is hidden by the choice; what would be hidden is the rectangle, if this
+        # verb kept refusing an office document that now has one.
+        #
+        # `of="rendition"` travels on the anchor, which is what keeps the two
+        # distinguishable downstream: a caller must be able to say "page 3 of our rendering"
+        # rather than "page 3", because the reader who opens the .docx in Word may well find
+        # it on page 4.
+        rendered = evidence.get(RENDER_ANCHOR_ROW)
+        if rendered is not None:
+            try:
+                recovered = parse_anchor(rendered)
+            except UnknownAnchorKind as exc:
+                raise RegionNotAddressable(f"Document {document_id}: {exc}") from exc
+            if isinstance(recovered, PdfAnchor):
+                return recovered
+            # A `render_anchor` that is not a rectangle is a writer nobody has: the only
+            # producer is `anchor:render`, which writes `kind="pdf"`. Refusing names the row
+            # rather than falling through to the source anchor, because falling through
+            # would answer a question about the rendition with a fact about the package.
+            raise RegionNotAddressable(
+                f"Document {document_id} carries a {RENDER_ANCHOR_ROW!r} row of kind "
+                f"{recovered.kind!r}, and a rendition anchor is a page and a rectangle. "
+                "Nothing in this appliance writes that, so the row did not come from "
+                "`anchor:render`"
+            )
+
         row = evidence.get(ANCHOR_NAME)
         if row is None:
             # TWO ROWS, NEVER ONE WITH A NULL (`evidence.py:453`: the unresolved row is
@@ -1617,19 +1654,36 @@ class DocumentService:
             # still has no rectangle, because a `.docx` has no pages until something
             # paginates it. `OFFICE_SPEC.md` Part 5's "Two anchors, not one" is this
             # distinction: the source address is what `anchor:source` recovers from the
-            # uploaded bytes, and a rectangle is what step 33 will recover from a rendition.
+            # uploaded bytes, and a rectangle is what `anchor:render` recovers from a
+            # rendition (step 33, which has shipped — see the branch at the top of this
+            # method, which is why this one is now the fallback rather than the answer).
             #
             # The message names the element rather than saying "no anchor", because those
             # are different facts and a caller that cannot tell them apart will report the
             # second when the first is true.
+            #
+            # REACHED ONLY WHEN THERE IS NO RECOVERED RECTANGLE EITHER — the branch above
+            # takes the `render_anchor` row when one exists — so the two possibilities left
+            # are that nothing has paginated this document and that the recovery was tried
+            # and could not place this passage. They are different facts and the message
+            # says which, from the row that records it (`OFFICE_SPEC.md` Part 5: partial
+            # recovery is a completed task, so the unresolved row is an ordinary outcome).
             where = f"{anchor.path} of {anchor.part}"
             if anchor.slide is not None:
                 where += f" (slide {anchor.slide})"
+            unresolved = evidence.get(RENDER_ANCHOR_UNRESOLVED_ROW)
+            if isinstance(unresolved, dict):
+                raise RegionNotAddressable(
+                    f"Document {document_id} is addressed at {where}, which is an exact "
+                    "address in the source package and has no rectangle on any page. A "
+                    "rectangle was looked for in this document's rendition and not found: "
+                    f"{unresolved.get('reason')} (code {unresolved.get('code')!r})"
+                )
             raise RegionNotAddressable(
                 f"Document {document_id} is addressed at {where}, which is an exact address "
                 "in the source package and has no rectangle on any page. An office document "
-                "has no pages until `render:pdf` paginates it; recovering a rectangle from "
-                "that rendition is docs/SPRINT_0_6_0.md Block G step 33, which has not run"
+                "has no pages until `render:pdf` paginates it, and `anchor:render` is what "
+                "recovers a rectangle from that rendition; neither has run for this node"
             )
         return anchor
 

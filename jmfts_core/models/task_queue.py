@@ -155,7 +155,15 @@ TASK_REAPABLE_STATUSES: tuple[str, ...] = (TASK_CLAIMED, TASK_RUNNING)
 #: ``render:pdf`` joined at Block G step 32 for a third reason of the same shape: a
 #: document LibreOffice cannot convert has no rendition, keeps its source bytes, and is
 #: searched exactly as before. What it loses is a picture, not a retrieval.
-ADVISORY_TASK_TYPES: frozenset[str] = frozenset({"citation", "anchor:source", "render:pdf"})
+#: ``anchor:render`` is the fourth (Part 11 step 8), and it is the clearest case of the rule
+#: in the set: it writes a rectangle RECOVERED by matching text against a rendition, so
+#: failing to find one is an expected outcome rather than a defect — Part 5 says partial
+#: recovery is a completed task — and the chunk still carries the exact ``ooxml`` address
+#: ``anchor:source`` gave it. A node that lost the whole task loses the picture and keeps
+#: the address, the text and every index entry.
+ADVISORY_TASK_TYPES: frozenset[str] = frozenset(
+    {"citation", "anchor:source", "render:pdf", "anchor:render"}
+)
 
 #: Declared write modes, spec 5.3. See ``TaskQueueRepository.claim_next`` for the
 #: conflict matrix these drive.
