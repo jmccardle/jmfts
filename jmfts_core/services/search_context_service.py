@@ -104,10 +104,19 @@ class SearchContextService:
     def update_context(self, name: str, request: SearchContextUpdate) -> SearchContextResponse:
         """Update a search context preset"""
         repo = SearchContextRepository(self.session)
+        # NOT GIVEN AND GIVEN AS NULL ARE DIFFERENT INSTRUCTIONS, and `update`'s Ellipsis
+        # default is the repository saying so. `SearchContextUpdate.description` defaults to
+        # None, so passing it straight through made the sentinel unreachable: a PUT carrying
+        # only `config` wiped the description, while a PUT carrying only `description` left
+        # config alone. Asymmetric and silent — 200, and a response body reporting the loss
+        # as the new state. `model_fields_set` is what Pydantic has that a default cannot:
+        # it holds the names the CALLER sent, so an omitted field reaches the repository as
+        # the sentinel and an explicit `"description": null` still clears the row.
+        sent = request.model_fields_set
         ctx = repo.update(
             name=name,
             config=request.config,
-            description=request.description,
+            description=request.description if "description" in sent else ...,
         )
         if not ctx:
             raise LookupError(f"Context '{name}' not found")

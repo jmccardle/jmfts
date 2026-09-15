@@ -38,10 +38,12 @@ from pathlib import Path
 import pytest
 
 from jmfts_client.contracts.search import usetype_globs
+from jmfts_client.contracts.search_context import SearchContextCreate, SearchContextUpdate
 from jmfts_core.models.document import Document
 from jmfts_core.repositories.document import DocumentRepository
 from jmfts_core.repositories.search import _apply_usetype_filter, _usetype_matches
 from jmfts_core.repositories.search_context import SearchContextRepository
+from jmfts_core.services.search_context_service import SearchContextService
 
 #: Two of the three presets ``docs/archive/ROADMAP_HISTORY.md:697`` specified, with the
 #: globs they were specified with. Asserted below to match NOTHING this appliance can
@@ -329,3 +331,48 @@ def test_an_empty_usetype_in_a_preset_is_refused_rather_than_widened():
         usetype_globs("")
     with pytest.raises(ValueError):
         usetype_globs([])
+
+
+class TestUpdateDoesNotNullWhatWasNotSent:
+    """A PUT that omits a field must leave that field alone.
+
+    ``SearchContextRepository.update`` takes ``description: Optional[str] = ...`` and guards
+    with ``if description is not ...``, which is the repository saying "not given" and
+    "given as null" are different instructions. ``SearchContextUpdate.description`` defaults
+    to ``None``, so the service passed ``None`` for an omitted field and the sentinel could
+    never fire: a PUT carrying only ``config`` wiped the description, while a PUT carrying
+    only ``description`` left config alone. Asymmetric, and silent — the caller gets a 200
+    and a response body that reports the loss as the new state.
+
+    Found by ``wt/presets`` while building the editor, in a file that lane did not own.
+    """
+
+    def test_a_put_carrying_only_config_keeps_the_description(self, db_session):
+        service = SearchContextService(db_session)
+        service.create_context(
+            SearchContextCreate(
+                name="keeps-description", description="why this preset exists", config={"a": 1}
+            )
+        )
+
+        after = service.update_context("keeps-description", SearchContextUpdate(config={"a": 2}))
+
+        assert after.config == {"a": 2}
+        assert after.description == "why this preset exists"
+
+    def test_a_put_carrying_an_explicit_null_still_clears_it(self, db_session):
+        """The other half, and the reason this is not fixed by dropping the sentinel.
+
+        "Not given" and "given as null" have to stay distinguishable, or there is no way to
+        remove a description once written.
+        """
+        service = SearchContextService(db_session)
+        service.create_context(
+            SearchContextCreate(name="clears-description", description="go away", config={})
+        )
+
+        after = service.update_context(
+            "clears-description", SearchContextUpdate(description=None, config=None)
+        )
+
+        assert after.description is None
