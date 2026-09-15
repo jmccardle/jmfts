@@ -98,20 +98,6 @@ GAP_INDEX_REBUILD = (
     "disclosure — still nothing consults the principal."
 )
 
-GAP_TRIPLE_EDGE = (
-    "OPEN GAP, and it is step 1's defect on the other edge table: a triple names a subject "
-    "and an object document and is written with no check on either, exactly as "
-    "DocumentLink was before Block A step 1. The read side IS gated "
-    "(TripleRepository.query_triples / get_triple, via readable_id_subquery). Step 1 names "
-    "create_link and delete_link; closing Triple is the same argument applied again and is "
-    "not in this sprint."
-)
-
-GAP_TRIPLE_RETRACT = (
-    "OPEN GAP. Retracts or supersedes a fact by triple id with no check on either endpoint "
-    "document. Same family as GAP_TRIPLE_EDGE, on the retract leg."
-)
-
 GAP_TEMPLATE_IS_A_DOCUMENT = (
     "OPEN GAP. A template IS a document (usetype `template`, under a container node), read "
     "here by `session.get(Document, template_id)` with no can_read. A template container "
@@ -176,11 +162,11 @@ NOT_PRINCIPAL_SCOPED: dict[str, str] = {
     "TripleService.get_predicate": VOCABULARY,
     "TripleService.list_predicates": VOCABULARY,
     "TripleService.delete_predicate": VOCABULARY,
-    "TripleService.create_triple": GAP_TRIPLE_EDGE,
-    "TripleService.upsert_triple": GAP_TRIPLE_EDGE,
-    "TripleService.delete_triple": GAP_TRIPLE_RETRACT,
-    "TripleService.invalidate_triple": GAP_TRIPLE_RETRACT,
-    "TripleService.supersede_triple": GAP_TRIPLE_RETRACT,
+    # The five TripleService WRITE verbs were here, as the two OPEN GAP entries step 3
+    # found and step 35 promoted to a step. They left this list on 2026-09-15: assert takes
+    # write on the subject and read on the object, retract takes require_edge_delete's rule
+    # read off `triples.derived_by`, and both gates live in TripleRepository so a new caller
+    # cannot walk around them. `tests/test_access_triple_writes.py` is the measurement.
     "UsetypePresentationService.create_presentation": CONFIG_OBJECT,
     "UsetypePresentationService.list_presentations": CONFIG_OBJECT,
     "UsetypePresentationService.get_presentation": CONFIG_OBJECT,

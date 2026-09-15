@@ -6,7 +6,7 @@ from sqlalchemy import select, and_, or_, exists
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, joinedload
 
-from jmfts_core.access import readable_id_subquery
+from jmfts_core.access import readable_id_subquery, require_triple_retract, require_triple_write
 from jmfts_core.models.triple import Triple, Predicate, FactType
 
 
@@ -138,6 +138,20 @@ class TripleRepository:
         The database enforces that too (``ck_triples_object_exactly_one``); this raises
         first so the caller gets the name of its own mistake rather than an IntegrityError
         that has already poisoned the transaction it was running in.
+
+        Subtree RBAC: WRITE on the subject, READ on the object
+        (``SPRINT_0_6_0.md`` step 35; the argument is Part 4 question 4.1 and it lives at
+        :func:`~jmfts_core.access.require_triple_write`). The gate is HERE and not only in
+        ``TripleService``, for step 1's reason on ``create_link``: this method has two
+        other callers — ``shacl_rules.apply_derivation`` and, through ``upsert_triple``,
+        ``fact_extraction`` — and a gate only the service holds is a gate any new caller
+        walks around. Both of those run in a worker, bind no principal, and bypass it for
+        free.
+
+        The shape check runs FIRST because the gate has to know which object it is
+        gating: a call passing both an ``object_id`` and an ``object_literal`` is malformed,
+        and read-gating the ``object_id`` the row will not carry would be a check on the
+        wrong thing.
         """
         if (object_id is None) == (object_literal is None):
             raise ValueError(
@@ -146,6 +160,7 @@ class TripleRepository:
             )
         if object_datatype is not None and object_literal is None:
             raise ValueError("object_datatype types a literal; it cannot type a document node")
+        require_triple_write(self.session, subject_id, object_id)
         triple = Triple(
             subject_id=subject_id,
             predicate_id=predicate_id,
@@ -177,9 +192,17 @@ class TripleRepository:
         Uses INSERT ... ON CONFLICT DO NOTHING to avoid IntegrityError and
         savepoint rollback issues during bulk ingestion.
 
+        Subtree RBAC as in :meth:`create_triple` — write on the subject, read on the
+        object. The gate runs before the INSERT and therefore before the conflict is
+        known, so re-asserting an existing fact is refused on the same terms as asserting
+        a new one: "this fact still holds" is a write, and a caller that may not write here
+        must not be able to tell an existing fact from a fresh one by which error it gets.
+        ``object_id`` is required on this leg, so there is no literal case to consider.
+
         Returns:
             (triple, created) — created is False if the triple already existed.
         """
+        require_triple_write(self.session, subject_id, object_id)
         stmt = (
             pg_insert(Triple.__table__)
             .values(
@@ -210,8 +233,18 @@ class TripleRepository:
         return self.session.get(Triple, triple_id)
 
     def delete_triple(self, triple_id: int) -> bool:
+        """Delete a triple outright.
+
+        Subtree RBAC: :func:`~jmfts_core.access.require_triple_retract` decides which end
+        must be writable, off ``derived_by`` — ``SPRINT_0_6_0.md`` step 35, and the same
+        rule ``require_edge_delete`` applies to a document link. A triple the principal
+        may not read at all raises ``LookupError("Triple not found")``, which is the
+        service's own 404 for a triple that is not there; ``False`` still means "no such
+        row" for a caller that may read it.
+        """
         triple = self.get_triple(triple_id)
         if triple:
+            require_triple_retract(self.session, triple, "delete")
             self.session.delete(triple)
             return True
         return False
@@ -346,10 +379,16 @@ class TripleRepository:
         reason: Optional[str] = None,
         superseding_triple_id: Optional[int] = None,
     ) -> Optional[Triple]:
-        """Mark a triple as invalidated (soft-delete for contradicted facts)."""
+        """Mark a triple as invalidated (soft-delete for contradicted facts).
+
+        Retracting a fact is writing to the graph it is a fact in, so it takes the same
+        gate a delete takes (:func:`~jmfts_core.access.require_triple_retract`, step 35).
+        The soft half is about the row's history, not about who may touch it.
+        """
         triple = self.get_triple(triple_id)
         if not triple:
             return None
+        require_triple_retract(self.session, triple, "invalidate")
         triple.invalidated_at = datetime.now(timezone.utc)
         triple.invalidation_reason = reason
         triple.invalidated_by = superseding_triple_id
@@ -382,6 +421,17 @@ class TripleRepository:
         forking. The lock is taken BEFORE minting the successor, so the loser never
         creates an orphan.
 
+        Subtree RBAC: BOTH gates, in that order — retract on the old triple
+        (:func:`~jmfts_core.access.require_triple_retract`), then, through
+        :meth:`create_triple`, write-on-subject/read-on-object for the successor. A
+        supersede is a retract and an assert in one call and neither half is free.
+
+        The retract gate runs before the ``invalidated_at`` check, so a caller with no
+        right to retract this fact cannot read 409-vs-403 off the call and learn that
+        somebody else already superseded it. It runs after the ``FOR UPDATE`` read because
+        that read is where ``derived_by`` comes from; a refused caller's row lock is
+        released by the rollback its 403 rides out on.
+
         Raises:
             TripleAlreadyInvalidatedError: the old triple was already superseded/
                 invalidated by the time the lock was acquired.
@@ -391,6 +441,7 @@ class TripleRepository:
         ).scalar_one_or_none()
         if old_triple is None:
             return None, None
+        require_triple_retract(self.session, old_triple, "supersede")
         if old_triple.invalidated_at is not None:
             raise TripleAlreadyInvalidatedError(old_triple_id, old_triple.invalidated_by)
 
