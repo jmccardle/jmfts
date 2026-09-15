@@ -419,33 +419,50 @@ def test_copy_out_cannot_print_a_credential():
     credential reader, because a renderer that could get the value could print it.
     """
     source = (TARGET_DIR / "copyout.js").read_text(encoding="utf-8")
-    for forbidden in ("sessionStorage", "localStorage", "getCredential", "credentialFromSession"):
+    for forbidden in (
+        "sessionStorage",
+        "localStorage",
+        "getCredential",
+        "credentialStorage",
+        "credentialFromStorage",
+    ):
         assert forbidden not in source, f"copyout.js reaches for {forbidden}"
 
 
-def test_the_token_is_kept_in_session_storage_and_out_of_the_url():
-    """Step 19's rule, which step 23 and step 24 each had to preserve while moving the code.
+def test_exactly_one_file_in_the_bundle_names_a_credential_store():
+    """The rule this replaces, and the rule it is now.
 
-    **Asked of the whole bundle rather than of ``index.html``.** It was one file when this test
-    was written; step 24 made that document a mount point and moved the token entry into
-    ``shell/shell.js``, which is exactly the kind of move a test naming one file stops noticing.
-    What the rule is about is the BUNDLE — no credential outlives the tab, anywhere in it — so
-    that is what is scanned, and a view that reached for ``localStorage`` in step 26 would fail
-    here too.
+    **What step 19 asserted was ``sessionStorage``, and that changed on 2026-09-15.** The old
+    rule was "no credential outlives the tab", which cost a paste of the appliance's master
+    token per tab; ``client/transport.js`` ``credentialStorage()`` argues the swap. What is
+    asserted here is the property the swap has to keep: ONE file decides where a credential
+    lives, so the next change to that decision is one edit rather than a search.
+
+    Three things, then:
+
+    1. Nothing in the bundle touches ``sessionStorage`` any more. A surviving call site would
+       be a second store, and a tab holding a token the other tabs cannot see is the bug that
+       was just fixed, reintroduced in one file.
+    2. ``localStorage`` is reached from ``client/transport.js`` and nowhere else. Both stores
+       are NAMED in other files — in the comments that say where the choice is made — so what
+       the scan looks for is the ``window.``-qualified reference that actually reaches one,
+       not the word. Every file that holds the object holds it off ``window``.
+    3. The key is still the one the appliance's own documentation names.
+
+    Asked of the whole bundle rather than of one file, for the reason step 24 gave: the token
+    entry has already moved between files once, and a test naming a file stops noticing.
     """
-    # ``localStorage`` is NAMED in several of these files, in the comments that say why it is
-    # not used. What must not exist is a call against it: a credential that outlives the tab.
-    used = re.compile(r"(?<![.\w])(?:window\.)?localStorage\s*\.")
     bundle = {
         path.relative_to(STATIC).as_posix(): path.read_text(encoding="utf-8")
         for path in sorted(STATIC.rglob("*"))
         if path.is_file() and path.suffix in (".html", ".js", ".css")
     }
-    offenders = [name for name, text in bundle.items() if used.search(text)]
-    assert not offenders, f"these write to localStorage: {offenders}"
 
-    holders = [name for name, text in bundle.items() if "sessionStorage" in text]
-    assert holders, "nothing in the bundle keeps the token anywhere; where did it go?"
+    for store in ("sessionStorage", "localStorage"):
+        used = re.compile(rf"(?<![.\w])window\.{store}\b")
+        callers = sorted(name for name, text in bundle.items() if used.search(text))
+        expected = [] if store == "sessionStorage" else ["client/transport.js"]
+        assert callers == expected, f"{store} is reached from {callers}, expected {expected}"
 
     transport = (TARGET_DIR / "transport.js").read_text(encoding="utf-8")
     assert 'JMFTSToken: "jmfts.token"' in transport

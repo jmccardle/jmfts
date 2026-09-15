@@ -33,22 +33,51 @@ export const CALL_EVENT_FIELDS = Object.freeze([
 ]);
 
 /**
- * Where each credential is kept in this tab.
+ * Where each credential is kept in this browser.
  *
- * sessionStorage, never localStorage and never the URL: a closed tab has forgotten the
- * credential, and a pasted address does not carry one. The two keys are disjoint because the
- * credentials are — `jmfts_core/rest/auth.py`, "Two credentials, kept disjoint". A browser
- * normally holds only the first; the second is here because `/runner/*` is part of the
- * mounted surface and a client that silently sent the wrong one would earn a 401 with
- * nothing on the page to explain it.
+ * The two keys are disjoint because the credentials are — `jmfts_core/rest/auth.py`, "Two
+ * credentials, kept disjoint". A browser normally holds only the first; the second is here
+ * because `/runner/*` is part of the mounted surface and a client that silently sent the
+ * wrong one would earn a 401 with nothing on the page to explain it.
  */
 export const CREDENTIAL_KEYS = Object.freeze({
   JMFTSToken: "jmfts.token",
   JMFTSRunnerKey: "jmfts.runner_key",
 });
 
-/** The API token's sessionStorage key, which is what almost every caller wants. */
+/** The API token's storage key, which is what almost every caller wants. */
 export const TOKEN_KEY = CREDENTIAL_KEYS.JMFTSToken;
+
+/**
+ * The store credentials live in. `localStorage` — shared by every tab on this origin, and
+ * outliving the browser session.
+ *
+ * **This was `sessionStorage` until 2026-09-15, and the rule it served has changed.** The
+ * old rule was "no credential outlives the tab", which bought one property and cost
+ * another. `sessionStorage` is scoped to a single top-level browsing context, so a second
+ * tab on the same appliance starts holding nothing and the human pastes the token again.
+ * Pasting the appliance's master credential several times a day is what drives it somewhere
+ * less safe than either store, so the durability cost is paid here, on purpose.
+ *
+ * It is also what `/docs` already did with the same credential. Swagger UI is mounted with
+ * `persistAuthorization: True` (`jmfts_core/rest/main.py`, `_SWAGGER_UI_PARAMETERS`), which
+ * is `localStorage`; the bundle refusing what the other page on the same origin does was a
+ * difference no reader could act on.
+ *
+ * The counterweight is **Forget** in the shell, which was already there, and which is now
+ * the only way a credential leaves this browser.
+ *
+ * WHAT DID NOT CHANGE: never the URL, and never a cookie. A pasted address still carries no
+ * credential, and nothing is attached to a request the page did not make. An `HttpOnly`
+ * cookie would be stronger against script that reads this store, and it is a server-auth
+ * change with a CSRF question and an HTTP-versus-HTTPS trap attached; it is not this.
+ *
+ * ONE FILE NAMES THE STORE. The shell reads and writes the token through here rather than
+ * through `window` directly, so the next change to this decision is one edit.
+ */
+export function credentialStorage() {
+  return window.localStorage;
+}
 
 /** The request never went out, or what came back could not be read as a response. */
 export class JmftsTransportError extends Error {
@@ -81,8 +110,8 @@ export function detailOf(response) {
   return JSON.stringify(response);
 }
 
-/** Read one credential out of this tab. Returns null when the tab does not hold it. */
-export function credentialFromSession(scheme) {
+/** Read one credential out of this browser. Returns null when it holds none. */
+export function credentialFromStorage(scheme) {
   const key = CREDENTIAL_KEYS[scheme];
   if (!key) {
     throw new JmftsTransportError(
@@ -91,7 +120,7 @@ export function credentialFromSession(scheme) {
         "was never told how to hold."
     );
   }
-  return window.sessionStorage.getItem(key);
+  return credentialStorage().getItem(key);
 }
 
 export class JmftsTransport {
@@ -103,7 +132,7 @@ export class JmftsTransport {
     // Same origin by default: the appliance serves this bundle at /app, so "" reaches the
     // API it was generated from without a CORS entry and without a configured hostname.
     this.baseUrl = (options.baseUrl ?? "").replace(/\/$/, "");
-    this.getCredential = options.getCredential ?? credentialFromSession;
+    this.getCredential = options.getCredential ?? credentialFromStorage;
     this._fetch = options.fetchImpl ?? ((...args) => fetch(...args));
     this._now = options.now ?? (() => performance.now());
     this._listeners = new Set();
@@ -142,8 +171,8 @@ export class JmftsTransport {
       const credential = this.getCredential(op.security_scheme);
       if (!credential) {
         throw new JmftsTransportError(
-          `${op.method} ${op.path} needs the ${op.security_scheme} credential and this tab ` +
-            `holds none. Set sessionStorage["${CREDENTIAL_KEYS[op.security_scheme]}"].`
+          `${op.method} ${op.path} needs the ${op.security_scheme} credential and this ` +
+            `browser holds none. Set localStorage["${CREDENTIAL_KEYS[op.security_scheme]}"].`
         );
       }
       headers.Authorization = `Bearer ${credential}`;

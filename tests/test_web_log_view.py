@@ -109,7 +109,7 @@ MAIN_HARNESS = textwrap.dedent("""
     };
 
     const shell = await import("%(static)s/shell/shell.js");
-    window.sessionStorage.setItem("jmfts.token", "SECRET-TOKEN");
+    window.localStorage.setItem("jmfts.token", "SECRET-TOKEN");
 
     const root = new Element("div");
     root._attached = true;
@@ -416,7 +416,13 @@ def test_the_log_view_cannot_reach_a_credential():
     A module that can read the value is a module that can print it. This one never asks.
     """
     source = VIEW.read_text(encoding="utf-8")
-    for forbidden in ("sessionStorage", "localStorage", "getCredential", "credentialFromSession"):
+    for forbidden in (
+        "sessionStorage",
+        "localStorage",
+        "getCredential",
+        "credentialStorage",
+        "credentialFromStorage",
+    ):
         # Named in prose is fine; a property access is not.
         assert not re.search(rf"(?<![.\w]){forbidden}\s*[.(\[]", source), f"log.js uses {forbidden}"
 

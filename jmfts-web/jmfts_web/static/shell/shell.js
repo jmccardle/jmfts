@@ -2,9 +2,9 @@
 //
 // docs/SPRINT_0_6_0.md Block F step 24. Everything in this file was in `index.html` before
 // this step and is here now for one reason: every view needs it and none of it should be
-// written twice. The token, the `sessionStorage` handling under `TOKEN_KEY`, the one client
-// instance and the event stream it emits are the shell's, and a view receives what it needs
-// through the context object rather than reaching for a global.
+// written twice. The token form, the stored value under `TOKEN_KEY`, the one client instance
+// and the event stream it emits are the shell's, and a view receives what it needs through
+// the context object rather than reaching for a global.
 //
 // `index.html` is now a document with a mount point in it. The page is the shell.
 //
@@ -21,7 +21,15 @@
 // is the form that survives a reload, and a view reads its arguments from the fragment's own
 // query string: `#/document?id=42`.
 
-import { JmftsClient, TOKEN_KEY, asCurl, asFetch, asPython, detailOf } from "../client/index.js";
+import {
+  JmftsClient,
+  TOKEN_KEY,
+  asCurl,
+  asFetch,
+  asPython,
+  credentialStorage,
+  detailOf,
+} from "../client/index.js";
 import { navigationGroups, viewForPath, views } from "./registry.js";
 
 // Every registered view, by the side effect of importing its module. This import is the only
@@ -33,10 +41,14 @@ import "./manifest.js";
 /**
  * The one client the whole front end calls.
  *
- * Same origin, and the credential lives in `sessionStorage` under the key the client names —
- * not `localStorage` and never the URL. A closed tab has forgotten it; a pasted address does
- * not carry it. `credentialFromSession` is the transport's default, so nothing here reaches
- * for the value itself.
+ * Same origin, and the credential lives under the key the client names, in the store the
+ * client names — `credentialStorage()` in `client/transport.js`, which is where the choice
+ * of store is argued and is the only place that names one. Never the URL.
+ *
+ * `credentialFromStorage` is the transport's default, so the request path never reaches for
+ * the value here. The three lines below that DO touch the store are the token form's: read
+ * it for the status line, write it on Connect, drop it on Forget. They go through the same
+ * door for one reason — so that changing the store stays one edit.
  */
 const client = new JmftsClient();
 
@@ -249,9 +261,12 @@ async function mount(main, route) {
 export function start(root) {
   const parts = buildChrome(root);
 
+  // The status line says where the token is, not only whether there is one. It is kept for
+  // every tab on this origin and it survives closing the browser, so a reader who did not
+  // paste it in this tab should be able to find out why it is there and how to remove it.
   const saidToken = () => {
-    parts.status.textContent = window.sessionStorage.getItem(TOKEN_KEY)
-      ? "connected with a token"
+    parts.status.textContent = credentialStorage().getItem(TOKEN_KEY)
+      ? "connected — this browser keeps the token until you press Forget"
       : "a token is needed for everything except /health";
   };
 
@@ -264,15 +279,18 @@ export function start(root) {
       parts.status.innerHTML = '<span class="bad">enter a token, or press Forget to clear it</span>';
       return;
     }
-    window.sessionStorage.setItem(TOKEN_KEY, value);
+    credentialStorage().setItem(TOKEN_KEY, value);
     parts.token.value = "";
     saidToken();
     route();
   });
 
+  // Forget is the ONLY way the credential leaves this browser, and it takes it away from
+  // every tab at once rather than from this one. That is the counterweight to a stored token
+  // and it is why the button sits beside the field rather than in a settings page.
   parts.forget.addEventListener("click", () => {
-    window.sessionStorage.removeItem(TOKEN_KEY);
-    parts.status.textContent = "token forgotten";
+    credentialStorage().removeItem(TOKEN_KEY);
+    parts.status.textContent = "token forgotten — every tab on this appliance is signed out";
     route();
   });
 
@@ -298,6 +316,18 @@ export function start(root) {
   };
 
   window.addEventListener("hashchange", route);
+
+  // The store is shared by every tab, so a Connect or a Forget in ANOTHER tab changes what
+  // this one holds. `storage` fires only in the other tabs, never in the one that wrote, and
+  // without this the status line here would keep saying "connected" after a Forget next door
+  // — a page describing a credential it no longer has. Re-routing as well as re-labelling,
+  // because a mounted view that already failed for want of a token can now succeed.
+  window.addEventListener("storage", (ev) => {
+    if (ev.key !== null && ev.key !== TOKEN_KEY) return;
+    saidToken();
+    route();
+  });
+
   saidToken();
   return route();
 }

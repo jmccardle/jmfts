@@ -176,16 +176,30 @@ DOM_STUB = textwrap.dedent("""
     export function install() {
       globalThis.Element = Element;
       globalThis.document = document;
-      globalThis.sessionStorage = {
+      globalThis.localStorage = {
         _held: new Map(),
         getItem(key) { return this._held.has(key) ? this._held.get(key) : null; },
         setItem(key, value) { this._held.set(key, String(value)); },
         removeItem(key) { this._held.delete(key); },
       };
+      // Window listeners are RECORDED rather than discarded, because one of them is behaviour
+      // now: the shell listens for `storage` so a Connect or a Forget in another tab reaches
+      // this one. A stub that dropped the handler would leave that untestable, and there is no
+      // second tab in a Node harness to fire the real event.
       globalThis.window = {
         location: { hash: "", origin: "http://appliance:8100" },
-        sessionStorage: globalThis.sessionStorage,
-        addEventListener() {},
+        localStorage: globalThis.localStorage,
+        _listeners: new Map(),
+        addEventListener(type, handler) {
+          if (!this._listeners.has(type)) this._listeners.set(type, []);
+          this._listeners.get(type).push(handler);
+        },
+        /** Fire what a real browser would fire in the OTHER tabs. */
+        async fire(type, event) {
+          for (const handler of globalThis.window._listeners.get(type) ?? []) {
+            await handler(event);
+          }
+        },
       };
     }
     """)
@@ -563,6 +577,66 @@ def test_the_shell_draws_its_frame_and_shows_a_view_that_fails(tmp_path):
     log = _find(tree, "shell-log")[0]["html"]
     assert "Nothing yet." not in log
     assert "GET /health" in log
+
+
+CROSS_TAB_HARNESS = textwrap.dedent("""
+    import { install, serialize, Element } from "./dom.mjs";
+    install();
+    const shell = await import("%(static)s/shell/shell.js");
+
+    const said = () => {
+      const walk = (node) =>
+        node.className === "dim shell-status"
+          ? node.textContent
+          : node.childNodes.map(walk).find((found) => found !== undefined);
+      return walk(root);
+    };
+
+    const root = new Element("div");
+    window.location.hash = "#/capabilities";
+    await shell.start(root);
+    const before = said();
+
+    // What the OTHER tab does: write the token, then fire the event a real browser fires here.
+    window.localStorage.setItem("jmfts.token", "SECRET-TOKEN");
+    await window.fire("storage", { key: "jmfts.token" });
+    const afterConnect = said();
+
+    // And what a Forget in that other tab does.
+    window.localStorage.removeItem("jmfts.token");
+    await window.fire("storage", { key: "jmfts.token" });
+    const afterForget = said();
+
+    // An unrelated key changing is not this page's business.
+    window.localStorage.setItem("jmfts.token", "SECRET-TOKEN");
+    await window.fire("storage", { key: "something.else" });
+    const afterNoise = said();
+
+    console.log(JSON.stringify({ before, afterConnect, afterForget, afterNoise }));
+    """)
+
+
+@needs_node
+def test_a_token_set_in_another_tab_reaches_this_one(tmp_path):
+    """The store is shared by every tab, so the status line has to be too.
+
+    ``localStorage`` fires ``storage`` in the OTHER tabs, never in the one that wrote, so
+    without a listener this page would keep saying "connected" after a Forget next door — a
+    page describing a credential it no longer holds. That is the failure this covers; the
+    listener is in ``shell/shell.js``.
+
+    The harness has no second tab, so it writes the value and fires the event by hand. What is
+    stubbed is the browser's delivery; what runs is the shell's handler.
+    """
+    result = _node(tmp_path, CROSS_TAB_HARNESS)
+
+    assert "a token is needed" in result["before"]
+    assert "until you press Forget" in result["afterConnect"]
+    assert "a token is needed" in result["afterForget"]
+
+    # A key this page does not hold a credential under changes nothing. Re-routing on every
+    # write to the origin's store would remount the view whenever any other page wrote to it.
+    assert result["afterNoise"] == result["afterForget"]
 
 
 # ---------------------------------------------------- the defect: reading a field that is there

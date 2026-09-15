@@ -47,14 +47,15 @@ export declare class JmftsHttpError extends Error {
 }
 
 export declare function detailOf(response: unknown): string;
-export declare function credentialFromSession(scheme: string): string | null;
+export declare function credentialStorage(): Storage;
+export declare function credentialFromStorage(scheme: string): string | null;
 export declare function fillPath(op: Operation, values: Record<string, unknown>): string;
 export declare function queryString(query: Record<string, unknown>): string;
 
 export interface JmftsTransportOptions {
   /** Where the appliance is. Empty (the default) is same-origin, which is how /app serves. */
   baseUrl?: string;
-  /** Where credentials come from. The default reads this tab's sessionStorage. */
+  /** Where credentials come from. The default reads this origin's localStorage. */
   getCredential?: (scheme: string) => string | null;
   fetchImpl?: typeof fetch;
   now?: () => number;

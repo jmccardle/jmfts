@@ -20,6 +20,7 @@ export {
   JmftsHttpError,
   JmftsTransport,
   JmftsTransportError,
+  credentialStorage,
   detailOf,
 } from "./transport.js";
 export { asCurl, asFetch, asPython } from "./copyout.js";
