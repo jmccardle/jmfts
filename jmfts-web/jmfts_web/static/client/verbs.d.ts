@@ -435,6 +435,51 @@ export interface ChunkResponse {
   chunks: Array<ChunkItem>;
 }
 
+/**
+ * What a collection asks for on its behalf and on its descendants'.
+ *
+ * ``SPRINT_JOBS.md`` 5.1. A collection is a SUBTREE, not a row in a bindings table, so
+ * configuring one is writing a setting on a node — and "who may configure this
+ * collection" becomes "who may write to this node", which RBAC has already answered.
+ *
+ * **This is a PARTIAL set, unlike the one an upload records.** A file node's `options`
+ * row is the complete resolved set the run used; this is a declaration of what to
+ * deviate, so a folder can name `structure.max_tokens` and leave everything else to the
+ * layer below. That is what lets a nested collection refine its parent without restating
+ * it. An empty object is a real answer — this collection deviates in nothing — and it is
+ * also how a declaration is cleared, because there is nothing a separate verb would say.
+ *
+ * **It is a default for NEW uploads, not a live policy.** A document ingested before this
+ * changed keeps what it was ingested with, which is the honest consequence of resolving
+ * at upload time rather than at plan time; re-applying is a re-ingest, and the recorded
+ * row is what makes the difference computable.
+ */
+export interface CollectionOptionsRequest {
+  /**
+   * Option overrides in the shape `POST /ingest/file` takes them — `{"structure": {"max_tokens": 60}}`. Validated exactly as a request's are, so an option that does not exist is a 400 here for the same reason it is a 400 there.
+   */
+  options: Record<string, unknown>;
+}
+
+/**
+ * What one node declares, what it inherits, and what an upload under it starts from.
+ */
+export interface CollectionOptionsResponse {
+  document_id: number;
+  /**
+   * What THIS node declares. `{}` when it declares nothing, which is the same answer as a node that has never been configured — a collection that deviates in nothing and one that was never asked are the same default.
+   */
+  options: Record<string, unknown>;
+  /**
+   * The collections ABOVE this one, merged root-first. `{}` at the top of a tree.
+   */
+  inherited: Record<string, unknown>;
+  /**
+   * `inherited` layered with `options` — where an upload directly under this node starts, before the format profile and before its own overrides. Still a partial set: the complete one needs a format, and the format is the bytes'.
+   */
+  effective: Record<string, unknown>;
+}
+
 export interface CommunityItem {
   community_id: number;
   size: number;
@@ -3354,6 +3399,7 @@ export declare class JmftsClient extends JmftsTransport {
    * RemoteJmftsClient method: `analyze_ingest`.
    */
   analyze_ingest(args: {
+    parent_id?: number | null;
     private?: boolean;
     options?: Record<string, unknown> | null;
     file: Blob;
@@ -3380,6 +3426,16 @@ export declare class JmftsClient extends JmftsTransport {
   }): Promise<IngestFrontierResponse>;
 
   /**
+   * What a collection asks of the documents ingested under it
+   *
+   * `GET /documents/{document_id}/ingest-options` — IngestService.get_collection_options
+   * RemoteJmftsClient method: `get_collection_options`.
+   */
+  get_collection_options(args: {
+    document_id: number;
+  }): Promise<CollectionOptionsResponse>;
+
+  /**
    * Ingest content through a named pipeline
    *
    * `POST /ingest` — IngestService.ingest_content
@@ -3396,6 +3452,17 @@ export declare class JmftsClient extends JmftsTransport {
    * RemoteJmftsClient method: `list_registered_pipelines`.
    */
   list_registered_pipelines(args?: Record<string, never>): Promise<Array<PipelineInfo>>;
+
+  /**
+   * Set what a collection asks of the documents ingested under it
+   *
+   * `PUT /documents/{document_id}/ingest-options` — IngestService.set_collection_options
+   * RemoteJmftsClient method: `set_collection_options`.
+   */
+  set_collection_options(args: {
+    document_id: number;
+    request: CollectionOptionsRequest;
+  }): Promise<CollectionOptionsResponse>;
 
   /**
    * Upload a file, create its in-flight file node, and enqueue `probe`

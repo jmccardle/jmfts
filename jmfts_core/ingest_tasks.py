@@ -2248,6 +2248,50 @@ def _plan_inputs(session: Session, node: Document) -> tuple[Optional[str], dict,
     return None, {}, None
 
 
+def collection_option_layers(session: Session, parent_id: Optional[int]) -> tuple[dict, ...]:
+    """The option layers a document uploaded under ``parent_id`` inherits, ROOT-FIRST.
+
+    ``SPRINT_JOBS.md`` 5.1. **A collection is not a scope a table has to express. It is a
+    subtree, and a setting on a node reaches the documents beneath it.** This is the walk
+    that makes that true, and it is ``rollup_tasks._options_owner`` started one level
+    higher: that one walks up from a segment to the file node and stops on its first read,
+    because an upload always writes a complete ``options`` row there. This one starts at the
+    PARENT and collects every layer above it, because a collection's declaration has to
+    reach documents that do not exist yet.
+
+    **EVERY LAYER, NOT THE NEAREST.** ``_options_owner`` returns one owner and uses its set
+    wholesale, which is correct while there is only ever one. Under a tree a caller puts
+    ``structure.max_tokens`` on ``/papers`` and ``facts.enabled`` on ``/papers/2026``, and
+    nearest-wins gives them only the second — so a collection could not refine its parent
+    without restating it. 5.1 point 1.
+
+    **IT RUNS AT UPLOAD, NOT AT PLAN TIME, and that is what keeps 11.2's purity rule
+    intact.** :func:`plan_after_probe` never learns that ancestors exist: the resolved set
+    lands in the node's ``options`` row exactly as it did before, and a guard still reads
+    only patterns and options. Resolving at plan time would put a tree read inside the
+    planner and make ``EXPLAIN`` and the run two functions.
+
+    A parent id that names nothing RAISES. The upload validates the parent before it gets
+    here and every other caller can, so a missing node is a caller that did not — and
+    silently inheriting nothing would ingest a document under defaults the collection it
+    named was supposed to set.
+    """
+    if parent_id is None:
+        return ()
+    parent = session.get(Document, parent_id)
+    if parent is None:
+        raise LookupError(f"Parent document {parent_id} not found")
+    evidence = EvidenceRepository(session)
+    layers: list[dict] = []
+    # `path` is the ancestor ids ROOT-FIRST and the parent itself is the last layer, which
+    # is the order `resolve_options` applies them in: nearest last, so it wins.
+    for node_id in list(parent.path or []) + [parent.id]:
+        stored = evidence.read(node_id, OPTIONS_KEY)
+        if isinstance(stored, dict) and stored:
+            layers.append(stored)
+    return tuple(layers)
+
+
 def enqueue_frontier(
     tasks: TaskQueueRepository, child: Document, frontier: Frontier
 ) -> tuple[int, ...]:

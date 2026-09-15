@@ -36,7 +36,13 @@ from pydantic import Json
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from jmfts_core.access import governing_acrs, require_add_child
+from jmfts_core.access import (
+    AccessDeniedError,
+    can_read,
+    governing_acrs,
+    require_add_child,
+    require_write,
+)
 from jmfts_client.contracts.attempt import AttemptRecord
 from jmfts_client.contracts.explain import (
     AlreadyStored,
@@ -47,14 +53,22 @@ from jmfts_client.contracts.explain import (
 )
 from jmfts_core.explain_wire import analyzed_file_from_detection, explain_response_from_plan
 from jmfts_client.contracts.ingest import IngestRequest, IngestResponse, PipelineInfo
-from jmfts_client.contracts.upload import FileUploadResponse, IngestFrontierResponse, UploadedFile
+from jmfts_client.contracts.upload import (
+    CollectionOptionsRequest,
+    CollectionOptionsResponse,
+    FileUploadResponse,
+    IngestFrontierResponse,
+    UploadedFile,
+)
 from jmfts_core.config import get_settings
+from jmfts_core.evidence import ABSENT
 from jmfts_core.fetch_tasks import SOURCE_KIND_TASKS
 from jmfts_core.ingest_options import (
     INGEST_USETYPES,
     SOURCE_CONTENT,
     Usetype,
     get_usetype,
+    merge_option_layers,
     resolve_options,
     resolve_usetype_options,
 )
@@ -66,6 +80,7 @@ from jmfts_core.ingest_tasks import (
     PROBE_WRITE_MODE,
     SOURCE_KEY,
     TASK_PROBE,
+    collection_option_layers,
     explain_plan,
 )
 from jmfts_core.models.document import (
@@ -707,7 +722,17 @@ class IngestService:
         # option instead of a 201 and a node that fails an hour later. And the format the
         # options are checked against is the one the bytes are: `probe` re-derives it from
         # the same function over the same bytes, so what was validated is what will run.
-        resolved_options = resolve_options(detection.format, options)
+        #
+        # AND AGAINST THE COLLECTIONS ABOVE IT — `SPRINT_JOBS.md` 5.1, the ancestor walk.
+        # THIS is where it runs, not at plan time: `plan_after_probe(fmt, patterns,
+        # options)` never learns that ancestors exist, so a guard still reads only patterns
+        # and options and `EXPLAIN` and the run stay provably one function. The complete
+        # resolved set lands in the `options` evidence row exactly as it did before, which
+        # is what makes 5.1's third point true — a document keeps what it was ingested with
+        # when the collection above it changes.
+        resolved_options = resolve_options(
+            detection.format, options, inherited=collection_option_layers(db, parent_id)
+        )
 
         repo = DocumentRepository(db)
 
@@ -1000,6 +1025,7 @@ class IngestService:
     def analyze_ingest(
         self,
         file: UploadedFile,
+        parent_id: Optional[int] = None,
         options: Optional[Json[dict]] = None,
         private: bool = False,
     ) -> AnalyzeIngestResponse:
@@ -1041,6 +1067,15 @@ class IngestService:
         ``options`` are validated against the DETECTED format, before anything else, so a
         misspelled option is a 400 here exactly as it is on the upload — which is the point
         of analysing first.
+
+        ``parent_id`` IS ACCEPTED FOR THE SAME REASON ``private`` IS: this is a forecast of
+        an upload, and an upload names the folder it lands in. A collection configures the
+        documents ingested under it (``SPRINT_JOBS.md`` 5.1), so an analysis that ignored
+        the parent would report a plan under options the upload is not going to use —
+        confidently, and about the one input the caller had already told us. The layers are
+        merged into the request's overrides here rather than passed down, which is what
+        keeps :func:`~jmfts_core.ingest_tasks.explain_plan` a pure function of
+        ``(format, patterns, options)`` (11.2) with no tree read inside it.
         """
         data = file.data
         if not data:
@@ -1064,8 +1099,11 @@ class IngestService:
         )
 
         # Before the probe, so that a bad option is a 400 whatever the bytes turn out to
-        # be — the same position, and the same reason, as in `upload_file`.
-        resolve_options(detection.format, options)
+        # be — the same position, and the same reason, as in `upload_file`. The collections
+        # above `parent_id` are layered in first, so what is validated and what is forecast
+        # are the set the upload would actually run with (SPRINT_JOBS.md 5.1).
+        requested = merge_option_layers(*collection_option_layers(self.session, parent_id), options)
+        resolve_options(detection.format, requested)
 
         try:
             patterns, probe_detail = probe_patterns(data, detection)
@@ -1083,7 +1121,7 @@ class IngestService:
                 already_stored=self._already_stored(digest, private),
             )
 
-        plan = explain_plan(detection.format, options, patterns, patterns_source=PATTERNS_PROBED)
+        plan = explain_plan(detection.format, requested, patterns, patterns_source=PATTERNS_PROBED)
         return AnalyzeIngestResponse(
             file=analyzed,
             format=detection.format,
@@ -1120,6 +1158,122 @@ class IngestService:
             settled=existing.settled,
             options=evidence_value(self.session, existing.id, OPTIONS_KEY),
         )
+
+    # -- Per-collection configuration (SPRINT_JOBS.md 5.1) --------------------------
+    #
+    # "What is actually new is small: a route that writes an `options` row to a node that
+    # has none — a collection node is an asserted document (`produced_by` NULL) and nothing
+    # writes options to one today — plus the ancestor walk at upload." These two are that
+    # route; :func:`~jmfts_core.ingest_tasks.collection_option_layers` is that walk.
+    #
+    # NO BINDINGS TABLE, AND NO SECOND SCOPING MECHANISM. 5.1 amends Part 5's own argument:
+    # two subsystems arriving at one scoping mechanism was the case for one table shape,
+    # and the third subsystem is a TREE that got there first. Access comes with it —
+    # `require_write` is the whole authorization story, because "who may configure this
+    # collection" is "who may write to this node".
+
+    def _configurable(self, document_id: int) -> Document:
+        """The node whose ``options`` row is a POLICY rather than a record, or a refusal.
+
+        Two refusals, and neither is a tidiness rule.
+
+        A node with a ``file`` row is an ingested document: its ``options`` row is the
+        complete resolved set the run used (spec 3.3), and it is what answers "what was
+        this ingested with?" and what :meth:`_place_existing_file` compares a re-upload
+        against. Writing a policy over it would rewrite the record, and a node that later
+        disagreed with its own tree would be undiagnosable.
+
+        A node with a ``produced_by`` stamp was written by a rule (4.2). Configuring it
+        would be configuring the rung's output rather than a folder, and the setting would
+        be destroyed by the re-derivation that rewrites it.
+        """
+        doc = DocumentRepository(self.session).get(document_id)
+        if doc is None or not can_read(self.session, doc):
+            raise LookupError(f"Document {document_id} not found")
+        if doc.produced_by:
+            raise ValueError(
+                f"Document {document_id} was produced by {doc.produced_by!r}; a rule's "
+                "output is not a collection, and a setting on it would be rewritten by the "
+                "next run of that rule. Configure the node the ingestion is under."
+            )
+        if EvidenceRepository(self.session).read(doc.id, "file") is not ABSENT:
+            raise ValueError(
+                f"Document {document_id} was ingested from bytes, and its `options` row is "
+                "the record of the run that produced it (INGEST_SPEC.md 3.3), not a policy "
+                "for uploads beneath it. Configure the collection it sits in."
+            )
+        return doc
+
+    def _collection_options(self, doc: Document) -> CollectionOptionsResponse:
+        """One node's declaration, what it inherits, and the merge of the two."""
+        own = EvidenceRepository(self.session).read(doc.id, OPTIONS_KEY)
+        own = dict(own) if isinstance(own, dict) else {}
+        inherited = merge_option_layers(*collection_option_layers(self.session, doc.parent_id))
+        return CollectionOptionsResponse(
+            document_id=doc.id,
+            options=own,
+            inherited=inherited,
+            effective=merge_option_layers(inherited, own),
+        )
+
+    @expose(
+        "GET",
+        "/documents/{document_id}/ingest-options",
+        response_model=CollectionOptionsResponse,
+        errors={LookupError: 404},
+        tags=["ingest"],
+        summary="What a collection asks of the documents ingested under it",
+    )
+    def get_collection_options(self, document_id: int) -> CollectionOptionsResponse:
+        """What this node declares, what it inherits, and what an upload here starts from.
+
+        READ ACCESS, NOT WRITE. A grantee who may see a folder may see the policy its
+        contents are ingested under; setting it is the verb that needs write.
+
+        A node that has never been configured answers ``{}`` rather than 404, because a
+        collection that deviates in nothing and one nobody has configured are the same
+        default and reporting them differently would invite a caller to tell them apart.
+        """
+        doc = DocumentRepository(self.session).get(document_id)
+        if doc is None or not can_read(self.session, doc):
+            raise LookupError(f"Document {document_id} not found")
+        return self._collection_options(doc)
+
+    @expose(
+        "PUT",
+        "/documents/{document_id}/ingest-options",
+        response_model=CollectionOptionsResponse,
+        errors={LookupError: 404, ValueError: 400, AccessDeniedError: 403},
+        tags=["ingest"],
+        summary="Set what a collection asks of the documents ingested under it",
+    )
+    def set_collection_options(
+        self, document_id: int, request: CollectionOptionsRequest
+    ) -> CollectionOptionsResponse:
+        """Write this node's ingest-option declaration. ``SPRINT_JOBS.md`` 5.1.
+
+        Validated with the same :func:`~jmfts_core.ingest_options.resolve_options` an
+        upload calls, so an unknown group, an unknown option or a wrong type is a 400 here
+        exactly as it is there — and a collection cannot be left holding a setting that
+        would fail every upload made under it. The format is empty because there are no
+        bytes: every check ``_apply`` makes is per group and per option, and the format
+        appears only in the message.
+
+        IT REPLACES RATHER THAN MERGES, and an empty object is therefore how a declaration
+        is cleared. A merging PUT would leave a caller no way to remove a key, which is a
+        second verb's worth of surface for an operation this one already expresses.
+
+        **What it does NOT do is re-ingest anything.** 5.1 point 3: a collection is a
+        default for new uploads, and a document ingested before this call keeps the options
+        it was ingested with. Re-applying is Part 9's re-derivation, and the recorded row on
+        each node is what makes the difference computable when that arrives.
+        """
+        doc = self._configurable(document_id)
+        require_write(self.session, doc, action="configure ingestion under")
+        resolve_options("", request.options)
+        EvidenceRepository(self.session).write(doc.id, OPTIONS_KEY, dict(request.options))
+        self.session.flush()
+        return self._collection_options(doc)
 
     @expose(
         "GET",
