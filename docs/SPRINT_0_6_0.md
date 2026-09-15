@@ -331,6 +331,32 @@ simply the wrong number for a 24-query fixture. **The step is not "raise the thr
 it passes"**, and it is not "add retries": a test that is green because it was asked twice
 measures nothing. Part 4 question 4.4.
 
+**Answered 2026-09-15 by 79 readings, and no threshold moved.** 60 graph rebuilds and 19
+whole-process runs, range 216–224 of 240, mean 0.9175, sd 1.67 documents, **none below
+0.90**. The two samples are not distinguishable, so re-embedding contributes nothing the
+HNSW graph was not already contributing. Account 1 is the one supported, but not in the form
+it was written: the decomposition reads between-query variance 0.00513 against residual
+0.00099, so **the query matters five times more than the graph** — eight of 24 queries are
+short in all 60 builds and five are short in none. That makes the sample size the knob, and
+`QUERIES` rather than `CHUNKS`: 0.90 sits 2.75 standard errors below the mean at
+`tests/test_maxsim_recall.py:111`'s `QUERIES = 24`, 3.88 at 48 and 5.49 at 96. Raising it is
+a slower test and a better one, and it is not taken here.
+
+**Account 2 is not refuted and the step does not claim it is.** CI's `215/240` is 3.1 sd
+below the local mean, about 1 in 400 — uncomfortable rather than impossible — and **no
+reading was taken on a hosted runner**. Two channels were closed: identical vectors at 2, 4
+and 8 torch threads, stored at 6 decimals then cast to `halfvec`, so a CPU float difference
+cannot reach a stored number; and both full-suite runs measured against exactly the
+fixture's own 15,682 token rows. What stays open has a named mechanism —
+`pgvector/pgvector:pg16` is a mutable tag and `_diagnosis` prints neither `server_version`
+nor the extension version, so the 0.5.0 failure cannot say which index it measured.
+
+The record is `docs/MEASURE_MAXSIM_MARGIN.md` and the harness is
+`scripts/measure_maxsim_margin.py`. **`ANN_INDEX_HEALTH.md` 5.8 closes by advising that
+`CHUNKS` is the knob; it is the wrong one** — `CHUNKS` moves the mean and `QUERIES` moves
+the spread, and the margin is a spread problem. That correction is owed to a held-back
+document and cannot be made from this tree.
+
 ### Block C — the office read path, resumed
 
 **These are `docs/SPRINT_0_4_0.md` Block C steps 8 through 12, renumbered here and otherwise
@@ -957,6 +983,22 @@ changed" is a red suite rather than a conversation.
 **IC-2 and IC-4 are the two that carry the beeline**, and they are written in different steps
 on purpose: the route can exist before a search hit knows to point at it, and a hit that
 carries an anchor is useful in the log before there is a page to draw it on.
+
+**Two rows above are narrower than what step 33 and the office-rectangle step actually
+wrote, and the rows are kept as written because the widening is the finding.**
+
+IC-4's shape reads as two fields. It is four, because a `.docx` carries *two* anchors at
+once and not one: `source_anchor` is the exact `ooxml` address, `render_anchor` is the
+rectangle recovered from the rendition, and each has its own `.unresolved` companion. The
+four names are declared together at `jmfts-client/jmfts_client/contracts/anchor.py:38-48`.
+The pin should read: an office hit carries the rendition rectangle **as well as** the
+address. A dotted name means containment in that registry, so the second row could not have
+been `source_anchor.rendition`.
+
+IC-9's shape reads `(source_anchor, surface) → box`. Read it as `(an anchor pair, surface) →
+box`. The component takes `{anchor, unresolved}` and **refuses a call carrying only one of
+the two keys** rather than defaulting the missing one, which is the behaviour the step's
+test pins and is not derivable from the row as written.
 
 ### 5.2 The gates
 
