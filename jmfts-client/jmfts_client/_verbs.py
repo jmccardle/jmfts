@@ -96,6 +96,8 @@ from jmfts_client.contracts.triple import TripleDetailResponse
 from jmfts_client.contracts.triple import TripleInvalidateRequest
 from jmfts_client.contracts.triple import TripleResponse
 from jmfts_client.contracts.triple import TripleSupersedRequest
+from jmfts_client.contracts.upload import CollectionOptionsRequest
+from jmfts_client.contracts.upload import CollectionOptionsResponse
 from jmfts_client.contracts.upload import FileUploadResponse
 from jmfts_client.contracts.upload import IngestFrontierResponse
 from jmfts_client.contracts.upload import UploadedFile
@@ -1208,6 +1210,7 @@ class _GeneratedVerbs(_VerbTransport):
         file: UploadedFile,
         *,
         options: Optional[dict] = None,
+        parent_id: Optional[int] = None,
         private: bool = False,
     ) -> AnalyzeIngestResponse:
         """What THESE bytes would do: run probe, report the plan, store nothing
@@ -1219,7 +1222,7 @@ class _GeneratedVerbs(_VerbTransport):
         return self._call(
             "POST",
             "/ingest/analyze",
-            query={"private": private},
+            query={"parent_id": parent_id, "private": private},
             form_json={"options": options},
             files={"file": file},
             response=AnalyzeIngestResponse,
@@ -1259,6 +1262,23 @@ class _GeneratedVerbs(_VerbTransport):
             response=IngestFrontierResponse,
         )
 
+    def get_collection_options(
+        self,
+        document_id: int,
+    ) -> CollectionOptionsResponse:
+        """What a collection asks of the documents ingested under it
+
+        ``GET /documents/{document_id}/ingest-options`` — IngestService.get_collection_options
+
+        Raises on 404 (server: LookupError).
+        """
+        return self._call(
+            "GET",
+            "/documents/{document_id}/ingest-options",
+            path={"document_id": document_id},
+            response=CollectionOptionsResponse,
+        )
+
     def ingest_content(
         self,
         request: IngestRequest,
@@ -1288,6 +1308,27 @@ class _GeneratedVerbs(_VerbTransport):
             "GET",
             "/ingest/pipelines",
             response=list[PipelineInfo],
+        )
+
+    def set_collection_options(
+        self,
+        document_id: int,
+        request: CollectionOptionsRequest,
+    ) -> CollectionOptionsResponse:
+        """Set what a collection asks of the documents ingested under it
+
+        ``PUT /documents/{document_id}/ingest-options`` — IngestService.set_collection_options
+
+        Raises on 400 (server: ValueError).
+        Raises on 403 (server: AccessDeniedError).
+        Raises on 404 (server: LookupError).
+        """
+        return self._call(
+            "PUT",
+            "/documents/{document_id}/ingest-options",
+            path={"document_id": document_id},
+            body=request,
+            response=CollectionOptionsResponse,
         )
 
     def upload_file(

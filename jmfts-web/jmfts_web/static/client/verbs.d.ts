@@ -435,6 +435,51 @@ export interface ChunkResponse {
   chunks: Array<ChunkItem>;
 }
 
+/**
+ * What a collection asks for on its behalf and on its descendants'.
+ *
+ * ``SPRINT_JOBS.md`` 5.1. A collection is a SUBTREE, not a row in a bindings table, so
+ * configuring one is writing a setting on a node — and "who may configure this
+ * collection" becomes "who may write to this node", which RBAC has already answered.
+ *
+ * **This is a PARTIAL set, unlike the one an upload records.** A file node's `options`
+ * row is the complete resolved set the run used; this is a declaration of what to
+ * deviate, so a folder can name `structure.max_tokens` and leave everything else to the
+ * layer below. That is what lets a nested collection refine its parent without restating
+ * it. An empty object is a real answer — this collection deviates in nothing — and it is
+ * also how a declaration is cleared, because there is nothing a separate verb would say.
+ *
+ * **It is a default for NEW uploads, not a live policy.** A document ingested before this
+ * changed keeps what it was ingested with, which is the honest consequence of resolving
+ * at upload time rather than at plan time; re-applying is a re-ingest, and the recorded
+ * row is what makes the difference computable.
+ */
+export interface CollectionOptionsRequest {
+  /**
+   * Option overrides in the shape `POST /ingest/file` takes them — `{"structure": {"max_tokens": 60}}`. Validated exactly as a request's are, so an option that does not exist is a 400 here for the same reason it is a 400 there.
+   */
+  options: Record<string, unknown>;
+}
+
+/**
+ * What one node declares, what it inherits, and what an upload under it starts from.
+ */
+export interface CollectionOptionsResponse {
+  document_id: number;
+  /**
+   * What THIS node declares. `{}` when it declares nothing, which is the same answer as a node that has never been configured — a collection that deviates in nothing and one that was never asked are the same default.
+   */
+  options: Record<string, unknown>;
+  /**
+   * The collections ABOVE this one, merged root-first. `{}` at the top of a tree.
+   */
+  inherited: Record<string, unknown>;
+  /**
+   * `inherited` layered with `options` — where an upload directly under this node starts, before the format profile and before its own overrides. Still a partial set: the complete one needs a format, and the format is the bytes'.
+   */
+  effective: Record<string, unknown>;
+}
+
 export interface CommunityItem {
   community_id: number;
   size: number;
@@ -578,6 +623,29 @@ export interface CorpusFacts {
    * Named BM25 indexes that exist. An empty list means the bm25 leg of hybrid contributes nothing.
    */
   bm25_indexes: Array<string>;
+}
+
+/**
+ * An interval with an open top. ``SPRINT_JOBS.md`` 7.1 and 7.2.
+ *
+ * Every accumulator in the cost fold returns one, because a fan-out atom declares a
+ * BOUND rather than a number — so the answer is ``[low, high]`` and never a floor.
+ *
+ * ``high: null`` is not "unbounded" and not "very large". It means the measurement that
+ * would close this interval has not been taken, because ``EXPLAIN`` is given no bytes and
+ * the atom that writes it has not run. ``ExplainIngestResponse.cost.unmeasured`` names
+ * which measurement and who would write it. A sentinel integer here would be
+ * indistinguishable from a measured large number, which is the wrong answer 7.2 refuses.
+ */
+export interface CountResponse {
+  /**
+   * The floor. Always known.
+   */
+  low: number;
+  /**
+   * The ceiling, or null when nothing in this answer bounds it
+   */
+  high: number | null;
 }
 
 /**
@@ -785,6 +853,10 @@ export interface ExplainIngestResponse {
    * `probe` first, then every Part 4 row in table order — at EVERY scope, so a workbook's forecast reaches the two tasks per sheet rather than stopping at the sheet list. None is omitted; read `scope` to know which node each runs on.
    */
   tasks: Array<ExplainedTaskResponse>;
+  /**
+   * How much, folded over `tasks` — how many task instances, how many nodes, how many embeddings and LLM calls. Always present: the fold is a walk over declarations with no I/O in it, and splitting it into a second request would be two answers about one plan that a caller could receive out of step.
+   */
+  cost: PlanCostResponse;
 }
 
 /**
@@ -832,6 +904,22 @@ export interface ExplainedTaskResponse {
    * The resolved options this task's queue row would carry
    */
   params: Record<string, unknown>;
+  /**
+   * HOW MANY instances of this task the plan holds — `scope`'s cardinality times whether `outcome` lets it run at all. `@root` is one node, so a root-scoped task is 1 or 0; a child-scoped one is however many nodes the rules above it write, which is where a three-sheet workbook's three `profile:sheet` come from. `[0, 1]` for a conditional task: the patterns that decide it were not supplied and the fold refuses to pick.
+   */
+  multiplicity: CountResponse;
+  /**
+   * Child nodes all of those instances write together, from the atom's declared fan-out bound. Zero for a task that writes no children; an open top when the bound's evidence has not been measured yet.
+   */
+  writes: CountResponse;
+  /**
+   * What `writes` counts — `chunk`, `sheet`, `record`. Null when nothing is written. Present because "wrote 5" has to say five WHAT before it can be held against a ceiling.
+   */
+  writes_usetype?: string | null;
+  /**
+   * The bound in words — `⌊characters / min_chunk_length⌋ chunks`. The atom's own sentence, not a paraphrase of it.
+   */
+  writes_basis?: string | null;
 }
 
 /**
@@ -1421,6 +1509,37 @@ export interface PipelineInfo {
    * The resolved ingest options for this usetype, option group -> parameters. A request may override any of them; see the `options` field of an upload.
    */
   options?: Record<string, Record<string, unknown>>;
+}
+
+/**
+ * How much, beside `EXPLAIN`'s what. ``SPRINT_JOBS.md`` Part 7.
+ *
+ * One traversal of the plan with a choice of accumulator: counting tasks, child nodes,
+ * embeddings and LLM calls are the same fold. What makes it a fold rather than a query is
+ * that a parent rule's fan-out IS the child rule's multiplicity, so cardinality composes
+ * without anything reading the tree — this costs no I/O and is computed for every plan.
+ */
+export interface PlanCostResponse {
+  /**
+   * Task INSTANCES, not table rows. A forty-sheet workbook's `profile:sheet` is forty of them, and a plan that reported one would be the reading `scope` exists to prevent.
+   */
+  tasks: CountResponse;
+  /**
+   * Child nodes the plan's rules write, from their declared fan-out bounds
+   */
+  nodes: CountResponse;
+  /**
+   * Instances by what the task's most expensive step is: `cpu` counts, parses and reads bytes; `model` is an embedding forward pass; `llm` is a call to the configured endpoint. A budget is sized on the last.
+   */
+  by_cost_class: Record<string, CountResponse>;
+  /**
+   * Every open top in this answer, and what would close each one
+   */
+  unmeasured: Array<UnmeasuredResponse>;
+  /**
+   * What these totals leave out, in sentences. Derived from the declarations, not a list kept here: work scheduled outside Part 4's table (the settling walk, a fetch, a binding), tasks that write into another tree the locus vocabulary cannot name, and any rung that writes children without declaring a bound.
+   */
+  not_counted: Array<string>;
 }
 
 /**
@@ -2535,6 +2654,29 @@ export interface UngovernedTree {
   ungoverned: number;
 }
 
+/**
+ * A count the fold needed and could not take. 7.1's `?` line.
+ *
+ * 7.1 prints `? rows — produced by profile:sheet` under the totals, and says the line
+ * naming what would collapse the interval "is the part that carries the value". This is
+ * that line: an interval with an open top is only actionable beside the name of the thing
+ * that would close it.
+ */
+export interface UnmeasuredResponse {
+  /**
+   * The registry name the bound reads — `sheet.measurements.rows`, `extraction.characters`. From the atom's own `Fanout.reads`.
+   */
+  evidence: string;
+  /**
+   * The task whose fan-out bound declared it
+   */
+  needed_by: string;
+  /**
+   * Who writes it, read out of the evidence registry rather than from a table — `profile:sheet writes it (measurements.rows)`. Run that task and the interval closes.
+   */
+  written_by: string;
+}
+
 export interface UsetypePresentationCreate {
   /**
    * The usetype this rule applies to (or '*' for catch-all)
@@ -3257,6 +3399,7 @@ export declare class JmftsClient extends JmftsTransport {
    * RemoteJmftsClient method: `analyze_ingest`.
    */
   analyze_ingest(args: {
+    parent_id?: number | null;
     private?: boolean;
     options?: Record<string, unknown> | null;
     file: Blob;
@@ -3283,6 +3426,16 @@ export declare class JmftsClient extends JmftsTransport {
   }): Promise<IngestFrontierResponse>;
 
   /**
+   * What a collection asks of the documents ingested under it
+   *
+   * `GET /documents/{document_id}/ingest-options` — IngestService.get_collection_options
+   * RemoteJmftsClient method: `get_collection_options`.
+   */
+  get_collection_options(args: {
+    document_id: number;
+  }): Promise<CollectionOptionsResponse>;
+
+  /**
    * Ingest content through a named pipeline
    *
    * `POST /ingest` — IngestService.ingest_content
@@ -3299,6 +3452,17 @@ export declare class JmftsClient extends JmftsTransport {
    * RemoteJmftsClient method: `list_registered_pipelines`.
    */
   list_registered_pipelines(args?: Record<string, never>): Promise<Array<PipelineInfo>>;
+
+  /**
+   * Set what a collection asks of the documents ingested under it
+   *
+   * `PUT /documents/{document_id}/ingest-options` — IngestService.set_collection_options
+   * RemoteJmftsClient method: `set_collection_options`.
+   */
+  set_collection_options(args: {
+    document_id: number;
+    request: CollectionOptionsRequest;
+  }): Promise<CollectionOptionsResponse>;
 
   /**
    * Upload a file, create its in-flight file node, and enqueue `probe`

@@ -66,6 +66,89 @@ class ExplainIngestRequest(BaseModel):
     )
 
 
+class CountResponse(BaseModel):
+    """An interval with an open top. ``SPRINT_JOBS.md`` 7.1 and 7.2.
+
+    Every accumulator in the cost fold returns one, because a fan-out atom declares a
+    BOUND rather than a number — so the answer is ``[low, high]`` and never a floor.
+
+    ``high: null`` is not "unbounded" and not "very large". It means the measurement that
+    would close this interval has not been taken, because ``EXPLAIN`` is given no bytes and
+    the atom that writes it has not run. ``ExplainIngestResponse.cost.unmeasured`` names
+    which measurement and who would write it. A sentinel integer here would be
+    indistinguishable from a measured large number, which is the wrong answer 7.2 refuses.
+    """
+
+    low: int = Field(description="The floor. Always known.")
+    high: Optional[int] = Field(
+        description="The ceiling, or null when nothing in this answer bounds it"
+    )
+
+
+class UnmeasuredResponse(BaseModel):
+    """A count the fold needed and could not take. 7.1's `?` line.
+
+    7.1 prints `? rows — produced by profile:sheet` under the totals, and says the line
+    naming what would collapse the interval "is the part that carries the value". This is
+    that line: an interval with an open top is only actionable beside the name of the thing
+    that would close it.
+    """
+
+    evidence: str = Field(
+        description=(
+            "The registry name the bound reads — `sheet.measurements.rows`, "
+            "`extraction.characters`. From the atom's own `Fanout.reads`."
+        )
+    )
+    needed_by: str = Field(description="The task whose fan-out bound declared it")
+    written_by: str = Field(
+        description=(
+            "Who writes it, read out of the evidence registry rather than from a table — "
+            "`profile:sheet writes it (measurements.rows)`. Run that task and the interval "
+            "closes."
+        )
+    )
+
+
+class PlanCostResponse(BaseModel):
+    """How much, beside `EXPLAIN`'s what. ``SPRINT_JOBS.md`` Part 7.
+
+    One traversal of the plan with a choice of accumulator: counting tasks, child nodes,
+    embeddings and LLM calls are the same fold. What makes it a fold rather than a query is
+    that a parent rule's fan-out IS the child rule's multiplicity, so cardinality composes
+    without anything reading the tree — this costs no I/O and is computed for every plan.
+    """
+
+    tasks: CountResponse = Field(
+        description=(
+            "Task INSTANCES, not table rows. A forty-sheet workbook's `profile:sheet` is "
+            "forty of them, and a plan that reported one would be the reading `scope` "
+            "exists to prevent."
+        )
+    )
+    nodes: CountResponse = Field(
+        description="Child nodes the plan's rules write, from their declared fan-out bounds"
+    )
+    by_cost_class: dict[str, CountResponse] = Field(
+        description=(
+            "Instances by what the task's most expensive step is: `cpu` counts, parses and "
+            "reads bytes; `model` is an embedding forward pass; `llm` is a call to the "
+            "configured endpoint. A budget is sized on the last."
+        )
+    )
+    unmeasured: list[UnmeasuredResponse] = Field(
+        description="Every open top in this answer, and what would close each one"
+    )
+    not_counted: list[str] = Field(
+        description=(
+            "What these totals leave out, in sentences. Derived from the declarations, not "
+            "a list kept here: work scheduled outside Part 4's table (the settling walk, a "
+            "fetch, a binding), tasks that write into another tree the locus vocabulary "
+            "cannot name, and any rung that writes children without declaring a bound."
+        )
+    )
+
+
 class ExplainedTaskResponse(BaseModel):
     """One task's outcome. ``INGEST_SPEC.md`` Part 4's table, read as a forecast."""
 
@@ -135,6 +218,38 @@ class ExplainedTaskResponse(BaseModel):
     )
     forbids: list[str] = Field(description="Patterns that must be false, resolved the same way")
     params: dict = Field(description="The resolved options this task's queue row would carry")
+    multiplicity: CountResponse = Field(
+        description=(
+            "HOW MANY instances of this task the plan holds — `scope`'s cardinality times "
+            "whether `outcome` lets it run at all. `@root` is one node, so a root-scoped "
+            "task is 1 or 0; a child-scoped one is however many nodes the rules above it "
+            "write, which is where a three-sheet workbook's three `profile:sheet` come "
+            "from. `[0, 1]` for a conditional task: the patterns that decide it were not "
+            "supplied and the fold refuses to pick."
+        )
+    )
+    writes: CountResponse = Field(
+        description=(
+            "Child nodes all of those instances write together, from the atom's declared "
+            "fan-out bound. Zero for a task that writes no children; an open top when the "
+            "bound's evidence has not been measured yet."
+        )
+    )
+    writes_usetype: Optional[str] = Field(
+        default=None,
+        description=(
+            "What `writes` counts — `chunk`, `sheet`, `record`. Null when nothing is "
+            'written. Present because "wrote 5" has to say five WHAT before it can be '
+            "held against a ceiling."
+        ),
+    )
+    writes_basis: Optional[str] = Field(
+        default=None,
+        description=(
+            "The bound in words — `⌊characters / min_chunk_length⌋ chunks`. The atom's own "
+            "sentence, not a paraphrase of it."
+        ),
+    )
 
 
 class ExplainIngestResponse(BaseModel):
@@ -177,6 +292,14 @@ class ExplainIngestResponse(BaseModel):
             "`probe` first, then every Part 4 row in table order — at EVERY scope, so a "
             "workbook's forecast reaches the two tasks per sheet rather than stopping at "
             "the sheet list. None is omitted; read `scope` to know which node each runs on."
+        )
+    )
+    cost: PlanCostResponse = Field(
+        description=(
+            "How much, folded over `tasks` — how many task instances, how many nodes, how "
+            "many embeddings and LLM calls. Always present: the fold is a walk over "
+            "declarations with no I/O in it, and splitting it into a second request would "
+            "be two answers about one plan that a caller could receive out of step."
         )
     )
 
