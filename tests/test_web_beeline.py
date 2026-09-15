@@ -13,21 +13,39 @@ view rendered, not constructed; it is split by ``shell/shell.js``'s own ``curren
 split, not named. A test that assembled the URL itself would pass with the two halves of the
 encoding disagreeing, which is the exact thing it is for.
 
-THREE BEELINES, NOT ONE, AND THEY END IN THREE DIFFERENT PLACES. That is the shape of the
+FOUR BEELINES, NOT ONE, AND THEY END IN FOUR DIFFERENT PLACES. That is the shape of the
 feature today and stating it honestly is worth more than a uniform story:
 
 1. **PDF** — ``citation`` writes ``{kind: "pdf", page, bbox}``, ``/image`` serves the page,
    ``pageFigure`` draws the box. Complete. This is the demo path.
-2. **``.docx`` / ``.pptx``** — ``anchor:source`` writes ``{kind: "ooxml", part, path}``, which
-   is exact and has no rectangle: an office document has no pages until ``render:pdf``
-   paginates it, and recovering geometry from that rendition is Block G step 33. So it ends at
-   "this passage is at ``<path>`` of ``<part>``", named precisely and not boxed — and the page
-   has to say which of the two absences that is.
-3. **``.xlsx``** — no anchor at all. ``CellsAnchor`` is in the contract and ``/cells`` reads
+2. **``.docx`` / ``.pptx``, paginated** — ``anchor:source`` writes ``{kind: "ooxml", part,
+   path}``, which is exact and undrawable; ``render:pdf`` paginates the document and
+   ``anchor:render`` writes ``{kind: "pdf", of: "rendition", page, bbox}`` beside it. The hit
+   carries BOTH, ``/image`` serves a page of the rendition (``pdf_for``), and the page draws
+   the rectangle and names the address as the thing the rectangle is a picture of. **It ends in
+   a box, and in a caption that says whose page number that is** — "page 4 of this appliance's
+   rendering", never "page 4", because the reader who opens the file in Word may find the
+   passage on page 5.
+3. **``.docx`` / ``.pptx``, not paginated** — the same exact address and no rendition, which is
+   the ordinary state of an appliance with no LibreOffice configured. It ends at "this passage
+   is at ``<path>`` of ``<part>``", named precisely and not boxed — and the page has to say
+   which of the FOUR absences that is: nothing has paginated the document, a rectangle was
+   looked for in a rendition and not found, a rung ran and recorded neither, or nothing ever
+   tried to place this node at all.
+4. **``.xlsx``** — no anchor at all. ``CellsAnchor`` is in the contract and ``/cells`` reads
    one, and NOTHING in the ingest path writes one (``git grep '"kind": "cells"'`` over
    ``jmfts_core`` finds two comments and no writer). A workbook hit carries no ``source_anchor``,
    so it ends at the node the row stands for. Recorded here as the gap it is rather than papered
    over: the last test asserts the page SAYS so.
+
+**The second of those is new, and what it closed was a gap between the appliance and the
+browser rather than a missing capability.** Block G step 33 landed ``anchor:render`` and
+``DocumentService._pdf_anchor`` has tried the ``render_anchor`` row first ever since, so
+``GET /documents/{id}/region?anchor=true`` cropped a ``.docx`` to its real rectangle while the
+front end asked for ``source_anchor`` and nothing else — the rectangle existed in the database
+and nothing fetched it. This file's own header said beeline 2 "ends at ``<path>`` of ``<part>``,
+named precisely and not boxed" and cited step 33 as future work; that was wrong about the
+appliance and right about the browser on the same day.
 """
 
 from __future__ import annotations
@@ -56,18 +74,28 @@ from tests.test_web_document_view import PAGE_DPI, PAGE_PIXELS, _cells
 from tests.test_web_renderers import RENDER_DOM, _style, png_bytes
 from tests.test_web_views import NODE, STATIC, _find, needs_node
 
-#: The three anchors, in the three states the three beelines end in.
+#: The anchors, in the states the four beelines end in.
 PDF_ANCHOR = {"kind": "pdf", "page": 3, "bbox": [72.0, 118.4, 540.0, 262.9]}
 OOXML_ANCHOR = {
     "kind": "ooxml",
     "part": "word/document.xml",
     "path": "/w:document/w:body/w:p[42]",
 }
+#: The other anchor of a paginated office document — `anchor:render`'s row. Same rectangle as
+#: the PDF one so that the two draw identically and the only thing that differs on the page is
+#: what it is CALLED, which is the half of this feature that is not geometry.
+RENDER_ANCHOR = {
+    "kind": "pdf",
+    "of": "rendition",
+    "page": 3,
+    "bbox": [72.0, 118.4, 540.0, 262.9],
+}
 
-#: The three nodes the three hits point at.
+#: The four nodes the four hits point at.
 PDF_DOC = 11
 OOXML_DOC = 12
 SHEET_DOC = 13
+RENDERED_DOC = 14
 
 
 def _doc(id_: int, title: str | None, usetype: str, content: str, **extra) -> DocumentResponse:
@@ -116,8 +144,17 @@ def _search_response() -> dict:
                     score=0.501,
                     method="vector",
                 ),
+                # The office document this appliance HAS paginated: both anchors on one hit,
+                # which is the round trip IC-4 removes arriving in its office spelling.
+                SearchResultItem(
+                    document=_doc(RENDERED_DOC, "The contract", "chunk", "the clause that hit"),
+                    score=0.488,
+                    method="vector",
+                    source_anchor=OOXML_ANCHOR,
+                    render_anchor=RENDER_ANCHOR,
+                ),
             ],
-            total=3,
+            total=4,
             latency_ms=11.0,
             applied=AppliedFilters(limit=10, exclude_types=[]),
         ).model_dump_json()
@@ -178,16 +215,19 @@ def _fixture() -> str:
                 str(PDF_DOC): _view(PDF_DOC, "Q3 board pack", "chunk", "late interaction"),
                 str(OOXML_DOC): _view(OOXML_DOC, "The proposal", "chunk", "the paragraph"),
                 str(SHEET_DOC): _view(SHEET_DOC, "row 4", "record", "Acme | Won | 12000"),
+                str(RENDERED_DOC): _view(RENDERED_DOC, "The contract", "chunk", "the clause"),
             },
             "nodes": {
                 str(PDF_DOC): _node_doc(PDF_DOC, "chunk", "late interaction", "chunk:text"),
                 str(OOXML_DOC): _node_doc(OOXML_DOC, "chunk", "the paragraph", "chunk:text"),
                 str(SHEET_DOC): _node_doc(SHEET_DOC, "record", "Acme | Won", "extract:sheet"),
+                str(RENDERED_DOC): _node_doc(RENDERED_DOC, "chunk", "the clause", "chunk:text"),
             },
             "backs": {
                 str(PDF_DOC): _back(PDF_DOC),
                 str(OOXML_DOC): _back(OOXML_DOC),
                 str(SHEET_DOC): _back(SHEET_DOC),
+                str(RENDERED_DOC): _back(RENDERED_DOC),
             },
             "cells": _cells(),
             "dpi": PAGE_DPI,
@@ -279,6 +319,7 @@ HARNESS = textwrap.dedent("""
     await open(links[0], "pdf");
     await open(links[1], "ooxml");
     await open(links[2], "sheet");
+    await open(links[3], "rendered");
     console.log(JSON.stringify(out));
     """)
 
@@ -351,13 +392,14 @@ def test_a_pdf_hit_arrives_at_its_own_page_with_the_box_already_on_it(beeline):
 
 @needs_node
 def test_an_office_hit_arrives_at_an_exact_address_and_says_why_there_is_no_box(beeline):
-    """WHERE THE `.docx` BEELINE ENDS, and it is not where the PDF one does.
+    """WHERE AN UNPAGINATED `.docx` BEELINE ENDS, and it is not where the PDF one does.
 
     ``anchor:source`` recovered this address from the uploaded package, so the record is
     complete; what does not exist is a page to draw on, because an office document has none
-    until ``render:pdf`` paginates it. The page therefore names the passage — part and element —
-    and says in those words that the rectangle is Block G step 33 rather than something that
-    failed.
+    until ``render:pdf`` paginates it and this appliance has not — which is the ordinary state
+    of an appliance with no LibreOffice beside it. The page therefore names the passage — part
+    and element — and says which of the four rendition absences this is, naming the two rungs
+    and the setting rather than a sprint step somebody would have to go and read.
 
     The property under test is the DISTINCTION: a reader must be able to tell "we know exactly
     where this is and cannot draw it yet" from "we have no idea where this is". So the
@@ -377,12 +419,70 @@ def test_an_office_hit_arrives_at_an_exact_address_and_says_why_there_is_no_box(
     text = beeline["landings"]["ooxml"]["text"]
     assert not _find(beeline["landings"]["ooxml"], "overlay-box"), "there is no rectangle to draw"
     assert "/w:document/w:body/w:p[42] of word/document.xml" in text
-    assert "step 33" in text, "it says what would draw the box, and when"
+    assert "render:pdf" in text and "anchor:render" in text, "what would draw the box"
+    assert "JMFTS_CONVERT_URL" in text, "and what this appliance is missing to get one"
     assert "anchor:source" in text, "and that nothing is missing from the record"
     # The words the OTHER absence uses, which this is not. `highlightNotice`'s wording for an
     # unresolved row is "No rectangle was recorded for this passage: <reason>"; saying that here
     # would report a complete record as a recovery failure.
     assert "No rectangle was recorded for this passage" not in text
+    # And not the words of the paginated case either, which is the hit below this one in the
+    # same result list: two `.docx` hits, two endings, and the page says which is which.
+    assert "of this appliance's rendering" not in text
+
+
+# --------------------------------------- beeline 2b: the office document, boxed on a rendering
+
+
+@needs_node
+def test_a_paginated_office_hit_arrives_with_a_rectangle_and_says_whose_page_it_is(beeline):
+    """THE LAST LINK OF THE OFFICE BEELINE, driven through the same seams as the PDF one.
+
+    The appliance could crop this rectangle before the browser could ask for it: Block G step 33
+    landed ``anchor:render`` and ``_pdf_anchor`` tries the ``render_anchor`` row first, so
+    ``GET /documents/{id}/region?anchor=true`` on a ``.docx`` has served the right crop for days
+    while every page in this bundle read ``source_anchor`` and nothing else. The rectangle
+    existed in the database and nothing fetched it. This is the test that it is fetched.
+
+    **What it asserts is a rectangle AND a sentence, because either one alone is a defect.** A
+    box with no label is the appliance making the document's claim on its behalf — "page 4" for
+    a file whose pages exist only inside LibreOffice, and the reader who opens it in Word and
+    finds the passage on page 5 has no way to know which of the two is wrong. A label with no
+    box is what shipped until now.
+
+    Nothing here is hand-built between the steps, which is this file's whole method: the href
+    comes off the ``<a>`` the search view rendered, the shell's own router splits it, and the
+    detail view chooses the surface. What the fragment has to carry is FOUR evidence rows rather
+    than two, and the first assertion is that they survived the URL.
+    """
+    route = beeline["landings"]["rendered:route"]
+    assert json.loads(route["params"]["anchor"]) == OOXML_ANCHOR, "what the passage IS"
+    assert json.loads(route["params"]["render"]) == RENDER_ANCHOR, "where it APPEARS"
+
+    calls = [name for name, _ in beeline["calls"]["rendered"]]
+    assert "evidence" not in calls, "the hit carried all four rows, so nothing is asked twice"
+    # `/image` DOES get called here, and that is the difference from the hit above: `pdf_for`
+    # answers an office node with its rendition, so the route that refuses an unpaginated
+    # `.docx` by name serves a page for a paginated one.
+    assert ["image", {"document_id": RENDERED_DOC, "page": 3, "dpi": PAGE_DPI}] in [
+        [name, args] for name, args in beeline["calls"]["rendered"]
+    ]
+
+    boxes = _find(beeline["landings"]["rendered"], "overlay-box")
+    assert len(boxes) == 1, "one passage, one box — and it is the office passage's"
+    assert _style(boxes[0]) == pytest.approx(
+        {"left": 11.7647, "top": 14.9495, "width": 76.4706, "height": 18.2449}, abs=1e-4
+    ), "the same transform that boxes a PDF page, which is IC-9's one claim"
+
+    text = beeline["landings"]["rendered"]["text"]
+    # THE LABEL. Authority runs opposite to drawability, so the page says whose pagination this
+    # is before a reader acts on it.
+    assert "Page 4 of this appliance's rendering" in text
+    assert "Page 4, rendered at 150 dpi." not in text, "that is what a SOURCE page says"
+    assert "no pages of its own" in text
+    # And the durable citation, kept on the page as the thing the rectangle is a picture of.
+    assert "/w:document/w:body/w:p[42] of word/document.xml" in text
+    assert "Cite the address" in text
 
 
 # ------------------------------------------------------- beeline 3: the workbook, and the gap
@@ -437,7 +537,7 @@ def test_the_result_list_says_which_of_the_three_states_each_hit_is_in(beeline):
     as a broken client rather than as a scheduled feature.
     """
     hits = _find(beeline["results"], "search-hit")
-    assert len(hits) == 3
+    assert len(hits) == 4
 
     states = []
     for hit in hits:
@@ -447,15 +547,18 @@ def test_the_result_list_says_which_of_the_three_states_each_hit_is_in(beeline):
             if node["class"].startswith("search-badge")
         ]
         states.append(badges[-1].split()[-1])
-    assert states == ["anchored", "addressed", "none"], (
-        "three hits, three states — and `addressed` is not `anchored` (no box is drawable) "
-        "and not `unresolved` (nothing failed)"
+    assert states == ["anchored", "addressed", "none", "rendered"], (
+        "four hits, four states — `addressed` is not `anchored` (no box is drawable) and not "
+        "`unresolved` (nothing failed), and `rendered` is neither of those two: a box IS "
+        "drawable and it is this appliance's rendering rather than the document's own geometry"
     )
 
-    # And the hand-off carries exactly what each hit had: the anchor, the anchor, nothing.
+    # And the hand-off carries exactly what each hit had: the anchor, the anchor, nothing, both.
     assert json.loads(_query(beeline["hrefs"][0])["anchor"]) == PDF_ANCHOR
     assert json.loads(_query(beeline["hrefs"][1])["anchor"]) == OOXML_ANCHOR
     assert _query(beeline["hrefs"][2]) == {"id": str(SHEET_DOC)}
+    assert json.loads(_query(beeline["hrefs"][3])["anchor"]) == OOXML_ANCHOR
+    assert json.loads(_query(beeline["hrefs"][3])["render"]) == RENDER_ANCHOR
 
 
 def _query(href: str) -> dict[str, str]:

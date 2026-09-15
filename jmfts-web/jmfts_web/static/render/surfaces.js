@@ -305,23 +305,41 @@ export const describeBlob = (blob) =>
   `${blob.size.toLocaleString()} bytes of ${blob.type || "an undeclared type"}`;
 
 /**
- * The two anchor rows of one node, out of a `GET /documents/{id}/evidence` response.
+ * The FOUR anchor rows of one node, out of a `GET /documents/{id}/evidence` response.
  *
  * BOTH KEYS ALWAYS, which is `highlight()`'s rule and `evidence.py:453`'s reason: "no
  * highlight" and "the rectangle could not be recovered, and here is why" are different facts,
  * and a caller that passed one has not said whether it looked for the other. A search hit
- * carries the same pair as `source_anchor` and `source_anchor_unresolved` (IC-4), which is one
- * round trip per hit cheaper — pass those straight to `highlight()` and skip this.
+ * carries the same rows (IC-4), which is one round trip per hit cheaper — build the same shape
+ * out of those and skip this.
+ *
+ * TWO PAIRS, AND THE SECOND ONE IS NESTED SO THAT IT IS ALSO A PAIR. `OFFICE_SPEC.md` Part 5's
+ * "Two anchors, not one": a `.docx` chunk carries an exact `ooxml` address in `source_anchor`
+ * AND a page-and-rectangle recovered from its rendition in `render_anchor`. They do not
+ * compete — the address cannot be wrong and cannot be drawn, the rectangle can be drawn and
+ * can be wrong — so a reader has to be able to hold both, and a viewer has to SAY which of
+ * them it drew. The shape that falls out is `{anchor, unresolved, rendition: {anchor,
+ * unresolved}}`, and it is exactly that shape because of IC-9's rule: `highlight()` refuses a
+ * call carrying one key and not the other, so each of the two things a caller might draw is
+ * its own two-key object and neither can be passed half-formed. `highlight(evidence, surface)`
+ * draws the source anchor; `highlight(evidence.rendition, surface)` draws the recovered one;
+ * there is no third spelling that silently means one of them.
  *
  * A row that is ABSENT and a row written with a null value both come back as null, and here
  * that is one fact rather than two: `source_anchor` written-and-null says the anchor task ran
- * and placed nothing, which is the same "there is no rectangle" a viewer has to draw.
+ * and placed nothing, which is the same "there is no rectangle" a viewer has to draw. The
+ * difference between them is for SAYING and is added one layer up — `evidenceFromRows` in
+ * `views/document.js`, which keeps `attempted` for each pair.
  */
 export function anchorPair(evidenceResponse) {
   const rows = evidenceResponse?.evidence ?? {};
   return Object.freeze({
     anchor: rows["source_anchor"] ?? null,
     unresolved: rows["source_anchor.unresolved"] ?? null,
+    rendition: Object.freeze({
+      anchor: rows["render_anchor"] ?? null,
+      unresolved: rows["render_anchor.unresolved"] ?? null,
+    }),
   });
 }
 
@@ -378,7 +396,17 @@ export function pageFor(document_, evidence, named) {
 export function describeAnchor(anchor) {
   if (anchor.kind === "pdf") {
     const box = anchor.bbox.map((value) => Math.round(value * 10) / 10).join(", ");
-    return `page ${anchor.page + 1}, [${box}] in points`;
+    // WHOSE PAGE NUMBER IT IS, from `of` and from nothing else. `PdfAnchor.of` exists to
+    // carry exactly this and it travels ON THE ANCHOR, so a caption stays right after the
+    // value has left the row it was read from — which is the whole reason the field is not
+    // "which row did this arrive in". "Page 3" and "page 3 of our rendering" are different
+    // claims, and the second stops being a surprise the moment a reader opens the .docx in
+    // Word and finds the passage on page 4.
+    const where =
+      anchor.of === "rendition"
+        ? `page ${anchor.page + 1} of this appliance's rendering`
+        : `page ${anchor.page + 1}`;
+    return `${where}, [${box}] in points`;
   }
   if (anchor.kind === "cells") return `${anchor.sheet}!${anchor.ref}`;
   if (anchor.kind === "span") return `characters ${anchor.char_start} to ${anchor.char_end}`;
@@ -403,8 +431,18 @@ export function describeAnchor(anchor) {
  *   `highlight` (what the overlay decided, so a caller can branch without re-deriving it)
  */
 export async function pageFigure({ blob, page, dpi, evidence, label }) {
+  // WHOSE PAGINATION THIS PAGE NUMBER BELONGS TO, read off `PdfAnchor.of` and not off which
+  // evidence row the anchor came from. A `.docx` reaches a page only through a rendition
+  // (`OFFICE_SPEC.md` Part 6), so a caption that said "Page 4" about one would be making the
+  // appliance's claim on the document's behalf — and the reader who opens the file in Word
+  // and finds it on page 5 has no way to know which of them is lying. With no anchor at all
+  // there is nothing to read, and the caption CLAIMS NOTHING rather than defaulting to
+  // "source": the `rendition` evidence row is what answers that question, and it is the
+  // view's to state (`sourceNotice`).
+  const drawn = evidence?.anchor?.of === "rendition";
+  const of = drawn ? `this appliance's rendering of ${label}` : label;
   const { image, pixels } = await pictureFrom(blob, {
-    alt: `page ${page + 1} of ${label}, rendered at ${dpi} dpi`,
+    alt: `page ${page + 1} of ${of}, rendered at ${dpi} dpi`,
   });
   const surface = rasterSurface({ kind: "pdf-page", pixels, dpi, page });
   const figure = el("figure", "render-page");
@@ -412,7 +450,23 @@ export async function pageFigure({ blob, page, dpi, evidence, label }) {
   positioned.append(image);
   figure.append(positioned);
   const found = drawHighlight(positioned, evidence, surface);
-  figure.append(say("figcaption", "render-caption", `Page ${page + 1}, rendered at ${dpi} dpi.`));
+  figure.append(
+    say(
+      "figcaption",
+      "render-caption",
+      drawn
+        ? `Page ${page + 1} of this appliance's rendering of the document, at ${dpi} dpi. ` +
+            "The document has no pages of its own until something paginates it, so this " +
+            "page number is LibreOffice's and another version of it may paginate " +
+            // NOT "the address below". This function knows what it is drawing and not what
+            // the view arranged around it, and a caption that named a position on the page
+            // would be right in the one panel it was written for and wrong everywhere else.
+            // What it can say without looking is which KIND of thing the durable citation is.
+            "differently. The durable citation is this passage's address in the source " +
+            "document, not this page number."
+        : `Page ${page + 1}, rendered at ${dpi} dpi.`
+    )
+  );
   const notice = highlightNotice(found);
   if (notice) figure.append(say("p", "overlay-notice", notice));
   figure.surface = () => surface;
@@ -485,9 +539,11 @@ export async function regionFigure({ blob, dpi, anchor, label }) {
 export function sourceNotice({ rendition, filename, mime }) {
   const note = el("p", "render-notice");
   note.textContent = rendition
-    ? "This appliance holds a rendition of this document and this front end cannot show it " +
-      "yet — serving a citation image off a rendition is docs/SPRINT_0_6_0.md Block G step " +
-      "33. What follows is the markdown `extract:text` read out of the source."
+    ? "This appliance holds a rendition of this document — a PDF LibreOffice paginated out " +
+      "of it (`render:pdf`). Any page shown here is a page of THAT, not of the uploaded " +
+      "file, which has no pages of its own; a different LibreOffice may paginate it " +
+      "differently. Where a passage has no rectangle recovered from the rendition, what " +
+      "follows is the markdown `extract:text` read out of the source."
     : "This is the markdown this appliance read out of the document, NOT a rendered page of " +
       "it. There is no rendered page: this node carries no `rendition` row. Either " +
       "`render:pdf` has not run on it, or this appliance has no converter configured — " +

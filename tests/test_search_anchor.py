@@ -38,6 +38,25 @@ PDF_ANCHOR = {"kind": "pdf", "page": 3, "bbox": [72.0, 118.4, 540.0, 262.9]}
 #: ``citation_tasks.py:284``'s shape: the code a page branches on, the sentence a human reads.
 UNRESOLVED = {"code": "no_source_span", "reason": "the chunk predates source spans"}
 
+#: ``anchor:source``'s shape over an OOXML package: exact, permanent, and undrawable.
+OOXML_ANCHOR = {
+    "kind": "ooxml",
+    "part": "word/document.xml",
+    "path": "/w:document/w:body/w:p[42]",
+}
+#: ``anchor:render``'s shape — the SAME chunk's rectangle, recovered from the rendition
+#: ``render:pdf`` produced. ``of="rendition"`` is what keeps the two tellable apart
+#: downstream: "page 3" and "page 3 of our rendering" are different claims.
+RENDER_ANCHOR = {
+    "kind": "pdf",
+    "of": "rendition",
+    "page": 1,
+    "bbox": [90.0, 220.0, 505.0, 310.0],
+}
+#: The other branch of the same task: a rendition exists and this passage was not findable
+#: in it. Part 5 makes that an ORDINARY outcome, which is why it is a row and not an error.
+RENDER_UNRESOLVED = {"code": "not_found_in_rendition", "reason": "the text did not match"}
+
 #: A term that will not collide with anything else the suite leaves in the corpus.
 TERM = "zarquonfleeble"
 
@@ -54,16 +73,34 @@ def _chunk(session, content: str):
 
 @pytest.fixture
 def corpus(db_session):
-    """Three chunks in the three anchor states IC-4 distinguishes, and nothing else."""
+    """Five chunks in the five anchor states IC-4 distinguishes, and nothing else.
+
+    Three of them are the source pair's states. The last two are the OFFICE ones, and they
+    exist because two fields can only carry two absences: a ``.docx`` passage that is exactly
+    addressed AND boxed on a rendering, and one that is exactly addressed and whose rectangle
+    was looked for in that rendering and not found.
+    """
     anchored = _chunk(db_session, f"{TERM} the passage that has a rectangle")
     unresolved = _chunk(db_session, f"{TERM} the passage whose rectangle was not recovered")
     bare = _chunk(db_session, f"{TERM} the passage nothing ever tried to place")
+    rendered = _chunk(db_session, f"{TERM} the office passage that has both anchors")
+    unrendered = _chunk(db_session, f"{TERM} the office passage not found in the rendition")
 
     rows = EvidenceRepository(db_session)
     rows.write(anchored.id, "source_anchor", PDF_ANCHOR)
     rows.write(unresolved.id, "source_anchor.unresolved", UNRESOLVED)
+    rows.write(rendered.id, "source_anchor", OOXML_ANCHOR)
+    rows.write(rendered.id, "render_anchor", RENDER_ANCHOR)
+    rows.write(unrendered.id, "source_anchor", OOXML_ANCHOR)
+    rows.write(unrendered.id, "render_anchor.unresolved", RENDER_UNRESOLVED)
     db_session.flush()
-    return {"anchored": anchored.id, "unresolved": unresolved.id, "bare": bare.id}
+    return {
+        "anchored": anchored.id,
+        "unresolved": unresolved.id,
+        "bare": bare.id,
+        "rendered": rendered.id,
+        "unrendered": unrendered.id,
+    }
 
 
 def _by_id(response) -> dict[int, object]:
@@ -107,6 +144,42 @@ def test_a_hit_with_no_rectangle_carries_the_reason_instead_of_nothing(db_sessio
     # PDFs, so most of a corpus is here and it is not a failure.
     bare = found[corpus["bare"]]
     assert bare.source_anchor is None and bare.source_anchor_unresolved is None
+    # And nothing rendition-shaped on any of the three, because none of them is an office
+    # document. The default is `None` and it is the ordinary answer, not a missing feature.
+    for state in ("anchored", "unresolved", "bare"):
+        assert found[corpus[state]].render_anchor is None
+        assert found[corpus[state]].render_anchor_unresolved is None
+
+
+def test_an_office_hit_carries_the_rectangle_as_well_as_the_address(db_session, corpus):
+    """The office half of IC-4, and why two fields were not enough.
+
+    ``OFFICE_SPEC.md`` Part 5's "Two anchors, not one": a ``.docx`` chunk carries an exact
+    ``ooxml`` address recovered from the uploaded package AND a rectangle recovered from the
+    rendition ``render:pdf`` produced. They are two facts with different truth conditions —
+    the address cannot be wrong and cannot be drawn, the rectangle can be drawn and can be
+    wrong — so they are two rows, and a hit that carried only the first would take a browser
+    that can draw a rectangle to a page saying there is not one.
+
+    ``of="rendition"`` rides on the anchor rather than being inferred from which field it
+    arrived in, which is what lets a viewer say "page 2 of our rendering" after the value has
+    travelled away from its row.
+    """
+    found = _by_id(SearchService(db_session).fulltext_search(SearchRequest(query=TERM, limit=10)))
+
+    rendered = found[corpus["rendered"]]
+    assert rendered.source_anchor == OOXML_ANCHOR, "the durable citation"
+    assert rendered.render_anchor == RENDER_ANCHOR, "and the thing that can be drawn"
+    assert rendered.render_anchor["of"] == "rendition"
+    assert rendered.render_anchor_unresolved is None
+
+    # The other branch: a rendition exists, this passage was not findable in it. The address
+    # is still exact, so this is not "we have no idea where this is" — it is "we know exactly
+    # where this is and could not find it on a page", which is a fourth answer again.
+    unrendered = found[corpus["unrendered"]]
+    assert unrendered.source_anchor == OOXML_ANCHOR
+    assert unrendered.render_anchor is None
+    assert unrendered.render_anchor_unresolved == RENDER_UNRESOLVED
 
 
 def test_every_method_carries_the_anchor_and_not_just_the_one_that_was_wired(db_session, corpus):
@@ -132,7 +205,10 @@ def test_the_anchor_rows_cost_one_query_for_the_whole_page(db_session, corpus):
     IC-4 removes ten ``GET /documents/{id}/evidence`` calls from a ten-hit result list. Paying
     for them here as ten SELECTs would be the same cost in a place nobody is looking at, so the
     read is batched — :meth:`EvidenceRepository.read_many_named`, one statement whatever the
-    page size, narrowed to the two rows an anchor lives in rather than every row a node has.
+    page size, narrowed to the FOUR rows the two anchors live in rather than every row a node
+    has. It was two until the browser learnt to draw an office document's rectangle; the
+    widening is two more bound parameters in the same ``IN``, which is the reason the office
+    half of this feature costs nothing here and the reason this count is worth pinning.
 
     Counted by listening to the engine rather than by reading the source, because "it looks like
     one query" is exactly what an ORM is good at making untrue.
@@ -150,7 +226,7 @@ def test_the_anchor_rows_cost_one_query_for_the_whole_page(db_session, corpus):
     finally:
         event.remove(engine, "before_cursor_execute", record)
 
-    assert len(response.results) >= 3, "the fixture's three chunks are in the page"
+    assert len(response.results) >= 5, "the fixture's five chunks are in the page"
     assert len(statements) == 1, (
         f"{len(statements)} queries against document_evidence for one page of "
         f"{len(response.results)} hits; the read is meant to be batched:\n" + "\n".join(statements)
