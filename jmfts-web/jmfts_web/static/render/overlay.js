@@ -133,14 +133,22 @@ export function highlight(evidence, surface) {
       // addressed EXACTLY — an element of the source package, recovered from the uploaded
       // bytes by `anchor:source` — and still has no rectangle, because an office document
       // has no pages until `render:pdf` paginates it. `OFFICE_SPEC.md` Part 5's "Two
-      // anchors, not one" is precisely this split, and step 33 is the one that recovers a
-      // rectangle from a rendition. Throwing here rather than returning UNRESOLVED keeps
-      // the distinction a viewer needs: UNRESOLVED means nothing could be recovered, and
-      // this means something exact was.
+      // anchors, not one" is precisely this split. Throwing here rather than returning
+      // UNRESOLVED keeps the distinction a viewer needs: UNRESOLVED means nothing could be
+      // recovered, and this means something exact was.
+      //
+      // THE OTHER ANCHOR NOW EXISTS. Step 33 landed `anchor:render`, which writes a
+      // `render_anchor` row carrying a page and a rectangle recovered from the rendition,
+      // and it is a PdfAnchor with `of: "rendition"`. So a caller holding an ooxml anchor
+      // should look for that row and pass THAT here. This sentence said "a rectangle needs
+      // a rendition, which is Block G step 33" in the future tense until the step landed;
+      // the refusal was always right and only its instruction had expired.
       throw new OverlayError(
         `an ooxml anchor (${anchor.path} of ${anchor.part}) is an address in the source ` +
-          `package and has no rectangle to draw on a ${surface.kind} surface. Say where the ` +
-          "passage is instead; a rectangle needs a rendition, which is Block G step 33."
+          `package and has no rectangle to draw on a ${surface.kind} surface. It is the ` +
+          "durable citation, not a picture: pass this node's `render_anchor` row instead, " +
+          "which carries a rectangle recovered from the rendition and says so with " +
+          '`of: "rendition"`.'
       );
     default:
       throw new UnknownAnchorKind(anchor.kind);

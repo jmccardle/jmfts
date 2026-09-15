@@ -710,6 +710,14 @@ def test_an_office_passage_is_named_exactly_rather_than_boxed_or_called_missing(
     a gap — an office document has no pages until ``render:pdf`` paginates it, and recovering
     geometry from that rendition is Block G step 33.
 
+    **Step 33 has since landed, and this view does not consume it yet.** ``anchor:render`` now
+    writes a ``render_anchor`` row carrying a page and a rectangle, and ``_pdf_anchor`` serves it,
+    so ``GET /documents/{id}/region?anchor=true`` on a ``.docx`` crops to the real rectangle
+    today. What this panel draws is still the address, because the view reads ``source_anchor``
+    and nothing has taught it the second row. That is a gap between the appliance and the page
+    rather than a decision, and it is the last link in the office beeline. This paragraph is
+    where it is recorded; the assertions below are unchanged and still describe what ships.
+
     So this panel has to separate two absences that a viewer is strongly tempted to draw
     identically: **"we know exactly where this is and cannot draw it yet"** against **"we have no
     idea where this is"**. The second is ``source_anchor.unresolved``. Both were the same blank
