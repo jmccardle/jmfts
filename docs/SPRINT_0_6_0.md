@@ -643,10 +643,30 @@ task type exists (`ran`: grepped every `TASK_*` constant in `ingest_tasks.py` an
 literals). `pyproject.toml:276` says "No code imports this yet" of the `convert` extra, and
 names Part 11 step 7 as where it lands. `office/extract.py` writes no anchor.
 
+**All three closed 2026-09-14** at gates M3 (32) and M4 (33, 34). The paragraph above is the
+reading that opened the block and is kept as written.
+
 **The design is already written down and this block executes it.** `pyproject.toml:268`:
 "render any document to PDF once, at ingest, so that serving a citation image is `pymupdf`
 over a stored rendition and needs NO tier-3 dependency on the query path." That is what makes
 step 33 cheap — it is the `citation` handler that already exists, pointed at a rendition.
+
+**That last sentence is wrong and step 33 refused it, for a hazard the plan did not see.**
+Kept above because the correction is the finding. `citation`'s `TaskRow` cannot state step
+33's precondition, which is a conjunction: the chunks exist AND a rendition exists. Written as
+`after render:pdf`, the second half gates the claim on a COMPLETED row of an ADVISORY task. On
+an appliance with no LibreOffice — the default — `render:pdf` fails permanently, the dependent
+task becomes unclaimable, a pending task counts as unfinished, and **every office document
+hangs without settling**. So `anchor:render` is offered by `IngestRollupPlanner` at the
+settling boundary, where both halves are already answered; structurally the same move Block B
+step 7 made for `index:bm25`. The rendition half of the design stands — it is the dependency
+shape that does not.
+
+**Step 33 also took an additive contract change, announced rather than assumed.**
+`PdfAnchor.of: Literal["source", "rendition"] = "source"`, and a second evidence row
+`render_anchor` rather than `source_anchor.rendition` — a dotted name means containment in
+that registry, and a `.docx` carries both rows at once. The default is what lets a row written
+before the field existed and a row written after it parse alike.
 
 **`OFFICE_SPEC.md` Part 12 question 1 is answered here rather than carried.** That question
 proposed renditions off by default because they "roughly double blob storage for office
