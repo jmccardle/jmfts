@@ -608,7 +608,13 @@ def test_a_hit_carries_its_anchor_to_the_detail_view_and_says_which_state_it_is_
 
     # And the hand-off. The anchored hit's link carries the anchor verbatim; the unresolved
     # hit's carries the reason; the third carries neither and gains nothing.
-    hrefs = [link["href"] for link in result["links"]]
+    # The form carries ONE link out of this page — "save this search as a preset" — and it is the
+    # search's own fragment with the route swapped, which is why it can be recognised by route
+    # rather than by position: a fourth hit link would still fail the count below.
+    saves = [href for link in result["links"] if (href := link["href"]).startswith("#/presets")]
+    assert saves == ["#/presets?q=anchors&m=vector"], saves
+
+    hrefs = [link["href"] for link in result["links"] if not link["href"].startswith("#/presets")]
     assert len(hrefs) == 3, "one link per hit, and nothing else on this page links anywhere"
     assert hrefs[0].startswith("#/document?id=11&anchor=")
     assert json.loads(_query(hrefs[0])["anchor"]) == PDF_ANCHOR

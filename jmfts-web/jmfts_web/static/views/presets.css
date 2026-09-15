@@ -1,0 +1,68 @@
+/* The preset editor's own stylesheet.
+ *
+ * docs/SPRINT_0_6_0.md Block F, over question 4.6. Loaded by `views/presets.js` and by nothing
+ * else — `shell/shell.css`'s header states the rule: "A view that needs styling of its own adds it
+ * from its own module rather than a second <link> here", because `index.html` is the file the F3
+ * worktrees would otherwise all edit, which is the conflict IC-7 exists to remove.
+ *
+ * Every colour here is one of the shell's variables. No font host, no CDN, no absolute URL in a
+ * url() — `test_nothing_in_the_bundle_loads_from_the_network` holds the whole bundle to that, this
+ * file and the prose in this comment included.
+ *
+ * The two rules worth reading rather than skipping are `.preset-shared` and `.preset-carried`, and
+ * they are the two claims this page makes visually. The first is a banner in the warning colour
+ * because "everybody can overwrite this" has to be read before a button is pressed rather than
+ * after. The second is a bordered block rather than a paragraph because a list of keys this editor
+ * will NOT touch is the page's promise about what it preserves, and a promise set in small grey
+ * type beside a form is a promise nobody reads.
+ */
+
+.view-presets .preset-shared {
+  border: 1px solid var(--bad); border-radius: 6px;
+  padding: 8px 10px; margin: 0 0 16px;
+}
+.view-presets .preset-panel, .view-presets .preset-row, .view-presets .preset-carried,
+.view-presets .preset-conflict {
+  border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin: 0 0 12px;
+}
+.view-presets .preset-panel { padding: 0 12px 12px; }
+
+.view-presets .preset-form {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 10px 14px; align-items: start;
+}
+.view-presets .preset-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.view-presets .preset-field > span:first-child {
+  font-size: .72rem; text-transform: uppercase; letter-spacing: .07em; color: var(--dim);
+}
+.view-presets .preset-hint { font-size: .78em; }
+.view-presets .preset-wide { grid-column: 1 / -1; }
+.view-presets input, .view-presets select {
+  padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--bg); color: var(--fg); font: inherit; min-width: 0;
+}
+/* A control holding a value it cannot express is drawn as one, so the reason in its title is
+ * something a reader goes looking for rather than something they have to already suspect. */
+.view-presets input.preset-uneditable { background: var(--soft); border-style: dashed; }
+
+.view-presets button { font: inherit; padding: 6px 10px; border-radius: 4px; cursor: pointer; }
+.view-presets button.bad { border: 1px solid var(--bad); color: var(--bad); background: var(--bg); }
+.view-presets button.ghost { border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+
+.view-presets .preset-row-head { display: flex; gap: 12px; align-items: baseline; }
+.view-presets .preset-name { font-weight: 650; }
+.view-presets .preset-run { margin-left: auto; }
+.view-presets .preset-config { overflow-wrap: anywhere; color: var(--dim); }
+.view-presets .preset-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+
+.view-presets .preset-carried h3, .view-presets .preset-conflict h3 {
+  margin: 8px 0 4px; font-size: .82rem; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--dim); font-weight: 600;
+}
+.view-presets .preset-carried-row {
+  display: grid; grid-template-columns: minmax(6rem, auto) minmax(6rem, 1fr) 2fr;
+  gap: 4px 12px; padding: 5px 0; border-top: 1px solid var(--line); font-size: .88em;
+}
+.view-presets .preset-key { font-weight: 650; }
+.view-presets .preset-value { overflow-wrap: anywhere; }
+.view-presets .preset-why { overflow-wrap: anywhere; }

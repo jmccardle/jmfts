@@ -470,6 +470,17 @@ const unreadable = (anchor, detail) => ({
 export const DETAIL_PATH = "/document";
 
 /**
+ * The route the preset editor registers, and the ONE thing this page knows about writing a preset.
+ *
+ * `CONTEXT_OP` above says why the three write verbs are not called from here and that has not
+ * changed: this is a link, not a call. What it links WITH is this page's own fragment vocabulary —
+ * `paramsFromRequest` — so "save this search" is literally the search's URL with the route
+ * swapped, and the editor reads the parameters it can hold and says which ones it cannot.
+ * A view naming another view's route is already how the detail hand-off works two lines above.
+ */
+export const PRESETS_PATH = "/presets";
+
+/**
  * The fragment parameters that take a hit to the detail view WITHOUT losing its anchor.
  *
  * Both evidence rows ride in the URL as JSON. That is deliberate and it is the only encoding
@@ -818,6 +829,20 @@ function buildForm(request, contexts) {
   const run = make("button", null, "Search");
   run.type = "submit";
   actions.append(run);
+
+  // THE SEARCH IN THE ADDRESS BAR, not the unsaved state of the controls above it. This module's
+  // header says a search IS a URL, and this link is that sentence taken at its word: it carries
+  // `paramsFromRequest(request)`, which is the search that ran. A link that read the form at click
+  // time would disagree with the page whenever somebody edited a control without pressing Search,
+  // and it would do so silently — so the link says which one it takes.
+  const save = make("a", "search-save", "Save this search as a preset →");
+  save.href = `#${PRESETS_PATH}?${new URLSearchParams(paramsFromRequest(request)).toString()}`;
+  save.setAttribute(
+    "title",
+    "saves the search this page ran — the one in the address bar. Press Search first if you " +
+      "have changed a control. Presets are shared with every token holder; the editor says so."
+  );
+  actions.append(save);
   form.append(actions);
 
   return { form, controls };
