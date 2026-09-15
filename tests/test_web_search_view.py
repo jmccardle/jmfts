@@ -272,6 +272,10 @@ def _doc(
 
 PDF_ANCHOR = {"kind": "pdf", "page": 3, "bbox": [72.0, 118.4, 540.0, 262.9]}
 UNRESOLVED = {"code": "no_source_span", "reason": "the chunk predates source spans"}
+#: ``anchor:source``'s shape (``citation_tasks.py:424``), the kind the contract gained at
+#: ``471e8f7``. Exactly addressed and with no rectangle by construction, which is a fourth state
+#: for this page rather than a fourth spelling of "anchored" — see ``ANCHOR_STATE.ADDRESSED``.
+OOXML_ANCHOR = {"kind": "ooxml", "part": "word/document.xml", "path": "/w:document/w:body/w:p[42]"}
 
 
 def _hits() -> list[SearchResultItem]:
@@ -626,8 +630,15 @@ def _query(href: str) -> dict[str, str]:
 ANCHOR_HARNESS = textwrap.dedent("""
     import { install } from "./dom.mjs";
     install();
-    const { anchorState, readDetailParams, detailParams, ANCHOR_STATE, SearchRequestError } =
+    const { anchorState, detailParams, ANCHOR_STATE } =
       await import("%(static)s/views/search.js");
+    // THE READER IS NO LONGER THIS VIEW'S. `readDetailParams` lived here AND in
+    // `views/document.js`, byte-identical but for the error class; step 31 deleted both and put
+    // the encoding in `shell/citation.js`, which both views import. The round trip below is the
+    // same assertion it always was and it now crosses the seam it is a claim about: the writer
+    // is reached through the search view, the reader through the shell module.
+    const { readDetailParams, CitationRouteError } =
+      await import("%(static)s/shell/citation.js");
 
     const hit = (anchor, unresolved) => ({
       document: { id: 1, title: "t", usetype: "chunk", content: "c",
@@ -648,8 +659,10 @@ ANCHOR_HARNESS = textwrap.dedent("""
     state("unresolved", null, ANCHORS.unresolved);
     state("none", null, null);
     state("contradictory", ANCHORS.pdf, ANCHORS.unresolved);
+    state("ooxml", ANCHORS.ooxml, null);
     state("unknown kind", { kind: "waveform" }, null);
     state("malformed pdf", { kind: "pdf", bbox: [1, 2, 3, 4] }, null);
+    state("malformed ooxml", { kind: "ooxml", part: "word/document.xml" }, null);
 
     out.roundTrip.anchored = readDetailParams(detailParams(hit(ANCHORS.pdf, null)));
     out.roundTrip.bare = readDetailParams(detailParams(hit(null, null)));
@@ -658,7 +671,7 @@ ANCHOR_HARNESS = textwrap.dedent("""
       try { fn(); out.refusals[label] = null; }
       catch (error) {
         out.refusals[label] = [
-          error instanceof SearchRequestError ? "SearchRequestError" : error.name, error.message,
+          error instanceof CitationRouteError ? "CitationRouteError" : error.name, error.message,
         ];
       }
     };
@@ -684,6 +697,7 @@ def test_the_three_anchor_absences_are_three_different_answers(tmp_path):
             "pdf": PDF_ANCHOR,
             "cells": {"kind": "cells", "sheet": "Q3 Pipeline", "ref": "B4:H120"},
             "span": {"kind": "span", "char_start": 100, "char_end": 240},
+            "ooxml": OOXML_ANCHOR,
             "unresolved": UNRESOLVED,
         }
     )
@@ -705,9 +719,25 @@ def test_the_three_anchor_absences_are_three_different_answers(tmp_path):
     assert states["none"]["state"] == "none"
     assert states["contradictory"]["state"] == "contradictory"
     assert "453" in states["contradictory"]["detail"]
+
+    # THE FOURTH ANSWER, AND IT IS NOT ONE OF THE OTHER THREE. Until step 31 an `ooxml` anchor
+    # fell through to the default and this page said "this front end is older than the
+    # appliance" about a kind it can name element by element — a `.docx` hit reading as broken
+    # when nothing about it is. `ADDRESSED` is "we know exactly where this is and cannot draw it
+    # yet", which is a different fact from `UNRESOLVED`'s "we have no idea where this is" and
+    # from `ANCHORED`'s promise of a box. One word for two of those is how the distinction the
+    # whole citation feature turns on stops existing.
+    assert states["ooxml"]["state"] == "addressed"
+    assert states["ooxml"]["where"] == "/w:document/w:body/w:p[42] of word/document.xml"
+    assert "step 33" in states["ooxml"]["detail"], "it says what would draw the box, and when"
+    assert states["ooxml"]["state"] != states["unresolved"]["state"]
+
     assert states["unknown kind"]["state"] == "unreadable"
     assert "older than the appliance" in states["unknown kind"]["detail"]
     assert states["malformed pdf"]["state"] == "unreadable"
+    # And the new kind is checked rather than trusted: an `ooxml` row missing `path` is a row
+    # this page cannot read, which is a different answer again from one it can.
+    assert states["malformed ooxml"]["state"] == "unreadable"
 
     # The hand-off round-trips, and BOTH keys come back even when both are null — the shape
     # `highlight()` refuses to be called without.
@@ -720,8 +750,8 @@ def test_the_three_anchor_absences_are_three_different_answers(tmp_path):
 
     # A torn fragment is not "no anchor". Reading it as one is how a highlight silently stops
     # appearing on a link somebody edited by hand.
-    assert result["refusals"]["torn json"][0] == "SearchRequestError"
-    assert result["refusals"]["no id"][0] == "SearchRequestError"
+    assert result["refusals"]["torn json"][0] == "CitationRouteError"
+    assert result["refusals"]["no id"][0] == "CitationRouteError"
 
 
 REQUEST_HARNESS = textwrap.dedent("""

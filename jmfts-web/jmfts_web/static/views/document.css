@@ -39,6 +39,26 @@
   font-size: 0.9em;
 }
 
+/* Where an office passage is, when there is no rectangle to draw it in — `ooxmlWhere`, which
+ * is where the `.docx`/`.pptx` beeline ends. The part and the element go in the monospace a
+ * reader expects an XPath in, and the panel is bordered on the left the way a rendered surface
+ * is boxed: this IS the answer, not a note about a missing one. A rectangle needs a rendition,
+ * which is docs/SPRINT_0_6_0.md Block G step 33. */
+.view-document .doc-address {
+  border-left: 3px solid var(--accent);
+  padding: 2px 0 2px 10px;
+  margin: 8px 0;
+}
+.view-document .doc-address p:first-child {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+.view-document .doc-address p {
+  margin: 4px 0 0;
+}
+
 .view-document .doc-stub {
   border-bottom: 1px solid var(--line);
   padding: 6px 0;

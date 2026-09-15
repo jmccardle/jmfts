@@ -38,10 +38,12 @@ from jmfts_client.contracts.search import (
     SynthesizeResponse,
     validate_search_methods,
 )
+from jmfts_client.contracts.anchor import ANCHOR_ROW, ANCHOR_UNRESOLVED_ROW
 from jmfts_client.contracts.document import DocumentResponse
 from jmfts_core.effective_content import project_effective_content
 from jmfts_core.query_router import route_query
 from jmfts_core.registry import expose, register_service
+from jmfts_core.repositories.evidence import EvidenceRepository
 from jmfts_core.reranker import get_reranker_service
 from jmfts_core.repositories.search import (
     SearchRepository,
@@ -182,16 +184,60 @@ class SearchService:
             documents.append(document)
         return documents
 
+    def _items(self, results) -> list[SearchResultItem]:
+        """``SearchResultItem`` per result, with the node's own anchor rows on it.
+
+        **IC-4, and this is the half of it that was missing.** ``docs/SPRINT_0_6_0.md`` step 18
+        landed the two FIELDS on the contract and said at the definition that "Block F step 31
+        is where the three pieces meet"; nothing filled them, so every hit reported
+        ``source_anchor: null`` — which a front end cannot tell from a node that genuinely has
+        no anchor, and which made the result list say "no anchor" about a chunk whose rectangle
+        was sitting in ``document_evidence`` all along. Step 31 is where that closes.
+
+        ONE QUERY FOR THE WHOLE PAGE. The round trip IC-4 removes is the front end's — ten hits
+        costing ten ``GET /documents/{id}/evidence`` calls to decide whether to draw ten buttons
+        — and paying for it here as ten SELECTs instead would be the same defect moved rather
+        than fixed. :meth:`EvidenceRepository.read_many_named` is narrowed to these two rows for
+        the same reason: the other twenty-odd names on a node include ``extraction`` and the
+        ``attempts`` log, and a search is not the place to move them.
+
+        THE TWO ROWS ARE PASSED THROUGH VERBATIM, as ``dict``s, not parsed into
+        :mod:`jmfts_client.contracts.anchor`'s models. That is IC-4's own wording ("verbatim
+        from the evidence rows") and the reason ``parse_anchor`` exists as a separate reader: an
+        anchor whose ``kind`` this appliance's own client has no model for would otherwise make
+        a SEARCH fail, and the version-skew answer this feature is built on is that the consumer
+        is told to upgrade, not that retrieval stops working.
+
+        An ABSENT row and a row written with a null value both arrive as ``None`` here, and that
+        is right for this surface: ``SearchResultItem`` has one optional field per row and no
+        third state to put the difference in. A caller that needs it asks
+        ``GET /documents/{id}/evidence``, whose response keeps absent and null apart —
+        ``DocumentEvidenceResponse`` 3.2 — and the detail view reads exactly that distinction
+        out of it (``evidenceFromRows`` in ``views/document.js``). What the hit carries is
+        enough to draw the box and to say why there is not one, which is what it is for.
+        """
+        documents = self._project(results)
+        anchors = EvidenceRepository(self.session).read_many_named(
+            [document.id for document in documents], (ANCHOR_ROW, ANCHOR_UNRESOLVED_ROW)
+        )
+        return [
+            SearchResultItem(
+                document=document,
+                score=r.score,
+                method=r.method,
+                source_anchor=anchors[document.id].get(ANCHOR_ROW),
+                source_anchor_unresolved=anchors[document.id].get(ANCHOR_UNRESOLVED_ROW),
+            )
+            for document, r in zip(documents, results)
+        ]
+
     def _build_response(
         self, results, start: float, applied: Optional[AppliedFilters] = None
     ) -> SearchResponse:
         """Assemble a SearchResponse via the single shared document converter."""
         latency_ms = (time.time() - start) * 1000
         return SearchResponse(
-            results=[
-                SearchResultItem(document=document, score=r.score, method=r.method)
-                for document, r in zip(self._project(results), results)
-            ],
+            results=self._items(results),
             total=len(results),
             latency_ms=latency_ms,
             applied=applied,
@@ -724,10 +770,11 @@ class SearchService:
         latency_ms = (time.time() - start) * 1000
 
         return AutoSearchResponse(
-            results=[
-                SearchResultItem(document=document, score=r.score, method=r.method)
-                for document, r in zip(self._project(results), results)
-            ],
+            # The same assembly `_build_response` uses, and it is shared rather than repeated
+            # so that IC-4's anchor cannot arrive on six search methods and not on the seventh.
+            # It was two copies of one zip before step 31, which is how a field added to the
+            # item in one place would have been added to six of the seven routes.
+            results=self._items(results),
             total=len(results),
             latency_ms=latency_ms,
             routing=RoutingMetadata(

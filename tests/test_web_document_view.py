@@ -73,6 +73,19 @@ PAGE_DPI = 150
 PDF_ANCHOR = {"kind": "pdf", "page": 3, "bbox": [72.0, 118.4, 540.0, 262.9]}
 CELLS_ANCHOR = {"kind": "cells", "sheet": "Q3 Pipeline", "ref": "C5:D6"}
 SPAN_ANCHOR = {"kind": "span", "char_start": 6, "char_end": 11}
+#: ``anchor:source``'s shape (``citation_tasks.py:424``), the kind the contract gained at
+#: ``471e8f7``. Exactly addressed, and with no rectangle by construction — ``OoxmlAnchor``:
+#: "this has no rectangle, and that is not a gap". This one also RUNS ON, into the speaker
+#: notes of the slide it began on, which is the office spelling of ``PdfAnchor.continues``
+#: and is a list of PART names rather than of page numbers.
+OOXML_ANCHOR = {
+    "kind": "ooxml",
+    "part": "ppt/slides/slide3.xml",
+    "path": "/p:sld/p:cSld/p:spTree/p:sp[2]",
+    "slide": 3,
+    "through": "/p:sld/p:cSld/p:spTree/p:sp[4]",
+    "continues": ["ppt/notesSlides/notesSlide3.xml"],
+}
 
 
 def _box(node: dict) -> dict:
@@ -291,11 +304,18 @@ PARAM_HARNESS = textwrap.dedent("""
     import { install } from "./dom.mjs";
     install();
     const view = await import("%(static)s/views/document.js");
+    // THE ROUTE READER MOVED OUT FROM UNDER THIS VIEW AT STEP 31, and this harness reaches for
+    // it where it went. It was defined here AND in `views/search.js`, byte-identical but for
+    // the error class; both copies are gone and `shell/citation.js` holds the one encoding,
+    // which is why the refusals below now name `CitationRouteError`. This view's own
+    // `DocumentParamError` stays for what is genuinely its own — `integerParam`,
+    // `evidenceFromRows`.
+    const route = await import("%(static)s/shell/citation.js");
 
     const out = { parsed: {}, brought: {}, refusals: {}, rows: {} };
     const attempt = (label, params) => {
-      out.brought[label] = view.broughtACitation(params);
-      try { out.parsed[label] = view.readDetailParams(params); }
+      out.brought[label] = route.broughtACitation(params);
+      try { out.parsed[label] = route.readDetailParams(params); }
       catch (error) { out.refusals[label] = [error.name, error.message]; }
     };
 
@@ -318,7 +338,7 @@ PARAM_HARNESS = textwrap.dedent("""
     try { view.evidenceFromRows({ document_id: 7 }); out.refusals.noEvidence = null; }
     catch (error) { out.refusals.noEvidence = [error.name, error.message]; }
 
-    out.href = view.hrefWith({ id: "7", anchor: "{}" }, { page: 3 });
+    out.href = route.hrefWith({ id: "7", anchor: "{}" }, { page: 3 });
     console.log(JSON.stringify(out));
     """)
 
@@ -338,10 +358,12 @@ def test_the_detail_route_is_the_one_the_search_view_links_to(params):
     the hit already had and re-read it from the server would put that round trip back one layer
     down, so the pair is a route argument: the evidence row, as JSON, unchanged.
 
-    ``readDetailParams`` here is BYTE-IDENTICAL to ``readDetailParams`` at
-    ``views/search.js:504`` but for the error class, because the writer of this fragment and its
-    reader were cut from one commit in two worktrees and cannot import each other. Identical
-    copies reconcile by deleting one; a paraphrase reconciles by somebody reading both.
+    ``readDetailParams`` was BYTE-IDENTICAL to ``readDetailParams`` in ``views/search.js`` but
+    for the error class, because the writer of this fragment and its reader were cut from one
+    commit in two worktrees and could not import each other. Identical copies reconcile by
+    deleting one; a paraphrase reconciles by somebody reading both. Step 31 deleted BOTH and put
+    the encoding in ``shell/citation.js``, under the shell because a route argument is routing —
+    so what this asserts now is a seam rather than a coincidence.
     """
     assert params["parsed"]["none"] == {"documentId": 7, "anchor": None, "unresolved": None}
     assert params["parsed"]["anchor"]["anchor"] == PDF_ANCHOR
@@ -375,12 +397,12 @@ def test_an_anchor_that_cannot_be_read_refuses_rather_than_disappearing(params):
     raises rather than softening to null.
     """
     name, message = params["refusals"]["not json"]
-    assert name == "DocumentParamError"
-    assert "views/search.js" in message, "the message names who writes the fragment"
+    assert name == "CitationRouteError"
+    assert "shell/citation.js" in message, "the message names who writes the fragment"
 
     for label in ("no id", "bad id"):
         name, message = params["refusals"][label]
-        assert name == "DocumentParamError"
+        assert name == "CitationRouteError"
         assert 'integer "id"' in message
 
     name, message = params["refusals"]["noEvidence"]
@@ -480,6 +502,11 @@ PANEL_HARNESS = textwrap.dedent("""
     out.planned.otherFile = view.plannedSurface({
       node: { usetype: "file" }, anchor: null, mime: "application/vnd.oasis.opendocument.text" });
     out.planned.unknownFile = view.plannedSurface({ node: { usetype: "file" }, anchor: null });
+    out.planned.ooxml = view.plannedSurface({ node: { usetype: "chunk" }, anchor: ANCHORS.ooxml });
+
+    out.address = serialize(view.ooxmlWhere(ANCHORS.ooxml));
+    out.addressPlain = serialize(view.ooxmlWhere(
+      { kind: "ooxml", part: "word/document.xml", path: "/w:document/w:body/w:p[42]" }));
 
     const summary = (evidence) => serialize(view.anchorSummary(evidence));
     out.summaries = {
@@ -488,6 +515,7 @@ PANEL_HARNESS = textwrap.dedent("""
       nothingRan: summary({ anchor: null, unresolved: null, attempted: false }),
       ranAndFound: summary({ anchor: null, unresolved: null, attempted: true }),
       unknownKind: summary({ anchor: { kind: "waveform" }, unresolved: null }),
+      ooxml: summary({ anchor: ANCHORS.ooxml, unresolved: null }),
     };
     console.log(JSON.stringify(out));
     """)
@@ -500,7 +528,14 @@ def panels(tmp_path_factory):
     return _node(
         tmp_path_factory.mktemp("panels"),
         PANEL_HARNESS,
-        anchors=json.dumps({"pdf": PDF_ANCHOR, "cells": CELLS_ANCHOR, "span": SPAN_ANCHOR}),
+        anchors=json.dumps(
+            {
+                "pdf": PDF_ANCHOR,
+                "cells": CELLS_ANCHOR,
+                "span": SPAN_ANCHOR,
+                "ooxml": OOXML_ANCHOR,
+            }
+        ),
         png=base64.b64encode(png_bytes(*PAGE_PIXELS)).decode(),
         dpi=str(PAGE_DPI),
         cells=json.dumps(_cells()),
@@ -667,6 +702,57 @@ def test_the_three_ways_a_passage_can_have_no_rectangle_read_differently(panels)
     assert "older than the appliance" in panels["summaries"]["unknownKind"]["text"]
 
 
+def test_an_office_passage_is_named_exactly_rather_than_boxed_or_called_missing(panels):
+    """WHERE THE `.docx` / `.pptx` BEELINE ENDS, and it does not end at "no highlight".
+
+    An ``ooxml`` anchor is the SOURCE anchor of ``OFFICE_SPEC.md`` Part 5: exact, permanent,
+    computed from the uploaded package by ``anchor:source``. It has no rectangle and that is not
+    a gap — an office document has no pages until ``render:pdf`` paginates it, and recovering
+    geometry from that rendition is Block G step 33.
+
+    So this panel has to separate two absences that a viewer is strongly tempted to draw
+    identically: **"we know exactly where this is and cannot draw it yet"** against **"we have no
+    idea where this is"**. The second is ``source_anchor.unresolved``. Both were the same blank
+    space before step 31, and worse than blank on the search page, where the kind fell through to
+    "this front end is older than the appliance" — said about a kind it can print element by
+    element.
+
+    The address is a caption, and the caption came out of ``describeAnchor`` — which had an
+    unguarded trailing ``else`` and captioned this anchor "characters undefined to undefined"
+    until step 31. A confidently wrong caption under an exactly-addressed passage is the same
+    defect as a confidently wrong box, drawn in prose.
+    """
+    text = panels["address"]["text"]
+    assert "/p:sld/p:cSld/p:spTree/p:sp[2] of ppt/slides/slide3.xml" in text
+    assert "undefined" not in text, "describeAnchor used to fall through to the span branch"
+
+    # How far it runs. `through` bounds the elements inside the SAME part and `continues` names
+    # the further PARTS — a passage running from a slide into its speaker notes. A viewer that
+    # printed only the first presents a partial address as a whole one, which is the office
+    # spelling of `PdfAnchor.continues`' own argument.
+    assert "slide 3" in text
+    assert "through /p:sld/p:cSld/p:spTree/p:sp[4]" in text
+    assert "ppt/notesSlides/notesSlide3.xml" in text
+
+    # And the sentence that says which absence this is. It names the rung that RECOVERED the
+    # address (so nothing is missing) and the step that would draw the box (so the reader knows
+    # what they are waiting for), and it points at the other absence by name.
+    assert "anchor:source" in text
+    assert "step 33" in text
+    assert "source_anchor.unresolved" in text
+
+    # An anchor that does not run on says nothing about running on, rather than saying it empty.
+    plain = panels["addressPlain"]["text"]
+    assert "/w:document/w:body/w:p[42] of word/document.xml" in plain
+    assert "It runs" not in plain
+
+    # Reached through `anchorSummary` as well, which is the path a reader takes who asked for
+    # `?page=` on an office node and therefore got no office panel. Same sentence, not a second
+    # wording, and NOT the "no geometry for this kind" line an unknown kind gets.
+    assert "ppt/slides/slide3.xml" in panels["summaries"]["ooxml"]["text"]
+    assert "older than the appliance" not in panels["summaries"]["ooxml"]["text"]
+
+
 def test_the_surface_is_chosen_before_anything_is_fetched(panels):
     """A 409 per text node is not a diagnosis, it is noise in the one log that is the evidence.
 
@@ -688,6 +774,10 @@ def test_the_surface_is_chosen_before_anything_is_fetched(panels):
     assert panels["planned"]["pdfFile"] == {"kind": "page"}
     assert panels["planned"]["otherFile"] == {"kind": "offer"}
     assert panels["planned"]["unknownFile"] == {"kind": "offer"}
+    # And an office node is a surface of its own rather than the offer, because the offer's
+    # button calls `/image`, which refuses a `.docx` by name. A precise address shown beats a
+    # refusal a reader has to press a button to be told.
+    assert panels["planned"]["ooxml"] == {"kind": "ooxml"}
 
 
 # ------------------------------------------------------------------------------- the page
@@ -1032,5 +1122,5 @@ def test_no_id_is_a_landing_and_an_unreadable_id_is_a_refusal(page):
     assert "#/document?id=42" in page["landing"]["text"]
     assert "#/documents" in json.dumps(page["landing"])
     name, message = page["refusals"]["badId"]
-    assert name == "DocumentParamError"
+    assert name == "CitationRouteError"
     assert "seven" in message

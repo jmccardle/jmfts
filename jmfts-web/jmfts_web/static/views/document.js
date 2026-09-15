@@ -6,7 +6,9 @@
 // and the three things that has to mean are written down rather than left to be discovered:
 //
 //   1. the anchor is a ROUTE ARGUMENT, so a hit can hand one over without a second call
-//      (`#/document?id=42&anchor={"kind":"pdf",...}`) — see `readDetailParams`;
+//      (`#/document?id=42&anchor={"kind":"pdf",...}`) — the encoding is `shell/citation.js`,
+//      which this view and `views/search.js` both import so that the writer and the reader of
+//      that fragment cannot be two files that drift;
 //   2. the surface is built by this view and the box is drawn by `render/overlay.js`, which
 //      is IC-9 and which this view CONSUMES rather than reimplements;
 //   3. every one of the overlay's five statuses reaches the page as its own sentence, because
@@ -48,6 +50,7 @@
 // the same overlay that boxes a PDF rectangle.
 
 import { registerView } from "../shell/registry.js";
+import { broughtACitation, hrefWith, readDetailParams } from "../shell/citation.js";
 import { render } from "../render/renderers.js";
 import { HIGHLIGHT_STATUS, OverlayError } from "../render/overlay.js";
 import { gridFigure } from "../render/sheet.js";
@@ -125,9 +128,9 @@ const link = (className, text, href) => {
 /**
  * One integer route argument — `page` or `dpi` — or null when it was not given.
  *
- * `id` does NOT come through here: it is `readDetailParams`' below, because that function is a
- * byte-for-byte copy of the one the search view writes the route with, and the two halves of a
- * link have to agree about what they will accept.
+ * `id` does NOT come through here: it belongs to `readDetailParams` in `shell/citation.js`,
+ * which is also where the search view's `detailParams` WRITES it — one module, so the two
+ * halves of a link cannot come to disagree about what they will accept.
  *
  * Absent and unreadable are different. Absent is a reader who did not ask for a particular
  * page, which the node's own anchor answers; `page=three` is a link that is wrong, and reading
@@ -145,62 +148,20 @@ export function integerParam(params, name) {
   return Number(raw);
 }
 
-/**
- * The detail route's three arguments: which document, and the citation the caller brought.
- *
- * THIS IS THE HALF OF THE BEELINE THIS STEP OWNS. IC-4 puts `source_anchor` and
- * `source_anchor_unresolved` on a search hit precisely so the front end need not call
- * `/documents/{id}/evidence` per result; a detail view that ignored what the hit already had
- * and went back to the server for it would put that round trip back one layer down. So step 31
- * navigates here with the hit's own rows, JSON-encoded on the fragment, and this reads them.
- *
- * **BYTE-IDENTICAL TO `readDetailParams` AT `views/search.js:504`**, but for the name of the
- * error class each module already has. Lane 27 (the search view) and this lane were cut from
- * the same commit and neither can import the other, so the writer and the reader of this
- * fragment are two copies on purpose — and identical copies reconcile at M3 by DELETING one,
- * which a paraphrase would not.
- *
- * Both keys come back present even when null, because `highlight()` in `render/overlay.js`
- * refuses to be called without both: a caller that passed only `anchor` has not said whether
- * it looked for the unresolved row, and "I did not look" is not "there was no reason
- * recorded". Torn JSON RAISES rather than reading as "no anchor" — a truncated fragment and a
- * hit with no citation are different facts, and collapsing them is how a highlight silently
- * stops appearing.
- */
-export function readDetailParams(params) {
-  const one = (name) => {
-    const text = params[name];
-    if (text === undefined || text === "") return null;
-    try {
-      return JSON.parse(text);
-    } catch (error) {
-      throw new DocumentParamError(
-        `the "${name}" fragment parameter is not JSON: ${error.message}. It is written by ` +
-          "detailParams() in views/search.js and read back here; a hand-edited URL can break it."
-      );
-    }
-  };
-  const id = params.id;
-  if (id === undefined || !/^\d+$/.test(String(id))) {
-    throw new DocumentParamError(
-      `the document detail route needs an integer "id"; got ${JSON.stringify(id ?? null)}.`
-    );
-  }
-  return { documentId: Number(id), anchor: one("anchor"), unresolved: one("unresolved") };
-}
-
-/**
- * Did the caller hand a citation over at all?
- *
- * `readDetailParams` reports a missing row and an absent argument identically, as null, which
- * is right for the overlay and not enough to decide whether to read the node's own evidence.
- * The presence of the KEY is what says somebody already looked: a hit navigates with both
- * arguments when it has them and with neither when it has none, and a tree click has never
- * looked at all. The one that has not looked pays for one call; nobody pays twice.
- */
-export function broughtACitation(params) {
-  return "anchor" in params || "unresolved" in params;
-}
+// THE DETAIL ROUTE'S OWN ARGUMENTS ARE READ BY `shell/citation.js`, NOT HERE ANY MORE.
+//
+// `readDetailParams`, `broughtACitation` and `hrefWith` were all defined in this file, and
+// `readDetailParams` was ALSO defined in `views/search.js` — byte-identical but for the name of
+// the error class, because lane 27 and lane 28 were cut from one commit and neither could
+// import the other. Both copies said so at the definition and both predicted the same fix:
+// identical copies reconcile by DELETING one, which a paraphrase would not. Step 31 deleted
+// BOTH and put the encoding under the shell, where the fragment router already lives and where
+// a view may depend on it without depending on another view; that file's header is the
+// argument for why a third module spends nothing of IC-7's independence.
+//
+// What it changes here is the name of the error a bad route argument raises: `CitationRouteError`
+// rather than this module's `DocumentParamError`, which stays for what is genuinely this view's
+// — `integerParam` and `evidenceFromRows`.
 
 /**
  * The anchor pair off a `GET /documents/{id}/evidence` response, plus whether anything tried.
@@ -244,15 +205,6 @@ export function sourceFacts(response) {
     filename: file.filename ?? null,
     mime: file.detected_mime ?? null,
   };
-}
-
-/** A link back to this view with some arguments replaced, keeping the rest of the route. */
-export function hrefWith(params, overrides) {
-  const query = new URLSearchParams();
-  for (const [key, value] of Object.entries({ ...params, ...overrides })) {
-    if (value !== null && value !== undefined && value !== "") query.append(key, String(value));
-  }
-  return `#/document?${query.toString()}`;
 }
 
 // -------------------------------------------------------------------------- source panels
@@ -396,9 +348,62 @@ export function plannedSurface({ node, anchor, mime = null }) {
   if (anchor && anchor.kind === "cells") return { kind: "cells" };
   if (anchor && anchor.kind === "pdf") return { kind: "page" };
   if (anchor && anchor.kind === "span") return { kind: "span" };
+  // An ooxml anchor is a surface of its own, and the reason it is not `offer` is the reason
+  // this whole panel exists. It says exactly where the passage is — a part of the package and
+  // an element inside it — and offering "render page 1 anyway" instead would bury that behind
+  // a button whose call `/image` refuses by name ("this is a .docx"). A precise address shown
+  // is a better answer than a refusal a reader has to ask for.
+  if (anchor && anchor.kind === "ooxml") return { kind: "ooxml" };
   if (node.usetype === USETYPE_SHEET) return { kind: "cells" };
   if (node.usetype === USETYPE_FILE && mime === PDF_MIME) return { kind: "page" };
   return { kind: "offer" };
+}
+
+/**
+ * Where an office passage is, in the source package's own structure. The office beeline's end.
+ *
+ * NOT A BOX, AND IT SAYS SO IN THOSE WORDS. `render/overlay.js` throws `OverlayError` for an
+ * `ooxml` anchor on any surface and its message is exact — "an address in the source package
+ * and has no rectangle to draw" — but a thrown error renders as a failure, and this is not one.
+ * `OoxmlAnchor`'s docstring is the authority: "**This has no rectangle, and that is not a
+ * gap.** A `.docx` has no pages until something paginates it." So the passage is NAMED, with
+ * everything the anchor carries about how far it runs, and the sentence underneath says which
+ * of the two absences a reader is looking at.
+ *
+ * The distinction this keeps is the one the whole citation feature turns on, in its office
+ * spelling: "we know exactly where this is and cannot draw it yet" is a different fact from "we
+ * have no idea where this is", and `source_anchor.unresolved` is the second one. A page that
+ * showed nothing for both would be hiding the first, which is a complete record.
+ */
+export function ooxmlWhere(anchor) {
+  const panel = make("div", "doc-address");
+  panel.append(make("p", null, `This passage is at ${describeAnchor(anchor)}.`));
+
+  const runs = [];
+  if (anchor.slide !== undefined && anchor.slide !== null) runs.push(`slide ${anchor.slide}`);
+  // `through` bounds the run of elements inside the SAME part; `continues` names the further
+  // PARTS a passage leaves into — a chunk running from a slide into its speaker notes. Two
+  // fields because neither can be read as the other (`OoxmlAnchor.continues`), and a viewer
+  // that printed only the first would present a partial address as a whole one, which is the
+  // office spelling of `PdfAnchor.continues`' own argument.
+  if (typeof anchor.through === "string") runs.push(`through ${anchor.through} of that part`);
+  if (Array.isArray(anchor.continues) && anchor.continues.length) {
+    runs.push(`continuing into ${anchor.continues.join(", ")}`);
+  }
+  if (runs.length) panel.append(make("p", "dim", `It runs ${runs.join(", ")}.`));
+
+  panel.append(
+    make(
+      "p",
+      "overlay-notice",
+      "That address is exact and nothing is missing from the record: `anchor:source` recovered " +
+        "it from the uploaded package itself. What there is no box for is a page — an office " +
+        "document has no pages until `render:pdf` paginates it, and recovering a rectangle " +
+        "from that rendition is docs/SPRINT_0_6_0.md Block G step 33. This is not a highlight " +
+        "that could not be recovered; see source_anchor.unresolved for what that reads like."
+    )
+  );
+  return panel;
 }
 
 /**
@@ -432,11 +437,17 @@ export function anchorSummary(evidence) {
       "dim",
       attempted === false
         ? "No source_anchor row and no unresolved row: nothing has tried to place this node " +
-          "in its source. `citation` is the rung that writes one, and it runs over a PDF " +
-          "text layer."
+          "in its source. Two rungs write one — `citation` over a PDF text layer, and " +
+          "`anchor:source` over a .docx or .pptx package. A WORKBOOK reaches neither: nothing " +
+          "in this appliance writes a `cells` anchor today, so a spreadsheet passage is " +
+          "addressed by the sheet region its node stands for and by nothing finer."
         : "This node carries no anchor into its source."
     );
   }
+  // An `ooxml` anchor reaching HERE is a node whose planned surface was something else — a
+  // reader who asked for `?page=` on an office node, say. It is still exactly addressed, so it
+  // gets the same sentence the panel gives it rather than being lumped in with an unknown kind.
+  if (anchor.kind === "ooxml") return ooxmlWhere(anchor);
   return make(
     "p",
     "overlay-notice",
@@ -769,6 +780,17 @@ async function component({ client, params }) {
         make("p", "dim", `This passage is at ${describeAnchor(evidence.anchor)} of that text.`)
       );
       source.append(make("pre", "render-plain", view.rendered_content.slice(start, end)));
+    } else if (shown === "ooxml") {
+      // THE OFFICE BEELINE ENDS HERE, AND IT ENDS NAMED RATHER THAN BOXED. What this panel can
+      // tell a `.docx` or `.pptx` hit is which representation of the document the page is
+      // showing (`sourceNotice`) and where in the package the passage is (`ooxmlWhere`). The
+      // passage itself is the Content panel below and is not repeated here — unlike a `span`
+      // anchor, which cuts a slice out of that same text and therefore has something of its own
+      // to show. NO CALL IS MADE: `/image` refuses an office node by name and `/region` has no
+      // rectangle to crop to, so firing either would spend an entry in the one log this front
+      // end asks to be judged by on a refusal this page can already predict.
+      if (facts !== null) source.append(sourceNotice(facts));
+      source.append(ooxmlWhere(evidence.anchor));
     } else {
       const offered = sourceOffer({
         client,
