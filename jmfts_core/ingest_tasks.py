@@ -56,7 +56,7 @@ Three things follow, and the second is the one to have in mind while reading bel
 from __future__ import annotations
 
 import operator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Callable, Optional, Protocol, Union
 
@@ -64,6 +64,8 @@ from sqlalchemy.orm import Session
 
 from jmfts_client.contracts.attempt import AttemptRecord, param_fingerprint
 from jmfts_core.atoms import (
+    ATOMS,
+    COST_CLASSES,
     COST_CPU,
     EV_BLOB,
     EV_FILE,
@@ -73,6 +75,7 @@ from jmfts_core.atoms import (
     declare,
 )
 from jmfts_core.evidence import TYPE_BOOL, TYPE_DICT, TYPE_FLOAT, TYPE_INT, TYPE_LIST, TYPE_STR
+from jmfts_core.evidence import written_by as evidence_written_by
 from jmfts_core.ingest_options import TASK_PARAM_DEFAULTS, resolve_options
 from jmfts_core.models.document import (
     Document,
@@ -2323,6 +2326,133 @@ PATTERNS_NO_PROBER = "no_prober"
 PATTERNS_UNKNOWN = "unknown"
 
 
+# ---------------------------------------------------------------------------
+# Cost — SPRINT_JOBS.md Part 7
+#
+# One traversal of the plan with a choice of accumulator: counting tasks, child nodes,
+# embeddings and LLM calls are the same fold. What makes it a fold at all rather than a
+# query is 4.1's scope — "the parent rule's fan-out IS the child rule's multiplicity, so
+# cardinality composes without anything having to read the tree" — and `_check_task_rows`
+# invariant 3, which puts a producing row above every row scoped to its children. So one
+# forward pass over TASK_ROWS in table order resolves every multiplicity.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Count:
+    """An interval with an OPEN TOP. ``SPRINT_JOBS.md`` 7.1 and 7.2.
+
+    7.1 says every accumulator returns ``[low, high]`` rather than a floor, because what
+    blows a budget is the ceiling. 7.2 says an unmeasurable count is reported and never
+    guessed — and ``EXPLAIN`` is given no bytes, so most of the measurements a fan-out
+    bound divides have not been taken when the fold runs. ``high is None`` is that state:
+    not "unbounded" and not "large", but *this appliance has not measured the thing that
+    would bound it*, with :class:`Unmeasured` saying which thing and who would write it.
+
+    A separate type from :data:`~jmfts_core.atoms.Interval` for exactly that reason. A
+    bound returns a closed interval because it is handed the evidence; a FOLD over bounds
+    some of which could not run returns this.
+    """
+
+    low: int
+    #: ``None`` when nothing in this answer bounds it. Never a sentinel integer: a large
+    #: number would be indistinguishable from a measured large number.
+    high: Optional[int]
+
+    def __post_init__(self) -> None:
+        if self.low < 0:
+            raise ValueError(f"a count cannot be negative; got low={self.low}")
+        if self.high is not None and self.high < self.low:
+            raise ValueError(f"count [{self.low}, {self.high}] has its top below its floor")
+
+    def __add__(self, other: "Count") -> "Count":
+        high = None if self.high is None or other.high is None else self.high + other.high
+        return Count(self.low + other.low, high)
+
+    def __mul__(self, other: "Count") -> "Count":
+        """Instances × per-instance. ZERO ANNIHILATES AN OPEN TOP, and it has to.
+
+        A rung that cannot run writes nothing, and nothing is a closed answer however open
+        the per-instance bound is. Without this a not-applicable ``extract:sheet`` would
+        put a ``?`` on the node total of every PDF in the appliance.
+        """
+        if self.high == 0 or other.high == 0:
+            return Count(0, 0)
+        high = None if self.high is None or other.high is None else self.high * other.high
+        return Count(self.low * other.low, high)
+
+    def __str__(self) -> str:
+        if self.low == self.high:
+            return str(self.low)
+        return f"[{self.low}, {'?' if self.high is None else self.high}]"
+
+
+#: Nothing runs and nothing is written.
+ZERO = Count(0, 0)
+#: Exactly once. The root scope's multiplicity, and an enqueued row's run factor.
+ONE = Count(1, 1)
+
+
+@dataclass(frozen=True)
+class Unmeasured:
+    """A measurement the fold needed and could not take. 7.1's ``?`` line.
+
+    7.1's worked example prints ``? rows — produced by profile:sheet`` beneath the totals,
+    and says the ``?`` line "naming what would collapse the interval is the part that
+    carries the value". This is that line: the evidence name, the atom whose bound wanted
+    it, and who writes it — the last read out of :mod:`jmfts_core.evidence` rather than
+    from a table here, so an atom that starts producing it moves this sentence the same
+    day.
+    """
+
+    #: A registry name, from the bound's own ``reads``.
+    evidence: str
+    #: The atom whose :class:`~jmfts_core.atoms.Fanout` declared it.
+    needed_by: str
+    #: :func:`jmfts_core.evidence.written_by`'s sentence.
+    written_by: str
+
+
+@dataclass(frozen=True)
+class PlanCost:
+    """How much, beside ``EXPLAIN``'s what. One traversal, four accumulators.
+
+    :attr:`not_counted` is not a disclaimer. ``SPRINT_0_6_0.md`` Block D: phase 5 inherits
+    a debt it does not pay — ``Fact.locus`` has no term for a write into another tree and
+    three shipped tasks write there — and "step 14 should state what it does not report
+    rather than quietly report a number that is wrong by three tasks". Every sentence in
+    it is DERIVED from the declarations, never a checked-in list (Part 14's rule), so a
+    task that stops being in that position stops being named.
+    """
+
+    #: Task INSTANCES, not table rows. A forty-sheet workbook's ``profile:sheet`` is forty.
+    tasks: Count
+    #: Child nodes the plan's rules write, from their declared fan-out bounds.
+    nodes: Count
+    #: Instances by :data:`~jmfts_core.atoms.COST_CLASSES`. Embeddings are ``model`` and
+    #: LLM calls are ``llm``; 8.1's budget is sized on the second.
+    by_cost_class: dict[str, Count]
+    #: Every open top in this answer, and what would close it.
+    unmeasured: tuple[Unmeasured, ...]
+    #: What these totals leave out, in sentences, each derived from the declarations.
+    not_counted: tuple[str, ...]
+
+
+#: How many times a row with this outcome runs, per node in its scope. ``conditional`` is
+#: the only one that is neither zero nor one: the patterns that decide it were not
+#: supplied, so it runs never or once and the fold refuses to pick. ``skipped`` is zero
+#: because the spec's one skipped row (``ocr``) is RECORDED as never-attempted rather than
+#: queued, and ``deferred`` is zero because nothing runs a task with no handler.
+_RUN_FACTOR: dict[str, Count] = {
+    OUTCOME_ENQUEUED: ONE,
+    OUTCOME_CONDITIONAL: Count(0, 1),
+    OUTCOME_SKIPPED: ZERO,
+    OUTCOME_DEFERRED: ZERO,
+    OUTCOME_NOT_APPLICABLE: ZERO,
+    OUTCOME_IMPOSSIBLE: ZERO,
+}
+
+
 @dataclass(frozen=True)
 class ExplainedTask:
     """One row of Part 4's table as an ``EXPLAIN`` answer. Transport-neutral, like
@@ -2360,6 +2490,21 @@ class ExplainedTask:
     #: listing ``probe``, ``structure:sheets`` and ``profile:sheet`` reads as three tasks on
     #: one node, and the third is one per sheet.
     scope: str = str(ROOT_SCOPE)
+    #: HOW MANY instances of this task the plan holds — :attr:`scope`'s cardinality, times
+    #: zero or one for whether :attr:`outcome` lets it run at all. ``@root`` is one node, so
+    #: a root-scoped row is :data:`ONE` or :data:`ZERO`; a child-scoped row is however many
+    #: nodes the rules above it write. Part 7.
+    multiplicity: Count = ONE
+    #: Child nodes ALL of those instances write together, from the atom's declared fan-out
+    #: bound (2.4). :data:`ZERO` for a task that writes no children, and an open top when
+    #: the bound's evidence has not been measured — :attr:`PlanCost.unmeasured` says which.
+    writes: Count = ZERO
+    #: The usetype :attr:`writes` counts (``Fanout.counts``), because "wrote 5" has to say
+    #: five WHAT before it can be held against a ceiling. ``None`` when nothing is written.
+    writes_usetype: Optional[str] = None
+    #: The bound in the terms 2.4's table uses — "⌊characters / min_chunk_length⌋ chunks".
+    #: Reported verbatim rather than re-worded, for the reason :attr:`reason` is.
+    writes_basis: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -2389,6 +2534,11 @@ class ExplainedPlan:
     #: order. Every row appears: a task missing from a plan is a wrong answer, not a short
     #: one.
     tasks: tuple[ExplainedTask, ...]
+    #: How much, folded over :attr:`tasks`. Part 7. Not optional and not lazily computed:
+    #: the fold is a walk over declarations with no I/O in it, and an ``EXPLAIN`` that
+    #: answered "which" and made "how many" a second request would be two answers about one
+    #: plan that a caller could receive out of step.
+    cost: PlanCost
 
 
 def _resolved_names(terms: tuple[Term, ...], fmt: str) -> tuple[str, ...]:
@@ -2408,13 +2558,26 @@ def _resolved_names(terms: tuple[Term, ...], fmt: str) -> tuple[str, ...]:
     return tuple(rendered)
 
 
+#: The prefix a fan-out bound's ``reads`` entry carries when it names one of ``probe``'s
+#: measurements. The fold has those and nothing else, so this is the whole of what
+#: separates a bound it can run from one it cannot.
+_PATTERN_PREFIX = "matched.patterns."
+
+
 def _consulted_patterns(fmt: str) -> set[str]:
-    """Every PATTERN name any row's condition reads for this format.
+    """Every PATTERN name this table reads for this format — to decide, or to count.
 
     Not the same thing as :func:`_resolved_names`, and the difference is what
     ``patterns_ignored`` reports. This answers "which measurements decide anything here",
     so a term reading an option contributes nothing to it: ``options.facts.enabled`` is not
     a key a caller's ``matched.patterns`` could have supplied.
+
+    **A FAN-OUT BOUND'S READS COUNT AS CONSULTED, and Part 7 is what made them.** Before
+    the cost fold, ``sheet_count`` decided nothing — no row's condition names it — so a
+    caller who pasted a real workbook's pattern block got it back under
+    ``patterns_ignored``, correctly. It now decides ``structure:sheets``' multiplicity, and
+    reporting it as a key that decided nothing while the plan divided by it would be the
+    confident wrong answer ``patterns_ignored`` exists to prevent.
     """
     consulted: set[str] = set()
     for row in TASK_ROWS:
@@ -2424,6 +2587,12 @@ def _consulted_patterns(fmt: str) -> set[str]:
             pattern = _resolve_pattern(t.left, fmt)
             if pattern is not None:
                 consulted.add(pattern)
+    for atom in ATOMS.values():
+        if atom.fanout is None:
+            continue
+        for name in atom.fanout.reads:
+            if name.startswith(_PATTERN_PREFIX):
+                consulted.add(name[len(_PATTERN_PREFIX) :])
     return consulted
 
 
@@ -2662,6 +2831,190 @@ def _explain_conditional(fmt: str, resolved: dict) -> tuple[ExplainedTask, ...]:
     return tuple(tasks)
 
 
+# ---------------------------------------------------------------------------
+# The fold — Part 7
+# ---------------------------------------------------------------------------
+
+
+def _fold_inputs(patterns: Optional[dict]) -> dict:
+    """The evidence a bound may be handed at ``EXPLAIN`` time, by registry name.
+
+    ``probe``'s measurements and NOTHING ELSE, and that is the whole of 7.2. Every other
+    name a bound reads — ``extraction.characters``, ``sheet.measurements.rows``,
+    ``child_count`` — is written by a task that has not run, so the fold does not have it
+    and says so rather than standing in a number for it. The parameters are the bound's
+    other argument and those the fold does have: they were resolved before any of this.
+    """
+    return {} if patterns is None else {f"{_PATTERN_PREFIX}{k}": v for k, v in patterns.items()}
+
+
+def _not_counted(tasks: tuple[ExplainedTask, ...]) -> tuple[str, ...]:
+    """What these totals leave out. DERIVED, per Part 14's rule against a second list.
+
+    Three statements, each from a declaration rather than from a name written down here:
+
+    1. **Twelve task types are not rows of Part 4's table at all.** ``explain_plan`` reads
+       ``TASK_ROWS`` and nothing else (``SPRINT_0_6_0.md`` Block C), so the rollup walk's
+       ``summarize``, the settling boundary's ``index:bm25``, a binding's ``derive:rule``
+       and the three ``fetch:*`` entry points are outside every number here. Phase 7 is
+       where that ends.
+    2. **A task that writes into another tree writes nothing this fold can count.**
+       ``SPRINT_0_5_0.md`` 6.1: ``Fact.locus`` has no term for it, so those atoms declare
+       ``produces=()`` — which is the derivable signature, and ``extract:facts`` is the one
+       of the three that is a row.
+    3. **An atom that writes children and declares no fan-out bound.** 2.4 requires one;
+       ``structure:conversation`` has none, so its ``writes`` is open rather than a number
+       short by every turn in the transcript.
+    """
+    lines: list[str] = []
+
+    outside = sorted(set(ATOMS) - {row.task for row in TASK_ROWS} - {TASK_PROBE})
+    if outside:
+        lines.append(
+            f"these totals are Part 4's table only; {len(outside)} registered task types are "
+            f"scheduled elsewhere — by the settling walk, by a fetch request or by a binding "
+            f"— and are in no number here: {', '.join(outside)}"
+        )
+
+    running = {t.task for t in tasks if t.multiplicity.high != 0}
+    for task in sorted(running):
+        atom = ATOMS.get(task)
+        if atom is None:
+            continue
+        if not atom.produces:
+            lines.append(
+                f"{task} writes rows and nodes outside this tree, and the locus vocabulary "
+                "has no term for that (INGEST_SPEC.md 5.3, SPRINT_0_5_0.md 6.1), so it "
+                "declares `produces=()` and `nodes` does not count what it writes"
+            )
+        elif atom.write_mode == WRITE_CHILDREN and atom.fanout is None:
+            lines.append(
+                f"{task} writes children and declares no fan-out bound, which SPRINT_JOBS.md "
+                "2.4 requires of one that does; its `writes` is open rather than zero, and "
+                "`nodes` is open with it"
+            )
+    return tuple(lines)
+
+
+def _fold_cost(
+    tasks: tuple[ExplainedTask, ...], patterns: Optional[dict]
+) -> tuple[tuple[ExplainedTask, ...], PlanCost]:
+    """Multiplicity and the four totals. ``SPRINT_JOBS.md`` Part 7.
+
+    ONE FORWARD PASS, AND THAT IS A PROPERTY OF THE TABLE RATHER THAN OF THIS FUNCTION.
+    ``_check_task_rows`` invariant 3 refuses a row scoped to the children of a rule below
+    it, so by the time a child-scoped row is reached every rule that could write its node
+    has already contributed. Nothing here reads the tree, and 4.1's "the parent rule's
+    fan-out IS the child rule's multiplicity" is why it does not have to.
+
+    **A scope's cardinality is a SUM over producing rules, not a maximum.** Two of
+    ``embed``'s five producers are the alternative structure rungs and exactly one of them
+    ever fires — but which is already decided by then: the one that cannot fire is
+    ``not_applicable``, its multiplicity is :data:`ZERO`, and zero is what it contributes.
+    Adding is therefore right in the concrete mode and right in the conditional one, where
+    both rungs carry ``[0, 1]`` and the sum is the honest ``[0, 2]``.
+
+    Returns the tasks again because each one gains its own numbers; the totals are folds
+    over those, so the per-task answer and the plan's answer cannot disagree.
+    """
+    rows_by_task = {row.task: row for row in TASK_ROWS}
+    evidence = _fold_inputs(patterns)
+
+    #: (producing rule, usetype) -> the nodes of that kind it writes. 4.1's scope is
+    #: exactly this pair, so a scope's cardinality is a lookup rather than a query.
+    produced: dict[tuple[str, str], Count] = {}
+    #: Rules that write children and declare no bound (2.4). What they wrote is not a
+    #: number and not a usetype, so a scope naming one of them is open however many nodes
+    #: its other producers contributed — otherwise `embed` over a transcript reports zero
+    #: embeddings, which is a number and is wrong.
+    undeclared: set[str] = set()
+    unmeasured: list[Unmeasured] = []
+    seen_unmeasured: set[tuple[str, str]] = set()
+
+    folded: list[ExplainedTask] = []
+    for task in tasks:
+        row = rows_by_task.get(task.task)
+        if row is None or row.scope.kind == SCOPE_ROOT:
+            # `probe` has no row and is the file node's; every Part 4 row defaults there.
+            scope_count = ONE
+        else:
+            scope_count = ZERO
+            for producer in row.scope.produced_by:
+                for usetype in row.scope.usetypes:
+                    scope_count = scope_count + produced.get((producer, usetype), ZERO)
+            if any(producer in undeclared for producer in row.scope.produced_by):
+                scope_count = Count(scope_count.low, None)
+
+        multiplicity = scope_count * _RUN_FACTOR[task.outcome]
+
+        writes, usetype_written, basis = ZERO, None, None
+        atom = ATOMS.get(task.task)
+        if atom is not None and atom.fanout is not None:
+            usetype_written = atom.fanout.counts
+            basis = atom.fanout.basis
+            missing = [name for name in atom.fanout.reads if name not in evidence]
+            if missing:
+                # RECORDED ONLY FOR A RUNG THAT CAN RUN. `structure:declared`'s bound
+                # divides `extraction.characters` and a workbook has no text layer, so the
+                # rung is not-applicable and its bound is not a measurement this plan is
+                # missing — it is one this plan does not want. A `?` line for it would send
+                # a caller looking for a way to close an interval that is already closed at
+                # zero.
+                if multiplicity.high != 0:
+                    for name in missing:
+                        if (name, task.task) in seen_unmeasured:
+                            continue
+                        seen_unmeasured.add((name, task.task))
+                        unmeasured.append(
+                            Unmeasured(
+                                evidence=name,
+                                needed_by=task.task,
+                                written_by=evidence_written_by(name),
+                            )
+                        )
+                per_instance = Count(0, None)
+            else:
+                low, high = atom.fanout.bound(evidence, task.params)
+                per_instance = Count(low, high)
+            writes = multiplicity * per_instance
+            key = (task.task, usetype_written)
+            produced[key] = produced.get(key, ZERO) + writes
+        elif atom is not None and atom.write_mode == WRITE_CHILDREN:
+            # 2.4 says a fan-out atom declares a bound and this one does not, so what it
+            # writes is not zero and is not known. `_not_counted` names it; reporting ZERO
+            # here would be a total short by every node the rung creates.
+            writes = multiplicity * Count(0, None)
+            if multiplicity.high != 0:
+                undeclared.add(task.task)
+
+        folded.append(
+            replace(
+                task,
+                multiplicity=multiplicity,
+                writes=writes,
+                writes_usetype=usetype_written,
+                writes_basis=basis,
+            )
+        )
+
+    total_tasks, total_nodes = ZERO, ZERO
+    by_cost_class = {cost_class: ZERO for cost_class in COST_CLASSES}
+    for task in folded:
+        total_tasks = total_tasks + task.multiplicity
+        total_nodes = total_nodes + task.writes
+        atom = ATOMS.get(task.task)
+        if atom is not None:
+            by_cost_class[atom.cost_class] = by_cost_class[atom.cost_class] + task.multiplicity
+
+    return tuple(folded), PlanCost(
+        tasks=total_tasks,
+        nodes=total_nodes,
+        by_cost_class=by_cost_class,
+        unmeasured=tuple(unmeasured),
+        not_counted=_not_counted(tuple(folded)),
+    )
+
+
 def explain_plan(
     fmt: str,
     options: Optional[dict] = None,
@@ -2731,6 +3084,17 @@ def explain_plan(
     else:
         rows = _explain_conditional(fmt, resolved)
 
+    tasks, cost = _fold_cost(
+        (
+            # probe is not a TASK_ROWS entry because nothing decides it: Part 4 specifies it
+            # as depending on nothing and always running, which is exactly why it has no
+            # condition to declare. It leads the list for the same reason.
+            ExplainedTask(task=TASK_PROBE, outcome=OUTCOME_ENQUEUED, write_mode=PROBE_WRITE_MODE),
+        )
+        + rows,
+        known,
+    )
+
     return ExplainedPlan(
         format=fmt,
         prober_available=prober_available,
@@ -2738,13 +3102,8 @@ def explain_plan(
         patterns_source=source,
         patterns_ignored=tuple(sorted(set(patterns or {}) - _consulted_patterns(fmt))),
         options=resolved,
-        tasks=(
-            # probe is not a TASK_ROWS entry because nothing decides it: Part 4 specifies it
-            # as depending on nothing and always running, which is exactly why it has no
-            # condition to declare. It leads the list for the same reason.
-            ExplainedTask(task=TASK_PROBE, outcome=OUTCOME_ENQUEUED, write_mode=PROBE_WRITE_MODE),
-        )
-        + rows,
+        tasks=tasks,
+        cost=cost,
     )
 
 
