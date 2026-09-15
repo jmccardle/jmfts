@@ -27,15 +27,26 @@
 // argument is routing. `shell/shell.js`'s `currentRoute` and `navigate` build and split the
 // same fragment this file writes into and reads out of.
 //
-// WHAT RIDES IN THE URL, AND WHY IT IS THE URL. Both evidence rows, as JSON, on the fragment:
+// WHAT RIDES IN THE URL, AND WHY IT IS THE URL. All FOUR evidence rows, as JSON, on the
+// fragment:
 //
 //   #/document?id=42&anchor={"kind":"pdf","page":3,"bbox":[...]}&unresolved={"code":...}
+//   #/document?id=42&anchor={"kind":"ooxml",...}&render={"kind":"pdf","of":"rendition",...}
 //
 // That is the only encoding with all three of the properties this hand-off needs at once. The
 // detail view gets the anchor with NO SECOND CALL, which is the round trip IC-4 put the rows on
 // the hit to remove; a pasted link still carries it; and a reload does not quietly downgrade a
 // boxed citation to an unboxed one. A module-level map keyed by document id would do the first
 // and neither of the others.
+//
+// FOUR AND NOT TWO, because an office document's citation is two anchors. `OFFICE_SPEC.md`
+// Part 5: a `.docx` chunk carries an exact `ooxml` address in `source_anchor` — which cannot
+// be wrong and cannot be drawn — and a rectangle recovered from its rendition in
+// `render_anchor`, which can be drawn and can be wrong. A hand-off that carried only the first
+// would take a hit whose rectangle EXISTS to a page that says there isn't one, and the page
+// could only find out by making the call this encoding exists to avoid. The two pairs are
+// carried as two pairs and are read back as two pairs, because IC-9 draws one pair at a time
+// and which one was drawn is a thing the page has to be able to say out loud.
 //
 // A KEY THAT IS ABSENT MEANS THE HIT CARRIED NO SUCH ROW, and that is a third fact rather than
 // a spelling of null. `readDetailParams` reports a missing row and an absent argument
@@ -68,30 +79,46 @@ export const DETAIL_PATH = "/document";
  * `tests/test_web_search_view.py` asserts, and it is the strongest available form of "these two
  * are one encoding" now that they are one file.
  *
- * @param {{documentId: number|string, anchor?: object|null, unresolved?: object|null}} citation
- * @returns {{id: string, anchor?: string, unresolved?: string}}
+ * THE CITATION IS TWO PAIRS AND IT IS TAKEN AS TWO PAIRS — `{anchor, unresolved}` at the top
+ * level for the source rows, and the same two names under `rendition` for the rendition rows.
+ * That is the shape `anchorPair` in `render/surfaces.js` returns and the shape
+ * :func:`readDetailParams` gives back, so one "anchor record" describes what a page knows
+ * about where a passage is however it found out. In the FRAGMENT they flatten to four keys,
+ * because a fragment is a flat namespace and one key per evidence row is what keeps "the hit
+ * carried no such row" readable as "the key is absent".
+ *
+ * @param {{documentId: number|string, anchor?: object|null, unresolved?: object|null,
+ *          rendition?: {anchor?: object|null, unresolved?: object|null}}} citation
+ * @returns {{id: string, anchor?: string, unresolved?: string, render?: string,
+ *            render_unresolved?: string}}
  */
-export function detailParams({ documentId, anchor = null, unresolved = null }) {
+export function detailParams({ documentId, anchor = null, unresolved = null, rendition = {} }) {
   if (documentId === undefined || documentId === null || !/^\d+$/.test(String(documentId))) {
     throw new CitationRouteError(
       `a citation names the document it points into; got ${JSON.stringify(documentId ?? null)}.`
     );
   }
   const params = { id: String(documentId) };
-  if (anchor !== null && anchor !== undefined) params.anchor = JSON.stringify(anchor);
-  if (unresolved !== null && unresolved !== undefined) {
-    params.unresolved = JSON.stringify(unresolved);
-  }
+  const put = (key, value) => {
+    if (value !== null && value !== undefined) params[key] = JSON.stringify(value);
+  };
+  put("anchor", anchor);
+  put("unresolved", unresolved);
+  put("render", rendition?.anchor);
+  put("render_unresolved", rendition?.unresolved);
   return params;
 }
 
 /**
  * Read what `detailParams` wrote. The detail view's half of the hand-off.
  *
- * Returns `{documentId, anchor, unresolved}` with BOTH evidence keys present even when null,
- * because that is the shape `highlight()` in `render/overlay.js` refuses to be called without —
- * "a caller that passes only `anchor` has not said whether it looked for the unresolved row",
- * and "I did not look" is not "there was no reason recorded".
+ * Returns `{documentId, anchor, unresolved, rendition: {anchor, unresolved}}` with BOTH
+ * evidence keys present in each pair even when both are null, because that is the shape
+ * `highlight()` in `render/overlay.js` refuses to be called without — "a caller that passes
+ * only `anchor` has not said whether it looked for the unresolved row", and "I did not look"
+ * is not "there was no reason recorded". Both pairs are built whether or not the fragment
+ * carried either, so a view never has to ask whether `evidence.rendition` exists before asking
+ * what is in it; an absent key reads as null, which is "the hit looked and there was no row".
  *
  * Unreadable JSON RAISES rather than coming back as "no anchor". A truncated fragment and a hit
  * with no citation are different facts, and collapsing them is how a highlight silently stops
@@ -118,7 +145,12 @@ export function readDetailParams(params) {
       `the document detail route needs an integer "id"; got ${JSON.stringify(id ?? null)}.`
     );
   }
-  return { documentId: Number(id), anchor: one("anchor"), unresolved: one("unresolved") };
+  return {
+    documentId: Number(id),
+    anchor: one("anchor"),
+    unresolved: one("unresolved"),
+    rendition: { anchor: one("render"), unresolved: one("render_unresolved") },
+  };
 }
 
 /** The href one citation points at. What a hit's title links to. */
@@ -130,11 +162,17 @@ export function detailHref(citation) {
 /**
  * Did the caller hand a citation over at all?
  *
- * The presence of the KEY, not the value behind it — see this module's header. This is the one
- * question that decides whether the detail view spends a `/documents/{id}/evidence` call.
+ * The presence of ANY of the four KEYS, not the value behind it — see this module's header.
+ * This is the one question that decides whether the detail view spends a
+ * `/documents/{id}/evidence` call.
+ *
+ * All four, because a node can carry a rendition rectangle and no source anchor at all: a
+ * format that reaches a page only through a rendition and whose package `anchor:source` does
+ * not read leaves `render_anchor` on the chunk and nothing beside it. Asking only about the
+ * source pair would make that hit pay for a call whose answer it is already holding.
  */
 export function broughtACitation(params) {
-  return "anchor" in params || "unresolved" in params;
+  return ["anchor", "unresolved", "render", "render_unresolved"].some((key) => key in params);
 }
 
 /**

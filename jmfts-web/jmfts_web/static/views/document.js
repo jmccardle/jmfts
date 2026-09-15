@@ -40,6 +40,28 @@
 // three ways a passage can have no rectangle, and the route a "show page 4" link points at.
 //
 // ---------------------------------------------------------------------------------------
+// AN OFFICE PASSAGE HAS TWO ANCHORS, AND THE PAGE DRAWS ONE AND CITES THE OTHER
+//
+// `OFFICE_SPEC.md` Part 5's "Two anchors, not one". A `.docx` chunk carries an exact `ooxml`
+// address in `source_anchor` — an element of the uploaded package, computed from the bytes,
+// which cannot be wrong and cannot be drawn — and, once `render:pdf` has paginated the document
+// and `anchor:render` has found the passage in the result, a page and a rectangle in
+// `render_anchor`, which can be drawn and can be wrong.
+//
+// AUTHORITY RUNS OPPOSITE TO DRAWABILITY, so the label is not decoration. A page showing the
+// rectangle says "page 3 of this appliance's rendering" and never "page 3", because the reader
+// who opens the file in Word may find the passage on page 4 and has to have been told why in
+// advance. `PdfAnchor.of` is the field that says which case a rectangle is, and this view
+// branches on THAT rather than on which evidence row the value arrived in — a parsed anchor
+// travels away from its row, and the row is not on the page.
+//
+// FOUR ABSENCES, NOT TWO. With a second pair the states a reader has to be able to tell apart
+// are: a rectangle recovered, a rectangle looked for in a rendition and not found, a rung that
+// ran and recorded neither, and nothing having paginated the document at all — which is the
+// common one, because an appliance with no LibreOffice configured produces no renditions. They
+// are four sentences in `renditionSentence`, and a page that showed one for all four would be
+// hiding the three that are worth knowing.
+//
 // A SPREADSHEET REGION IS CELLS, NOT A PICTURE OF CELLS
 //
 // `services/document_service.py:1548`'s `_pdf_anchor` refuses to crop a `cells` anchor and
@@ -72,13 +94,22 @@ export class DocumentParamError extends Error {
   }
 }
 
-//: The two evidence rows, spelled as the wire spells them.
-//: `jmfts-client/jmfts_client/contracts/anchor.py` carries `ANCHOR_ROW` and
-//: `ANCHOR_UNRESOLVED_ROW` for the same purpose on the Python side, and
-//: `jmfts_core/evidence.py:349` and `:473` are the declarations. There is no generated
-//: JavaScript copy of either, so these two literals are the client's spelling of them.
+//: The four evidence rows, spelled as the wire spells them.
+//: `jmfts-client/jmfts_client/contracts/anchor.py` carries `ANCHOR_ROW`,
+//: `ANCHOR_UNRESOLVED_ROW`, `RENDER_ANCHOR_ROW` and `RENDER_ANCHOR_UNRESOLVED_ROW` for the
+//: same purpose on the Python side, and `jmfts_core/evidence.py:349`, `:373`, `:473` and
+//: `:524` are the declarations. There is no generated JavaScript copy of any of them, so these
+//: literals are the client's spelling of them.
 export const ANCHOR_ROW = "source_anchor";
 export const ANCHOR_UNRESOLVED_ROW = "source_anchor.unresolved";
+export const RENDER_ANCHOR_ROW = "render_anchor";
+export const RENDER_ANCHOR_UNRESOLVED_ROW = "render_anchor.unresolved";
+
+//: What `render:pdf` produced, on the FILE node — page count, per-page size, renderer
+//: (`RenditionRepository.EVIDENCE_NAME`). Read for one question only: does this appliance hold
+//: a rendition of this document at all, which is what separates "nothing has paginated this"
+//: from "a rendition exists and this passage was not found in it".
+export const RENDITION_ROW = "rendition";
 
 /** How many children a page of `GET /view/{id}/expand-children` holds. */
 export const CHILD_PAGE = 20;
@@ -182,26 +213,49 @@ export function evidenceFromRows(response) {
         `no evidence object (got ${JSON.stringify(response)}).`
     );
   }
+  const record = anchorPair(response);
   return {
-    ...anchorPair(response),
+    ...record,
     attempted: ANCHOR_ROW in rows || ANCHOR_UNRESOLVED_ROW in rows,
+    // The SAME question of the rendition pair, and it earns its place for the same reason one
+    // anchor over: "nothing has paginated this document" and "`anchor:render` ran over the
+    // rendition and recorded nothing for this passage" are different answers, and only one of
+    // them is worth coming back for. `attempted` is undefined on a record that came off a
+    // search hit rather than out of `/evidence` — a hit has one field per row and no third
+    // state to put the difference in — so every reading below tests `=== false`, which is
+    // "this page read the rows and neither was there".
+    rendition: {
+      ...record.rendition,
+      attempted: RENDER_ANCHOR_ROW in rows || RENDER_ANCHOR_UNRESOLVED_ROW in rows,
+    },
   };
 }
 
 /**
- * What the `file` evidence row says about the bytes this node came from, or null.
+ * What this node's evidence says about the bytes it came from, or null.
  *
- * Feeds `sourceNotice`, which needs `rendition` as "is `file.rendition_ref` PRESENT" rather
- * than "is it truthy" — `OFFICE_SPEC.md` Part 6 names that key, and a row that carries it with
- * a null value is a rendition that was attempted, which is not the same as one nobody asked
- * for. Null when this page never read the evidence, which is the search-hit case: a sentence
- * about a row nobody read would be a claim rather than a reading.
+ * Feeds `sourceNotice`. Null when this page never read the evidence, which is the search-hit
+ * case: a sentence about a row nobody read would be a claim rather than a reading.
+ *
+ * `rendition` IS THE `rendition` ROW AND NOT `file.rendition_ref`, and the correction matters
+ * rather than being tidy. This function read the second until now, `render/surfaces.js`'s
+ * `sourceNotice` had already written down why that is wrong — `INGEST_SPEC.md` 3.3 says of the
+ * `file` block "it never changes after upload", so a task writing a derivation into it edits
+ * the record of the upload — and the consequence was not a wording problem: NOTHING writes
+ * `file.rendition_ref`, so the flag was false on every document in the corpus and the page
+ * said "there is no rendered page" about documents this appliance had rendered. That is the
+ * defect this whole lane is about, in the one sentence that exists to prevent it.
+ *
+ * `hasOwnProperty` and not truthiness, for the reason 3.2 gives: a row present with an empty
+ * value is a run that happened, and `evidence.rendition` being falsy would call it absent.
  */
 export function sourceFacts(response) {
-  const file = response?.evidence?.file;
+  const rows = response?.evidence;
+  if (rows === null || rows === undefined || typeof rows !== "object") return null;
+  const file = rows.file;
   if (file === null || file === undefined || typeof file !== "object") return null;
   return {
-    rendition: Object.prototype.hasOwnProperty.call(file, "rendition_ref"),
+    rendition: Object.prototype.hasOwnProperty.call(rows, RENDITION_ROW),
     filename: file.filename ?? null,
     mime: file.detected_mime ?? null,
   };
@@ -298,7 +352,19 @@ export function sourceOffer({ client, documentId, page, dpi, evidence, facts, la
   if (facts !== null) panel.append(sourceNotice(facts));
   panel.append(anchorSummary(evidence));
 
-  const offer = make("button", "tiny", `Render page ${page + 1} of the source anyway`);
+  // WHOSE PAGE THE BUTTON WOULD RENDER, said before it is pressed rather than guessed from the
+  // picture afterwards. With no anchor there is no `of` to read, so `pageFigure` correctly
+  // claims nothing in its caption — which leaves this the only place that can say it, and the
+  // `rendition` evidence row is what answers it. Without this line an office document with a
+  // rendition would draw a page of LibreOffice's pagination under a button offering "the
+  // source", which is the mislabel this whole lane is about wearing different clothes.
+  const offer = make(
+    "button",
+    "tiny",
+    facts?.rendition
+      ? `Render page ${page + 1} of this appliance's rendering anyway`
+      : `Render page ${page + 1} of the source anyway`
+  );
   offer.type = "button";
   const into = make("div");
   const load = async () => {
@@ -344,15 +410,28 @@ const PDF_MIME = "application/pdf";
  * Absent — the search-hit case, where no evidence was read — it falls to the offer, which is
  * the honest answer to "I do not know what these bytes are".
  */
-export function plannedSurface({ node, anchor, mime = null }) {
+export function plannedSurface({ node, anchor, rendition = null, mime = null }) {
   if (anchor && anchor.kind === "cells") return { kind: "cells" };
+  // THE EXACT RECTANGLE WINS OVER THE RECOVERED ONE, and this is the one place the two could
+  // be confused, so the order is the decision. A `pdf` source anchor is the document's own
+  // geometry, measured off the page it is on; a `render_anchor` is a rectangle found by
+  // matching text in a PDF LibreOffice produced. This appliance never writes both — `pdf_for`
+  // serves a source PDF's own bytes and renders nothing — but if it ever did, drawing the
+  // approximate one over the exact one would be a silent downgrade of a citation.
   if (anchor && anchor.kind === "pdf") return { kind: "page" };
+  // AND THE RECOVERED ONE WINS OVER NO RECTANGLE AT ALL, which is the office beeline's last
+  // link. A `.docx` chunk carries an `ooxml` address that cannot be drawn and, once
+  // `render:pdf` has paginated the document and `anchor:render` has found the passage in the
+  // result, a page and a rectangle that can be. This page draws the rectangle and names the
+  // address as the thing the rectangle is a picture of; neither replaces the other, and the
+  // caption says whose pagination it is looking at.
+  if (rendition) return { kind: "rendition" };
   if (anchor && anchor.kind === "span") return { kind: "span" };
   // An ooxml anchor is a surface of its own, and the reason it is not `offer` is the reason
   // this whole panel exists. It says exactly where the passage is — a part of the package and
   // an element inside it — and offering "render page 1 anyway" instead would bury that behind
-  // a button whose call `/image` refuses by name ("this is a .docx"). A precise address shown
-  // is a better answer than a refusal a reader has to ask for.
+  // a button whose call `/image` refuses by name when nothing has paginated the document. A
+  // precise address shown is a better answer than a refusal a reader has to ask for.
   if (anchor && anchor.kind === "ooxml") return { kind: "ooxml" };
   if (node.usetype === USETYPE_SHEET) return { kind: "cells" };
   if (node.usetype === USETYPE_FILE && mime === PDF_MIME) return { kind: "page" };
@@ -360,22 +439,28 @@ export function plannedSurface({ node, anchor, mime = null }) {
 }
 
 /**
- * Where an office passage is, in the source package's own structure. The office beeline's end.
+ * Where an office passage is, in the source package's own structure. The office citation.
  *
  * NOT A BOX, AND IT SAYS SO IN THOSE WORDS. `render/overlay.js` throws `OverlayError` for an
  * `ooxml` anchor on any surface and its message is exact — "an address in the source package
  * and has no rectangle to draw" — but a thrown error renders as a failure, and this is not one.
  * `OoxmlAnchor`'s docstring is the authority: "**This has no rectangle, and that is not a
  * gap.** A `.docx` has no pages until something paginates it." So the passage is NAMED, with
- * everything the anchor carries about how far it runs, and the sentence underneath says which
- * of the two absences a reader is looking at.
+ * everything the anchor carries about how far it runs.
  *
- * The distinction this keeps is the one the whole citation feature turns on, in its office
- * spelling: "we know exactly where this is and cannot draw it yet" is a different fact from "we
- * have no idea where this is", and `source_anchor.unresolved` is the second one. A page that
- * showed nothing for both would be hiding the first, which is a complete record.
+ * THE SENTENCE UNDERNEATH IS ABOUT THE OTHER ANCHOR, and it has four readings because there
+ * are four states and a page that showed one sentence for all of them would be hiding three.
+ * `rendition` is this node's rendition pair — `{anchor, unresolved, attempted}` — and it says
+ * whether a rectangle exists, was looked for and not found, or was never looked for at all.
+ *
+ * **When there is one, this address does not compete with it.** `OoxmlAnchor`: "When a node
+ * has both, this one is what it IS and that one is where to LOOK. They do not compete: this
+ * address cannot be wrong and cannot be drawn, the rectangle can be drawn and can be wrong."
+ * So the rectangle is drawn above and this is what the rectangle is a picture OF — which is
+ * also the answer a reader should cite, because it is the half that survives a different
+ * LibreOffice.
  */
-export function ooxmlWhere(anchor) {
+export function ooxmlWhere(anchor, rendition = null) {
   const panel = make("div", "doc-address");
   panel.append(make("p", null, `This passage is at ${describeAnchor(anchor)}.`));
 
@@ -392,15 +477,119 @@ export function ooxmlWhere(anchor) {
   }
   if (runs.length) panel.append(make("p", "dim", `It runs ${runs.join(", ")}.`));
 
+  panel.append(make("p", "overlay-notice", renditionSentence(rendition)));
+  return panel;
+}
+
+/**
+ * Which of the four rendition states a reader is looking at, in one sentence.
+ *
+ * FOUR AND NOT TWO, which is what this lane changed. The pair a page used to reason about was
+ * `source_anchor` and `source_anchor.unresolved`; there is a second pair now, and with it the
+ * states are: a rectangle was recovered, a rectangle was looked for and not found, the rung ran
+ * and recorded neither, and nothing has paginated this document at all. The last is the common
+ * one — an appliance with no LibreOffice configured produces no renditions — and it is the one
+ * a reader can act on, so it names the setting.
+ *
+ * Every branch says the same thing about the address above it: it is exact, `anchor:source`
+ * recovered it from the uploaded package, and nothing is missing from the record. That is the
+ * distinction the whole citation feature turns on — "we know exactly where this is" is not
+ * "we have no idea where this is" — and it does not become less true when a rectangle turns up.
+ */
+function renditionSentence(rendition) {
+  const exact =
+    "That address is exact and nothing is missing from the record: `anchor:source` recovered " +
+    "it from the uploaded package itself. ";
+  if (rendition && rendition.anchor) {
+    return (
+      exact +
+      // "a rectangle" and not "the rectangle above", because this sentence is reached from two
+      // panels and only one of them has a picture over it. A sentence that named a position on
+      // the page would be right in the panel it was written for and wrong in the other, which
+      // is the same class of mistake as a caption that names the wrong pagination.
+      "A rectangle for this passage has been recovered from this appliance's rendition, by " +
+      "finding the passage in the PDF `render:pdf` produced (`anchor:render`), and it is a " +
+      "picture of this address rather than a second opinion about it. The two do not compete " +
+      "and they are not " +
+      "equally trustworthy: this address cannot be wrong and cannot be drawn, that rectangle " +
+      "can be drawn and can be wrong — it is LibreOffice's pagination, and another version of " +
+      "it may put the passage on a different page. Cite the address; look at the rectangle."
+    );
+  }
+  if (rendition && rendition.unresolved) {
+    return (
+      exact +
+      "A rectangle WAS looked for: this appliance holds a rendition of this document and " +
+      "`anchor:render` could not place this passage in it — " +
+      `${rendition.unresolved.reason ?? "(no reason recorded)"} ` +
+      `(${rendition.unresolved.code ?? "(no code)"}). Partial recovery is an ordinary outcome ` +
+      "rather than a failure (OFFICE_SPEC.md Part 5), and it costs the picture, not the " +
+      "citation."
+    );
+  }
+  if (rendition && rendition.attempted === true) {
+    return (
+      exact +
+      "`anchor:render` has run on this node and recorded neither a rectangle nor a reason, " +
+      "which is a row written empty rather than a rung that has not run. There is nothing " +
+      "further to wait for here."
+    );
+  }
+  return (
+    exact +
+    "What there is no box for is a page — an office document has no pages until `render:pdf` " +
+    "paginates it, and `anchor:render` is what recovers a rectangle from that rendition. " +
+    "Neither has written a row for this node: either they have not run, or this appliance has " +
+    "no converter configured (JMFTS_CONVERT_URL), which is the ordinary state of an appliance " +
+    "with no LibreOffice beside it. This is not a highlight that could not be recovered; see " +
+    "source_anchor.unresolved for what that reads like."
+  );
+}
+
+/**
+ * The durable citation that goes UNDER a recovered rectangle: what the rectangle is a picture of.
+ *
+ * The rectangle above it is where this passage appears on a page of this appliance's rendering.
+ * This is what the passage IS, and the three shapes it can take are the three kinds of source
+ * anchor a node with a rendition can carry:
+ *
+ * * an `ooxml` address — the exact one, from the uploaded package;
+ * * a `span` — a character range in the extracted markdown, which is what a format whose
+ *   package nothing reads can offer;
+ * * nothing at all, which is honest and is said in those words rather than left blank.
+ *
+ * **The third one is why this is a function and not a line.** A page that printed nothing when
+ * there was no source anchor would show a rectangle with no statement of what it is a rectangle
+ * OF — which is the confidently-placed box with no provenance that the whole overlay contract
+ * is shaped against, arriving from the other side.
+ */
+export function sourceAddress(evidence) {
+  const anchor = evidence.anchor;
+  if (anchor && anchor.kind === "ooxml") return ooxmlWhere(anchor, evidence.rendition);
+  const panel = make("div", "doc-address");
+  if (anchor && anchor.kind === "span") {
+    panel.append(
+      make(
+        "p",
+        null,
+        `The rectangle is a picture of this passage, which is at ${describeAnchor(anchor)} of ` +
+          "the markdown this appliance read out of the document. That range is the durable " +
+          "citation: it is computed from the extraction and does not move when a different " +
+          "LibreOffice repaginates the document."
+      )
+    );
+    return panel;
+  }
   panel.append(
     make(
       "p",
-      "overlay-notice",
-      "That address is exact and nothing is missing from the record: `anchor:source` recovered " +
-        "it from the uploaded package itself. What there is no box for is a page — an office " +
-        "document has no pages until `render:pdf` paginates it, and recovering a rectangle " +
-        "from that rendition is docs/SPRINT_0_6_0.md Block G step 33. This is not a highlight " +
-        "that could not be recovered; see source_anchor.unresolved for what that reads like."
+      "dim",
+      "This node carries no address in the source document itself — no `source_anchor` row — " +
+        "so the rectangle above is the whole of what is recorded about where this passage is. " +
+        "It is a position in THIS APPLIANCE'S rendering (`render:pdf`), which another " +
+        "LibreOffice may paginate differently, and there is nothing behind it that would " +
+        "survive that. `anchor:source` is the rung that writes the durable address and it " +
+        "reads OOXML packages; this node's format is not one, or it has not run."
     )
   );
   return panel;
@@ -416,45 +605,97 @@ export function ooxmlWhere(anchor) {
  * and recorded why. "No highlight" for all three is how the third one stays invisible.
  */
 export function anchorSummary(evidence) {
-  const { anchor, unresolved, attempted } = evidence;
+  const { anchor, unresolved, attempted, rendition = null } = evidence;
+  // SIX NOW, AND THE SIXTH IS A RECTANGLE WITH NO ADDRESS. Whatever the source pair says, the
+  // rendition pair may have something of its own to add, and it is appended rather than
+  // folded in: the two pairs answer two questions ("what is this passage" and "where does it
+  // appear on a page"), and one merged sentence would make a reader work out which half was
+  // which. Nothing is appended when the rendition pair is empty, so a node that never had a
+  // rendition reads exactly as it did before there were four rows.
+  const said = make("div");
+  const also = (text, className) => {
+    if (text) said.append(make("p", className ?? "dim", text));
+  };
+
   if (anchor === null && unresolved !== null) {
     // The sentence is `render/surfaces.js`'s, reached through the status vocabulary rather
     // than rewritten here. There is one wording for "no rectangle could be recovered, and here
     // is the reason the recorder wrote", and a second one in a view is how the two drift.
-    return make(
-      "p",
-      "overlay-notice",
-      highlightNotice({
-        status: HIGHLIGHT_STATUS.UNRESOLVED,
-        code: unresolved.code,
-        reason: unresolved.reason,
-      })
+    said.append(
+      make(
+        "p",
+        "overlay-notice",
+        highlightNotice({
+          status: HIGHLIGHT_STATUS.UNRESOLVED,
+          code: unresolved.code,
+          reason: unresolved.reason,
+        })
+      )
     );
+    also(renditionAside(rendition));
+    return said;
   }
   if (anchor === null) {
-    return make(
-      "p",
-      "dim",
-      attempted === false
-        ? "No source_anchor row and no unresolved row: nothing has tried to place this node " +
-          "in its source. Two rungs write one — `citation` over a PDF text layer, and " +
-          "`anchor:source` over a .docx or .pptx package. A WORKBOOK reaches neither: nothing " +
-          "in this appliance writes a `cells` anchor today, so a spreadsheet passage is " +
-          "addressed by the sheet region its node stands for and by nothing finer."
-        : "This node carries no anchor into its source."
+    said.append(
+      make(
+        "p",
+        "dim",
+        attempted === false
+          ? "No source_anchor row and no unresolved row: nothing has tried to place this node " +
+            "in its source. Two rungs write one — `citation` over a PDF text layer, and " +
+            "`anchor:source` over a .docx or .pptx package. A WORKBOOK reaches neither: " +
+            "nothing in this appliance writes a `cells` anchor today, so a spreadsheet " +
+            "passage is addressed by the sheet region its node stands for and by nothing finer."
+          : "This node carries no anchor into its source."
+      )
     );
+    also(renditionAside(rendition));
+    return said;
   }
   // An `ooxml` anchor reaching HERE is a node whose planned surface was something else — a
   // reader who asked for `?page=` on an office node, say. It is still exactly addressed, so it
-  // gets the same sentence the panel gives it rather than being lumped in with an unknown kind.
-  if (anchor.kind === "ooxml") return ooxmlWhere(anchor);
-  return make(
-    "p",
-    "overlay-notice",
-    `This node's anchor is of kind ${JSON.stringify(anchor.kind)}, which this front end has ` +
-      "no geometry for — it is older than the appliance that wrote the anchor. " +
-      "jmfts-client/jmfts_client/contracts/anchor.py is the authority on the kinds."
+  // gets the same sentence the panel gives it rather than being lumped in with an unknown kind,
+  // and the rendition pair goes with it because that sentence is where the four states live.
+  if (anchor.kind === "ooxml") return ooxmlWhere(anchor, rendition);
+  said.append(
+    make(
+      "p",
+      "overlay-notice",
+      `This node's anchor is of kind ${JSON.stringify(anchor.kind)}, which this front end has ` +
+        "no geometry for — it is older than the appliance that wrote the anchor. " +
+        "jmfts-client/jmfts_client/contracts/anchor.py is the authority on the kinds."
+    )
   );
+  also(renditionAside(rendition));
+  return said;
+}
+
+/**
+ * What the rendition pair adds to a summary the source pair already wrote. Null when nothing.
+ *
+ * Null rather than a reassuring sentence for the common case, because the common case is a
+ * corpus of PDFs and plain text on an appliance with no converter, where "no rendition" is not
+ * news about this node. It speaks when there IS something: a rectangle nobody would otherwise
+ * know about, or a recovery that was attempted against a rendition and failed.
+ */
+function renditionAside(rendition) {
+  if (!rendition) return null;
+  if (rendition.anchor) {
+    return (
+      "This node also carries a rectangle recovered from a rendition — " +
+      `${describeAnchor(rendition.anchor)}. That page number is LibreOffice's pagination of a ` +
+      "document with none of its own, so it can be drawn and it can be wrong."
+    );
+  }
+  if (rendition.unresolved) {
+    return (
+      "A rectangle was looked for in this appliance's rendition of this document and not " +
+      `found: ${rendition.unresolved.reason ?? "(no reason recorded)"} ` +
+      `(${rendition.unresolved.code ?? "(no code)"}). That is a missing picture, not a ` +
+      "missing record."
+    );
+  }
+  return null;
 }
 
 function head(view, node) {
@@ -719,7 +960,7 @@ async function component({ client, params }) {
   // fragment the same way, and for the same reason: ambivalence is not a failure. An id that
   // is PRESENT and not a number is a link that is wrong, and `readDetailParams` refuses it.
   if (params.id === undefined || params.id === "") return landing(page);
-  const { documentId: id, anchor, unresolved } = readDetailParams(params);
+  const { documentId: id, anchor, unresolved, rendition } = readDetailParams(params);
 
   const [view, node, back] = await Promise.all([
     client.view_document({ document_id: id }),
@@ -734,7 +975,12 @@ async function component({ client, params }) {
   const read = broughtACitation(params)
     ? null
     : await client.get_document_evidence({ document_id: id });
-  const evidence = read === null ? { anchor, unresolved } : evidenceFromRows(read);
+  // ONE RECORD, TWO PROVENANCES. `readDetailParams` and `evidenceFromRows` both answer with
+  // `{anchor, unresolved, rendition: {anchor, unresolved}}` — the shape `anchorPair` defines —
+  // so nothing below this line branches on where the rows came from. What the evidence read
+  // adds is `attempted` on each pair, which a hit cannot carry and which is the difference
+  // between "a rung ran and recorded nothing" and "no rung has run".
+  const evidence = read === null ? { anchor, unresolved, rendition } : evidenceFromRows(read);
   const facts = read === null ? null : sourceFacts(read);
   const label = view.title || `document ${view.id}`;
 
@@ -745,11 +991,23 @@ async function component({ client, params }) {
   const source = section(page, "Source");
   const requested = integerParam(params, "page");
   const dpi = integerParam(params, "dpi") ?? DPI_DEFAULT;
-  const planned = plannedSurface({ node, anchor: evidence.anchor, mime: facts?.mime ?? null });
+  const planned = plannedSurface({
+    node,
+    anchor: evidence.anchor,
+    rendition: evidence.rendition?.anchor ?? null,
+    mime: facts?.mime ?? null,
+  });
   // A page named on the route wins, and it wins even over a `cells` node: a reader who typed
   // `?page=` asked a question, and answering a different one is the failure this whole panel
   // is written against. `/image` refuses a worksheet by name and the refusal goes on the page.
-  const shown = requested === null ? planned.kind : "page";
+  //
+  // IT DOES NOT MOVE A RENDITION NODE ONTO THE SOURCE PAIR, though, and that is not an
+  // exception to the rule above but the rule applied: the question `?page=4` asks of a `.docx`
+  // is "show me page 4 of what you can paginate", and answering it with the source pair would
+  // hand `highlight()` an `ooxml` anchor, which it refuses — a reader who asked for a page
+  // would get an error where a page was available.
+  const shown =
+    requested === null ? planned.kind : planned.kind === "rendition" ? "rendition" : "page";
 
   try {
     if (shown === "page") {
@@ -767,6 +1025,31 @@ async function component({ client, params }) {
         params,
       });
       source.append(drawn.element);
+    } else if (shown === "rendition") {
+      // THE OFFICE BEELINE'S LAST LINK, AND IT ENDS IN A RECTANGLE. `render:pdf` paginated this
+      // document and `anchor:render` found this passage in the result, so there is a page and a
+      // box — and `/image` serves that page without knowing it is a rendition, because
+      // `pdf_for` already made that choice on the appliance side ("after `render:pdf` has run,
+      // every renderable document in the system is a PDF").
+      //
+      // TWO THINGS GO ON THE PAGE AND NEITHER REPLACES THE OTHER. The rectangle answers "where
+      // does this appear on a page" and is the appliance's rendering, fallible and the only one
+      // that can be drawn. The source address answers "what is this passage", is computed from
+      // the uploaded bytes, cannot be wrong and cannot be drawn. `pageFigure` labels the first
+      // from `PdfAnchor.of` — never from which row it arrived in, because a parsed anchor
+      // travels away from its row — and `sourceAddress` states the second underneath.
+      const drawn = await pagePanel({
+        client,
+        documentId: id,
+        page: pageFor(view, evidence.rendition, requested),
+        dpi,
+        evidence: evidence.rendition,
+        label,
+        params,
+      });
+      if (facts !== null) source.append(sourceNotice(facts));
+      source.append(drawn.element);
+      source.append(sourceAddress(evidence));
     } else if (shown === "cells") {
       const drawn = await cellsPanel({ client, documentId: id, ref: null, evidence });
       source.append(drawn.element);
@@ -781,16 +1064,23 @@ async function component({ client, params }) {
       );
       source.append(make("pre", "render-plain", view.rendered_content.slice(start, end)));
     } else if (shown === "ooxml") {
-      // THE OFFICE BEELINE ENDS HERE, AND IT ENDS NAMED RATHER THAN BOXED. What this panel can
-      // tell a `.docx` or `.pptx` hit is which representation of the document the page is
-      // showing (`sourceNotice`) and where in the package the passage is (`ooxmlWhere`). The
-      // passage itself is the Content panel below and is not repeated here — unlike a `span`
-      // anchor, which cuts a slice out of that same text and therefore has something of its own
-      // to show. NO CALL IS MADE: `/image` refuses an office node by name and `/region` has no
-      // rectangle to crop to, so firing either would spend an entry in the one log this front
-      // end asks to be judged by on a refusal this page can already predict.
+      // AN OFFICE PASSAGE WITH NO RECTANGLE ANYWHERE, which is what the branch above is not.
+      // What this panel can tell a `.docx` or `.pptx` hit is which representation of the
+      // document the page is showing (`sourceNotice`) and where in the package the passage is
+      // (`ooxmlWhere`, whose closing sentence says WHICH of the four rendition states this is).
+      // The passage itself is the Content panel below and is not repeated here — unlike a
+      // `span` anchor, which cuts a slice out of that same text and therefore has something of
+      // its own to show.
+      //
+      // NO CALL IS MADE, and the reason narrowed rather than went away: `/image` serves a page
+      // of the RENDITION for an office node that has one (`pdf_for`), and reaching this branch
+      // means this node has no `render_anchor`, so either nothing has paginated the document —
+      // `/image` answers 409 naming `render:pdf` — or a rectangle was looked for and not found,
+      // in which case nothing says which page to ask for. Both are refusals this page can
+      // predict, and spending an entry in the one log step 23 built on a predictable refusal is
+      // what that log stops being readable from.
       if (facts !== null) source.append(sourceNotice(facts));
-      source.append(ooxmlWhere(evidence.anchor));
+      source.append(ooxmlWhere(evidence.anchor, evidence.rendition));
     } else {
       const offered = sourceOffer({
         client,

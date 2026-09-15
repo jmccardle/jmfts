@@ -563,6 +563,9 @@ FIGURE_HARNESS = textwrap.dedent("""
     const anchored = surfaces.anchorPair(EVIDENCE["7"]);
     const unresolved = surfaces.anchorPair(EVIDENCE["8"]);
     const bare = surfaces.anchorPair(EVIDENCE["10"]);
+    // The office node: an exact address that cannot be drawn, and a rectangle that can.
+    const both = surfaces.anchorPair(EVIDENCE["12"]);
+    out.pairs = { anchored, unresolved, bare, both };
 
     await record("page", () => surfaces.pageFigure({
       blob: page(), page: surfaces.pageFor({ id: 7, usetype: "chunk" }, anchored),
@@ -576,6 +579,12 @@ FIGURE_HARNESS = textwrap.dedent("""
     }));
     await record("page_none", () => surfaces.pageFigure({
       blob: page(), page: 0, dpi: 150, evidence: bare, label: "The report",
+    }));
+    // The SAME function, the same transform, the same box — and a caption that says whose
+    // pagination the page number belongs to, read off `PdfAnchor.of` and off nothing else.
+    await record("page_rendition", () => surfaces.pageFigure({
+      blob: page(), page: both.rendition.anchor.page, dpi: 150,
+      evidence: both.rendition, label: "The proposal.docx",
     }));
     await record("region", () => surfaces.regionFigure({
       blob: page(), dpi: 150, anchor: anchored.anchor, label: "A chunk",
@@ -704,6 +713,26 @@ EVIDENCE_ROWS = {
         },
     },
     "10": {"document_id": 10, "evidence": {}},
+    # The office node, and the reason `anchorPair` grew a second pair: `OFFICE_SPEC.md` Part 5's
+    # "Two anchors, not one". The `ooxml` address cannot be wrong and cannot be drawn; the
+    # rectangle is what `anchor:render` found in the PDF `render:pdf` produced, and it says so
+    # with `of: "rendition"` rather than leaving a viewer to infer it from the row it came in.
+    "12": {
+        "document_id": 12,
+        "evidence": {
+            "source_anchor": {
+                "kind": "ooxml",
+                "part": "word/document.xml",
+                "path": "/w:document/w:body/w:p[42]",
+            },
+            "render_anchor": {
+                "kind": "pdf",
+                "of": "rendition",
+                "page": 3,
+                "bbox": [72.0, 118.4, 540.0, 262.9],
+            },
+        },
+    },
     "1": {
         "document_id": 1,
         "evidence": {
@@ -753,6 +782,66 @@ def test_a_page_figure_is_the_page_with_the_passage_boxed_on_it(figures):
         {"left": 12.2549, "top": 15.5724, "width": 79.6569, "height": 19.0052}, abs=1e-4
     )
     assert _find(page["tree"], "render-caption")[0]["text"] == "Page 4, rendered at 150 dpi."
+
+
+def test_the_two_anchor_rows_come_back_as_two_pairs(figures):
+    """``OFFICE_SPEC.md`` Part 5's "Two anchors, not one", as the shape a page reads.
+
+    A ``.docx`` chunk carries an exact ``ooxml`` address AND a rectangle recovered from the
+    rendition, and they are two evidence rows because they are two facts with different truth
+    conditions. ``anchorPair`` therefore answers with two PAIRS rather than four loose keys, and
+    the nesting is not tidiness: IC-9's ``highlight()`` refuses a call carrying one key of a pair
+    and not the other, so each of the two things a caller might draw has to be separately a
+    legal argument. ``{anchor, unresolved}`` and ``rendition: {anchor, unresolved}`` are both
+    that; four flat keys would have made ``highlight(evidence)`` mean "the source one" by
+    accident of naming.
+    """
+    both = figures["pairs"]["both"]
+    assert both["anchor"]["kind"] == "ooxml", "what the passage IS"
+    assert both["unresolved"] is None
+    assert both["rendition"]["anchor"]["of"] == "rendition", "where it appears on a page"
+    assert both["rendition"]["unresolved"] is None
+
+    # A node with neither still answers with both pairs and four nulls, so no caller has to ask
+    # whether `evidence.rendition` exists before asking what is in it.
+    assert figures["pairs"]["bare"] == {
+        "anchor": None,
+        "unresolved": None,
+        "rendition": {"anchor": None, "unresolved": None},
+    }
+
+
+def test_a_rendition_page_says_whose_pagination_it_is(figures):
+    """The label the whole office beeline turns on, and it is read off ``PdfAnchor.of``.
+
+    **Authority runs opposite to drawability.** The ``ooxml`` address is computed from the
+    uploaded bytes, cannot be wrong, and cannot be drawn. The rectangle is a position in a PDF
+    LibreOffice produced from a document that has no pages of its own — it is the only one that
+    can be drawn, and another LibreOffice may put the passage on a different page. So a caption
+    reading "Page 4" under a rendition would be the appliance making the document's claim on its
+    behalf, and the reader who opens the ``.docx`` in Word and finds it on page 5 would have no
+    way to tell which of the two was lying.
+
+    ``of`` and not the row it arrived in, because a parsed anchor travels away from its row: by
+    the time this caption is written, the value has been through a URL fragment and two
+    function calls, and the field is the only thing that still says where it came from.
+    """
+    drawn = figures["figures"]["page_rendition"]
+    assert drawn["highlight"]["status"] == "box", "the same transform draws the same box"
+    assert len(_find(drawn["tree"], "overlay-box")) == 1
+
+    caption = _find(drawn["tree"], "render-caption")[0]["text"]
+    assert "Page 4 of this appliance's rendering" in caption
+    assert "no pages of its own" in caption
+    assert "may paginate" in caption
+    assert caption != "Page 4, rendered at 150 dpi.", "which is what a source page says"
+
+    # The alternative text too, because a screen reader is the reader most likely to be handed
+    # the picture without the caption beside it.
+    assert (
+        "this appliance's rendering of The proposal.docx"
+        in _find(drawn["tree"], "render-picture")[0]["attrs"]["alt"]
+    )
 
 
 def test_a_page_with_no_box_says_which_absence_it_is(figures):
@@ -920,8 +1009,13 @@ def test_the_page_says_which_representation_of_a_document_it_is_showing(figures)
 
     The markdown is not a substitute for the document either. It is the document as this
     appliance read it: the text that was chunked, embedded and indexed, and the thing a search
-    hit is a hit ON. The page a rendition would give does not exist, because nothing in this
-    tree writes one, and the sentence says that and names the step that will.
+    hit is a hit ON.
+
+    **The second sentence stopped being about a step number.** It said "this front end cannot
+    show it yet — serving a citation image off a rendition is Block G step 33" for as long as
+    that was true, which was until the browser learnt to read the ``render_anchor`` row. What it
+    has to say now is the thing that stays true: a page drawn off a rendition is a page of
+    LIBREOFFICE'S pagination, and the document it was made from has no pages of its own.
     """
     extracted = figures["notices"]["extracted"]["text"]
     assert "NOT a rendered page" in extracted
@@ -929,9 +1023,17 @@ def test_the_page_says_which_representation_of_a_document_it_is_showing(figures)
     assert "render:pdf" in extracted and "JMFTS_CONVERT_URL" in extracted
     assert "report.docx, application/vnd.ms-word" in extracted
 
-    # The other answer is a sentence too, rather than the absence of one.
+    # The other answer is a sentence too, rather than the absence of one — and it is about
+    # whose pagination the reader is looking at, which is a fact with no expiry date.
     held = figures["notices"]["rendition"]["text"]
-    assert "holds a rendition" in held and "Block G step 33" in held
+    assert "holds a rendition" in held
+    assert "not of the uploaded file" in held, "whose pages these are"
+    assert "paginate it differently" in held
+    assert "step 33" not in held, (
+        "this sentence was written in the future tense about a step that has since shipped and "
+        "been consumed; a page telling a reader to wait for something they are looking at is "
+        "the stale half of the defect this lane closed"
+    )
 
 
 def test_a_box_over_part_of_a_passage_does_not_read_like_a_box_over_all_of_it(figures):

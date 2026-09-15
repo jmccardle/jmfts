@@ -38,7 +38,12 @@ from jmfts_client.contracts.search import (
     SynthesizeResponse,
     validate_search_methods,
 )
-from jmfts_client.contracts.anchor import ANCHOR_ROW, ANCHOR_UNRESOLVED_ROW
+from jmfts_client.contracts.anchor import (
+    ANCHOR_ROW,
+    ANCHOR_UNRESOLVED_ROW,
+    RENDER_ANCHOR_ROW,
+    RENDER_ANCHOR_UNRESOLVED_ROW,
+)
 from jmfts_client.contracts.document import DocumentResponse
 from jmfts_core.effective_content import project_effective_content
 from jmfts_core.query_router import route_query
@@ -215,10 +220,20 @@ class SearchService:
         ``DocumentEvidenceResponse`` 3.2 — and the detail view reads exactly that distinction
         out of it (``evidenceFromRows`` in ``views/document.js``). What the hit carries is
         enough to draw the box and to say why there is not one, which is what it is for.
+
+        FOUR ROWS AND STILL ONE QUERY. The rendition pair joined the source pair when the
+        browser learnt to draw an office document's rectangle: a ``.docx`` hit carries an
+        exact ``ooxml`` address in ``source_anchor`` and a page-and-rectangle in
+        ``render_anchor``, and a result list that had only the first would have to ask
+        ``/evidence`` per hit to find out whether "show me where" is on offer — the round
+        trip this method exists to remove, in its office spelling. Widening the name filter
+        by two costs nothing a second statement would not have cost more of; the count is
+        pinned by ``tests/test_search_anchor.py``, which listens to the engine.
         """
         documents = self._project(results)
         anchors = EvidenceRepository(self.session).read_many_named(
-            [document.id for document in documents], (ANCHOR_ROW, ANCHOR_UNRESOLVED_ROW)
+            [document.id for document in documents],
+            (ANCHOR_ROW, ANCHOR_UNRESOLVED_ROW, RENDER_ANCHOR_ROW, RENDER_ANCHOR_UNRESOLVED_ROW),
         )
         return [
             SearchResultItem(
@@ -227,6 +242,8 @@ class SearchService:
                 method=r.method,
                 source_anchor=anchors[document.id].get(ANCHOR_ROW),
                 source_anchor_unresolved=anchors[document.id].get(ANCHOR_UNRESOLVED_ROW),
+                render_anchor=anchors[document.id].get(RENDER_ANCHOR_ROW),
+                render_anchor_unresolved=anchors[document.id].get(RENDER_ANCHOR_UNRESOLVED_ROW),
             )
             for document, r in zip(documents, results)
         ]

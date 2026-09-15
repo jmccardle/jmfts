@@ -29,6 +29,16 @@
 // so `highlight()` returns a TAGGED result and never a bare box-or-null, and the caller has
 // to have handled `"unresolved"` in order to have handled anything.
 //
+// FOUR ABSENCES ONE LAYER UP, AND THIS MODULE STILL SEES TWO AT A TIME. A node can carry a
+// SECOND pair — `render_anchor` and `render_anchor.unresolved`, a rectangle recovered from
+// the rendition of an office document — so the states a page has to tell apart are: no
+// rectangle anywhere, a source rectangle, a recovered one, and a recovery that was attempted
+// and failed. That is a decision about which of two pairs to draw, and it is the VIEW's: this
+// function takes one pair and answers about that pair. `anchorPair` in `render/surfaces.js`
+// nests the second pair as its own two-key object for exactly this reason — each of the two
+// things a caller might draw is separately a legal argument here, and neither can arrive
+// half-formed or be silently substituted for the other.
+//
 // COORDINATES ARE THE SOURCE DOCUMENT'S OWN. The anchor contract says so at length: a stored
 // pixel value would bake one viewer's zoom into the record. Converting is this module's job
 // and it is the only job this module has.
@@ -52,8 +62,11 @@ export class OverlayError extends Error {
 export class UnknownAnchorKind extends OverlayError {
   constructor(kind) {
     super(
-      `anchor kind ${JSON.stringify(kind)} is not one of pdf, cells, span. This front end is ` +
-        "older than the appliance that wrote it."
+      // FOUR KINDS, and this message listed three until the `ooxml` one had a caller: the
+      // two beside it (`surfaces.describeAnchor`, `views/search.js`) already named four, and
+      // a refusal that under-reports the kinds it knows sends a reader looking for a fifth.
+      `anchor kind ${JSON.stringify(kind)} is not one of pdf, cells, span, ooxml. This ` +
+        "front end is older than the appliance that wrote it."
     );
     this.name = "UnknownAnchorKind";
     this.kind = kind;
@@ -137,18 +150,24 @@ export function highlight(evidence, surface) {
       // UNRESOLVED keeps the distinction a viewer needs: UNRESOLVED means nothing could be
       // recovered, and this means something exact was.
       //
-      // THE OTHER ANCHOR NOW EXISTS. Step 33 landed `anchor:render`, which writes a
-      // `render_anchor` row carrying a page and a rectangle recovered from the rendition,
-      // and it is a PdfAnchor with `of: "rendition"`. So a caller holding an ooxml anchor
-      // should look for that row and pass THAT here. This sentence said "a rectangle needs
-      // a rendition, which is Block G step 33" in the future tense until the step landed;
-      // the refusal was always right and only its instruction had expired.
+      // THE OTHER ANCHOR EXISTS AND THE CALLER CAN NOW COMPLY. Step 33 landed
+      // `anchor:render`, which writes a `render_anchor` row carrying a page and a rectangle
+      // recovered from the rendition, and it is a PdfAnchor with `of: "rendition"`; the
+      // browser reads that row as `evidence.rendition` (`anchorPair`) and a search hit
+      // carries it as `SearchResultItem.render_anchor`. So the instruction below now names
+      // something the caller has in its hand, which is the only part of this message that
+      // has changed: the REFUSAL was right before the row existed and is right now, and it
+      // is right for the same reason either way — this anchor has no rectangle, and the
+      // correct answer to that is never "draw the other one instead" taken silently. Which
+      // of the two a page draws is a decision it has to be able to explain to a reader, so
+      // it is made at the call site and arrives here as a different argument.
       throw new OverlayError(
         `an ooxml anchor (${anchor.path} of ${anchor.part}) is an address in the source ` +
           `package and has no rectangle to draw on a ${surface.kind} surface. It is the ` +
-          "durable citation, not a picture: pass this node's `render_anchor` row instead, " +
-          "which carries a rectangle recovered from the rendition and says so with " +
-          '`of: "rendition"`.'
+          "durable citation, not a picture: draw this node's rendition pair instead — " +
+          "`highlight(evidence.rendition, surface)`, whose anchor carries a rectangle " +
+          'recovered from the rendition and says so with `of: "rendition"` — and keep this ' +
+          "address on the page as the thing that rectangle is a picture of."
       );
     default:
       throw new UnknownAnchorKind(anchor.kind);

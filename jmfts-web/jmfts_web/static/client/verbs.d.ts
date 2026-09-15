@@ -1918,6 +1918,14 @@ export interface SearchResultItem {
    * The source_anchor.unresolved row: why no anchor was recovered.
    */
   source_anchor_unresolved?: Record<string, unknown> | null;
+  /**
+   * The render_anchor evidence row: a page and a rectangle recovered from this appliance's rendition of the document. Approximate, and says so with of="rendition".
+   */
+  render_anchor?: Record<string, unknown> | null;
+  /**
+   * The render_anchor.unresolved row: why no rectangle was recovered from the rendition.
+   */
+  render_anchor_unresolved?: Record<string, unknown> | null;
 }
 
 /**
