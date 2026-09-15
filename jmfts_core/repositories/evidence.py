@@ -139,6 +139,45 @@ class EvidenceRepository:
             found[doc_id][name] = value
         return found
 
+    def read_many_named(
+        self, document_ids: Iterable[int], names: Iterable[str]
+    ) -> dict[int, dict[str, Any]]:
+        """A NAMED few rows for several nodes at once, as ``{document_id: {name: value}}``.
+
+        :meth:`read_many` with the row list narrowed, and the narrowing is the point rather
+        than a micro-optimisation. Its caller is a search response — up to a hundred hits, on
+        every query — and ``document_evidence`` holds ``extraction`` (a dict per file node),
+        ``attempts`` (5.6's append-only log, which grows) and twenty-odd others beside the two
+        an anchor lives in. Asking for every row of every hit would move kilobytes of JSON out
+        of Postgres per search to read two of them.
+
+        ONE QUERY however many names and however many nodes, which is the property the caller
+        needs: the alternative is a read per hit, and a round trip per result is exactly what
+        IC-4 put the anchor on the hit to remove — reintroducing it inside the service would be
+        the same defect one layer down.
+
+        Only rows are addressable here, not leaves within a row: a name that resolves to a key
+        inside another row raises through :meth:`_row_of`'s registry lookup, which is the same
+        refusal :meth:`read` gives. Every node asked about gets an entry, empty when it has none
+        of the named rows, so a caller does not have to tell "no rows" from "not asked".
+        """
+        ids = list(document_ids)
+        found: dict[int, dict[str, Any]] = {doc_id: {} for doc_id in ids}
+        rows = {name: self._row_of(name) for name in names}
+        if not ids or not rows:
+            return found
+        results = self.session.execute(
+            select(
+                DocumentEvidence.document_id, DocumentEvidence.name, DocumentEvidence.value
+            ).where(
+                DocumentEvidence.document_id.in_(ids),
+                DocumentEvidence.name.in_(sorted(set(rows.values()))),
+            )
+        ).all()
+        for doc_id, name, value in results:
+            found[doc_id][name] = value
+        return found
+
     # =========================================================================
     # Write
     # =========================================================================

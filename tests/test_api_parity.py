@@ -184,6 +184,19 @@ class _StubRepo:
         return [_StubResult(self._doc, 0.9, "hybrid")]
 
 
+class _StubEvidence:
+    """``EvidenceRepository`` narrowed to the one method a search response calls.
+
+    ``read_many_named`` answers "every node asked about, none of them carrying any of the named
+    rows", which is the shape the real one returns for a corpus nothing has anchored — an empty
+    dict per id rather than a missing key, so the caller never has to tell "no rows" from "not
+    asked".
+    """
+
+    def read_many_named(self, document_ids, names):
+        return {doc_id: {} for doc_id in document_ids}
+
+
 def _doc_with_temporal_fields():
     doc = Document(
         id=42,
@@ -208,10 +221,19 @@ def _doc_with_temporal_fields():
 
 def test_hybrid_search_preserves_position_and_event_time(monkeypatch):
     doc = _doc_with_temporal_fields()
-    # Patch the repo the service constructs so no DB is touched.
+    # Patch the repos the service constructs so no DB is touched.
     monkeypatch.setattr(
         "jmfts_core.services.search_service.SearchRepository",
         lambda session: _StubRepo(doc),
+    )
+    # The second one arrived with step 31: IC-4 puts the node's `source_anchor` rows on every
+    # hit, which is one batched read per page. This test drives the service with `session=None`,
+    # so the read has to be stubbed the same way the search is — and what it answers is "this
+    # node has no evidence rows", which is the ordinary case and leaves both fields None. What
+    # this test is about is the fields the PROJECTION carries, and the stub keeps it about that.
+    monkeypatch.setattr(
+        "jmfts_core.services.search_service.EvidenceRepository",
+        lambda session: _StubEvidence(),
     )
     from jmfts_client.contracts.search import HybridSearchRequest
 

@@ -364,14 +364,32 @@ export function pageFor(document_, evidence, named) {
   );
 }
 
-/** One anchor in the words a caption uses. */
+/**
+ * One anchor in the words a caption uses.
+ *
+ * FOUR KINDS AND NO TRAILING ELSE, which is the defect this function had until step 31 and is
+ * worth naming because it is the class of defect this whole sprint is about. The last line used
+ * to be an unguarded `return \`characters ${anchor.char_start} to ${anchor.char_end}\``, so an
+ * `ooxml` anchor — a kind the contract gained at `471e8f7` and which this file's own header does
+ * not list — captioned itself "characters undefined to undefined". A confidently wrong caption
+ * under a passage that IS exactly addressed, which is the same failure as a confidently wrong
+ * box, drawn in prose. An unknown kind now says it is unknown.
+ */
 export function describeAnchor(anchor) {
   if (anchor.kind === "pdf") {
     const box = anchor.bbox.map((value) => Math.round(value * 10) / 10).join(", ");
     return `page ${anchor.page + 1}, [${box}] in points`;
   }
   if (anchor.kind === "cells") return `${anchor.sheet}!${anchor.ref}`;
-  return `characters ${anchor.char_start} to ${anchor.char_end}`;
+  if (anchor.kind === "span") return `characters ${anchor.char_start} to ${anchor.char_end}`;
+  // `OoxmlAnchor`: the element, then the part it is in. That order because the element is the
+  // answer and the part is where to look for it, which is how a reader reads it aloud.
+  if (anchor.kind === "ooxml") return `${anchor.path} of ${anchor.part}`;
+  throw new SurfaceError(
+    `anchor kind ${JSON.stringify(anchor.kind)} is not one of pdf, cells, span, ooxml, so ` +
+      "this front end cannot say where it points. It is older than the appliance that wrote " +
+      "it; jmfts-client/jmfts_client/contracts/anchor.py is the authority on the kinds."
+  );
 }
 
 /**

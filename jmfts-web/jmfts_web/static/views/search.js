@@ -47,16 +47,23 @@
 // THE ANCHOR IS CARRIED, NOT REDRAWN. IC-4 puts `source_anchor` and `source_anchor_unresolved`
 // on every hit precisely so a result list does not have to call `/documents/{id}/evidence` per
 // hit before it can offer "show me where". Step 31 draws the box; this page's job is to show
-// which of the states a hit is in and to hand BOTH rows to the detail view without losing them
-// — `detailParams` encodes them into the fragment and `readDetailParams` reads them back, so
-// there is one definition of that hand-off and step 28's detail view imports it rather than
-// writing a second one. The state vocabulary shares its two absence words with IC-9's
-// `HIGHLIGHT_STATUS` by importing them, because "no anchor" and "an anchor that could not be
-// recovered" are the two the whole citation feature turns on and two spellings of them is how
-// they end up meaning different things on two pages.
+// which of the states a hit is in and to hand BOTH rows to the detail view without losing them.
+// THE ENCODING OF THAT HAND-OFF IS NO LONGER HERE: it is `shell/citation.js`, which both this
+// view and the detail view import. It lived here and in `views/document.js` at once, identical
+// but for an error class name, because the two lanes that wrote it could not import each other;
+// step 31 deleted both copies rather than picking one, and that file's header is the argument
+// for why a third module spends nothing of IC-7's independence. The state vocabulary shares its
+// two absence words with IC-9's `HIGHLIGHT_STATUS` by importing them, because "no anchor" and
+// "an anchor that could not be recovered" are the two the whole citation feature turns on and
+// two spellings of them is how they end up meaning different things on two pages.
 
 import { HIGHLIGHT_STATUS } from "../render/overlay.js";
 import { registerView } from "../shell/registry.js";
+import {
+  DETAIL_PATH,
+  detailHref as citationHref,
+  detailParams as citationParams,
+} from "../shell/citation.js";
 
 /** This page asked a response for a field its contract does not carry. */
 export class ContractError extends Error {
@@ -354,16 +361,28 @@ export const CAPABILITIES_OP = "MetaService.capabilities";
  * "something tried to recover a rectangle and could not, and here is why". Two spellings of
  * those two is how the overlay and the result list end up meaning different things.
  *
- * The other three are states only a LIST can be in, because it looks at many hits and one of
+ * `ADDRESSED` IS THE THIRD ANSWER AND IT IS THE ONE STEP 31 ADDED. An `ooxml` anchor says
+ * exactly where a passage is — `/w:document/w:body/w:p[42]` of `word/document.xml`, recovered
+ * from the uploaded package by `anchor:source` — and has no rectangle, because a `.docx` has no
+ * pages until something paginates it (`OoxmlAnchor`, "this has no rectangle, and that is not a
+ * gap"). Reading that as `ANCHORED` would promise a box the detail view cannot draw; reading it
+ * as `UNREADABLE`, which is what this page did until step 31, says "this front end is older
+ * than the appliance" about a kind it can name precisely. **A reader has to be able to tell "we
+ * know exactly where this is and cannot draw it yet" from "we have no idea where this is",** and
+ * one word for both is how that distinction stops existing.
+ *
+ * The last three are states only a LIST can be in, because it looks at many hits and one of
  * them may be malformed. `CONTRADICTORY` is both rows at once, which `evidence.py` says the
  * appliance cannot produce; `UNREADABLE` is an anchor this front end cannot describe — an
- * unknown `kind` (this page is older than the appliance) or a known kind missing the fields
- * that say where it points. Neither takes the page down: a hit whose anchor is wrong is still a
- * hit, and a rendering that threw would hide the six good hits beside it. They are shown in the
- * bad colour with the reason on the badge, which is showing the fault rather than swallowing it.
+ * unknown `kind` (this page really is older than the appliance) or a known kind missing the
+ * fields that say where it points. Neither takes the page down: a hit whose anchor is wrong is
+ * still a hit, and a rendering that threw would hide the six good hits beside it. They are shown
+ * in the bad colour with the reason on the badge, which is showing the fault rather than
+ * swallowing it.
  */
 export const ANCHOR_STATE = Object.freeze({
   ANCHORED: "anchored",
+  ADDRESSED: "addressed",
   UNRESOLVED: HIGHLIGHT_STATUS.UNRESOLVED,
   NONE: HIGHLIGHT_STATUS.NONE,
   CONTRADICTORY: "contradictory",
@@ -439,11 +458,16 @@ export function anchorState(hit) {
         return unreadable(anchor, "a span anchor is {char_start, char_end}, both integers");
       }
       return placed(anchor, `chars ${anchor.char_start}–${anchor.char_end}`);
+    case "ooxml":
+      if (typeof anchor.part !== "string" || typeof anchor.path !== "string") {
+        return unreadable(anchor, "an ooxml anchor is {part, path}, both strings");
+      }
+      return addressed(anchor, `${anchor.path} of ${anchor.part}`);
     default:
       return unreadable(
         anchor,
-        `anchor kind ${JSON.stringify(anchor.kind)} is not one of pdf, cells, span — this front ` +
-          "end is older than the appliance that wrote it."
+        `anchor kind ${JSON.stringify(anchor.kind)} is not one of pdf, cells, span, ooxml — ` +
+          "this front end is older than the appliance that wrote it."
       );
   }
 }
@@ -452,6 +476,24 @@ const placed = (anchor, where) => ({
   state: ANCHOR_STATE.ANCHORED,
   where,
   detail: null,
+  anchor,
+  unresolved: null,
+});
+
+/**
+ * Exactly located, and not drawable. See `ANCHOR_STATE.ADDRESSED`.
+ *
+ * The detail is a statement about this front end and about the schedule, not about the
+ * document: nothing is missing from the record, and what is missing is the rendition a
+ * rectangle would be measured against.
+ */
+const addressed = (anchor, where) => ({
+  state: ANCHOR_STATE.ADDRESSED,
+  where,
+  detail:
+    "This passage is addressed exactly, in the source package's own structure, and has no " +
+    "rectangle: an office document has no pages until render:pdf paginates it. Recovering a " +
+    "box from that rendition is docs/SPRINT_0_6_0.md Block G step 33.",
   anchor,
   unresolved: null,
 });
@@ -465,9 +507,13 @@ const unreadable = (anchor, detail) => ({
 });
 
 // --------------------------------------------------------------- the hand-off to the detail view
-
-/** The route step 28's document detail view registers. Named once, here and in `detailHref`. */
-export const DETAIL_PATH = "/document";
+//
+// THE ENCODING IS `shell/citation.js` AND IT IS NOT REPEATED HERE. What is left in this file is
+// the half only this file can do: reading the two evidence rows off a `SearchResultItem`
+// through this view's declared-reads discipline, so that a field renamed in `jmfts-client`
+// fails in the suite rather than on somebody's screen. The citation module takes the three
+// VALUES and knows nothing about the hit shape; that is what lets the detail view, which never
+// sees a hit, import the same reader.
 
 /**
  * The route the preset editor registers, and the ONE thing this page knows about writing a preset.
@@ -476,68 +522,31 @@ export const DETAIL_PATH = "/document";
  * changed: this is a link, not a call. What it links WITH is this page's own fragment vocabulary —
  * `paramsFromRequest` — so "save this search" is literally the search's URL with the route
  * swapped, and the editor reads the parameters it can hold and says which ones it cannot.
- * A view naming another view's route is already how the detail hand-off works two lines above.
+ *
+ * It sits here rather than in `shell/citation.js` because that module is the DETAIL hand-off's
+ * encoding, both directions, and this is one view naming one route it links to. If a second page
+ * ever links to the editor, this constant moves there and this comment is the record of why it
+ * had not yet.
  */
 export const PRESETS_PATH = "/presets";
 
-/**
- * The fragment parameters that take a hit to the detail view WITHOUT losing its anchor.
- *
- * Both evidence rows ride in the URL as JSON. That is deliberate and it is the only encoding
- * that keeps the three properties this hand-off needs at once: the detail view gets the anchor
- * with no second call (which is the round trip IC-4 was put on the hit to remove), a pasted link
- * still carries it, and a reload does not quietly downgrade a boxed citation to an unboxed one.
- * A module-level map keyed by document id would do the first and neither of the others.
- *
- * A key that is ABSENT means the hit carried no such row. `readDetailParams` is the other half
- * and lives here beside it, so the encoding has one definition and step 28 imports it rather
- * than writing a second parser against the same URLs.
- */
-export function detailParams(hit) {
-  const document_ = readHit(hit, "document");
-  const params = { id: String(readDocument(document_, "id")) };
-  const anchor = readHit(hit, "source_anchor");
-  const unresolved = readHit(hit, "source_anchor_unresolved");
-  if (anchor !== null) params.anchor = JSON.stringify(anchor);
-  if (unresolved !== null) params.unresolved = JSON.stringify(unresolved);
-  return params;
+/** The three values one hit hands over. `null` for a row the hit does not carry. */
+function citationOf(hit) {
+  return {
+    documentId: readDocument(readHit(hit, "document"), "id"),
+    anchor: readHit(hit, "source_anchor"),
+    unresolved: readHit(hit, "source_anchor_unresolved"),
+  };
 }
 
-/**
- * Read what `detailParams` wrote. The detail view's half of the hand-off.
- *
- * Returns `{anchor, unresolved}` with BOTH keys always present, because that is the shape
- * `highlight()` in `render/overlay.js` refuses to be called without — "a caller that passes only
- * `anchor` has not said whether it looked for the unresolved row". Unreadable JSON RAISES rather
- * than coming back as "no anchor": a truncated fragment and a hit with no citation are different
- * facts, and collapsing them is how the highlight silently stops appearing.
- */
-export function readDetailParams(params) {
-  const one = (name) => {
-    const text = params[name];
-    if (text === undefined || text === "") return null;
-    try {
-      return JSON.parse(text);
-    } catch (error) {
-      throw new SearchRequestError(
-        `the "${name}" fragment parameter is not JSON: ${error.message}. It is written by ` +
-          "detailParams() in views/search.js and read back here; a hand-edited URL can break it."
-      );
-    }
-  };
-  const id = params.id;
-  if (id === undefined || !/^\d+$/.test(String(id))) {
-    throw new SearchRequestError(
-      `the document detail route needs an integer "id"; got ${JSON.stringify(id ?? null)}.`
-    );
-  }
-  return { documentId: Number(id), anchor: one("anchor"), unresolved: one("unresolved") };
+/** The fragment parameters that take a hit to the detail view without losing its anchor. */
+export function detailParams(hit) {
+  return citationParams(citationOf(hit));
 }
 
 /** The href a hit's title points at. */
 export function detailHref(hit) {
-  const query = new URLSearchParams(Object.entries(detailParams(hit))).toString();
-  return `#${DETAIL_PATH}?${query}`;
+  return citationHref(citationOf(hit));
 }
 
 // ------------------------------------------------------------------- a search, as a fragment

@@ -52,6 +52,13 @@
   border: 1px solid var(--line); font-size: .78em;
 }
 .view-search .search-badge.anchored { border-color: var(--accent); color: var(--accent); }
+/* Located exactly, not drawable — `ANCHOR_STATE.ADDRESSED`, which today is every `.docx` and
+   `.pptx` hit. The accent, because the record is complete and nothing failed; DASHED, because
+   the box this colour otherwise promises is Block G step 33 and not on this page. Neither
+   `anchored` nor the bad colour is honest about it, which is the whole reason for the state. */
+.view-search .search-badge.addressed {
+  border-color: var(--accent); border-style: dashed; color: var(--accent);
+}
 .view-search .search-badge.unresolved,
 .view-search .search-badge.contradictory,
 .view-search .search-badge.unreadable { border-color: var(--bad); color: var(--bad); }
