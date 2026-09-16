@@ -1,0 +1,113 @@
+/* The design language, as tokens.
+ *
+ * THE IMAGE IS A CRITICAL EDITION. A JMFTS node is rarely legible on its own: a search hit is
+ * a chunk at depth 5 whose title belongs to its grandparent, whose text was cut by a named
+ * rule, and whose meaning needs the page it came from. That is the situation a scholarly
+ * edition was invented for — a text in the main column, and an apparatus beside it recording
+ * where each reading came from. So this console sets content in a text face and derivation in
+ * the same family at a smaller size, and keeps the apparatus permanently on the page instead
+ * of behind a disclosure triangle.
+ *
+ * TWO FAMILIES, AND THE SPLIT CARRIES MEANING. Serif is prose — titles, content, descriptions,
+ * the words of the interface. Mono is a value you could copy and paste — an id, a score, a
+ * usetype, a task name, a path, a cell reference. A reader learns that rule in one screen and
+ * can then tell, without reading, which parts of a page are data.
+ *
+ * HUE IS RATIONED. One accent, for things you can act on. One alarm, for things that failed.
+ * Everything else is ink, paper and rule. The distinction that matters most — whether a rule
+ * or a person wrote this node — is carried by an editorial bracket in the margin rather than
+ * by a colour, because it has to survive being read next to a usetype, a lifecycle state and
+ * a score without any of the four shouting over the others.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  /* -- ink and paper: a cool grey-green stock, not cream -------------------------------- */
+  --paper: #edeee9;
+  --leaf: #f7f8f4;
+  --sunk: #e4e6e0;
+  --ink: #1b1e1b;
+  --ink-soft: #5c625a;
+  --ink-faint: #8a8f87;
+  --rule: #cfd1c8;
+  --rule-soft: #e0e2da;
+
+  /* -- the two hues that are allowed to exist ------------------------------------------- */
+  --accent: #27456b;
+  --accent-ink: #1d3552;
+  --accent-wash: #e1e7ef;
+  --alarm: #8a3324;
+  --alarm-wash: #f2e3df;
+
+  /* -- type ----------------------------------------------------------------------------- */
+  --face-text: Charter, "Bitstream Charter", "Iowan Old Style", "Source Serif 4",
+    "Source Serif Pro", Palatino, Georgia, serif;
+  --face-value: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo,
+    Consolas, monospace;
+
+  --t-micro: 0.72rem;
+  --t-small: 0.82rem;
+  --t-base: 0.94rem;
+  --t-mid: 1.15rem;
+  --t-large: 1.45rem;
+  --t-display: 1.85rem;
+
+  --lh-prose: 1.62;
+  --lh-tight: 1.3;
+
+  /* -- measure: the apparatus tradition keeps the text column narrow -------------------- */
+  --measure: 66ch;
+
+  /* -- space, on a 4px grid ------------------------------------------------------------- */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s7: 48px;
+
+  /* Radius appears only where something is pressable. A rule with a radius is a box; a box
+     with a radius is a card; a page of cards is the look this design is avoiding. */
+  --r: 3px;
+
+  --rail: 248px;
+  --apparatus: 310px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #171a17;
+    --leaf: #1e221e;
+    --sunk: #121412;
+    --ink: #e2e6de;
+    --ink-soft: #9aa196;
+    --ink-faint: #6e756b;
+    --rule: #313630;
+    --rule-soft: #262a25;
+
+    --accent: #8fadd8;
+    --accent-ink: #b3c8e8;
+    --accent-wash: #212a36;
+    --alarm: #d98d7c;
+    --alarm-wash: #33221e;
+  }
+}
+
+:root[data-theme="dark"] {
+  --paper: #171a17;
+  --leaf: #1e221e;
+  --sunk: #121412;
+  --ink: #e2e6de;
+  --ink-soft: #9aa196;
+  --ink-faint: #6e756b;
+  --rule: #313630;
+  --rule-soft: #262a25;
+
+  --accent: #8fadd8;
+  --accent-ink: #b3c8e8;
+  --accent-wash: #212a36;
+  --alarm: #d98d7c;
+  --alarm-wash: #33221e;
+}
