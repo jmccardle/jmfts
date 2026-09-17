@@ -21,17 +21,29 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
 # docker-compose bind-mounts jmfts_core/ over this, so edits are live.
 COPY pyproject.toml ./
 COPY jmfts_core ./jmfts_core
-# The second distribution, installed first. `jmfts` declares `jmfts-client>=0.1.0`, and
-# that name is not on PyPI yet, so the install below would fail resolving it. Installing
-# the copy in this tree satisfies the requirement before pip reads it, and is what you
-# want regardless: the image should carry the contracts this source tree defines.
+# The other two distributions, installed FIRST, for the reason `jmfts` pins both with `==`:
+# one number, three wheels, one tag. An editable install of `jmfts` resolves those pins
+# against PyPI and shadows the trees beside this file with whatever the last release was —
+# which is the opposite of what a development image is for. Installing the local copies
+# satisfies both pins before pip reads them.
+#
+# (An earlier version of this comment said the reason was that `jmfts-client` "is not on
+# PyPI yet". That stopped being true at 0.2.0. The pin is the reason, and it always was.)
 COPY jmfts-client ./jmfts-client
 RUN pip install --no-cache-dir -e ./jmfts-client
+# The front end. It carries built static files and one module that says where they are, with
+# no dependencies of its own, so this line costs the image nothing but the bundle. Without it
+# `jmfts_core.rest.main` starts normally and serves no /app — which is correct for a worker
+# and wrong for the stack the quickstart tells a first-time reader to run.
+COPY jmfts-web ./jmfts-web
+RUN pip install --no-cache-dir -e ./jmfts-web
 # `[embed]` because a dev appliance both embeds and searches, and search embeds its query
 # locally whatever JMFTS_RUNNER_URL says. Base JMFTS does NOT install torch any more — it
 # assumes external embedding — so an image that serves /search or /runner has to ask for
-# the model stack by name. See pyproject.toml.
-RUN pip install --no-cache-dir -e ".[embed]"
+# the model stack by name. `[web]` is named here rather than left implicit: the editable
+# install above already satisfies its pin, so this declares the dependency without
+# resolving anything. See pyproject.toml.
+RUN pip install --no-cache-dir -e ".[embed,web]"
 
 EXPOSE 8100
 # Overridden by compose (adds --reload); kept so the image is runnable standalone.

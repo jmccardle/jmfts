@@ -59,6 +59,11 @@ services:
     volumes:
       # Live-reload: edits to these on the host reload the running server.
       - ./jmfts_core:/app/jmfts_core
+      # The front end, for the same reason and by a different mechanism. There is no build
+      # step — the bundle is ES modules the browser runs as they stand — so these need no
+      # reload at all: StaticFiles resolves the directory once at mount and reads each file
+      # per request, and a browser refresh is the whole edit loop.
+      - ./jmfts-web/jmfts_web:/app/jmfts-web/jmfts_web
       # Persist the downloaded embedding model across restarts (first boot pulls
       # nomic-ai/modernbert-embed-base — a few hundred MB — into this volume).
       - hf_cache:/root/.cache/huggingface
