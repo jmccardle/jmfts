@@ -1,7 +1,10 @@
 # JMFTS Roadmap
 
-Last updated: 2026-09-13. **This file is open work; `CHANGELOG.md` is what shipped.** Where
+Last updated: 2026-09-17. **This file is open work; `CHANGELOG.md` is what shipped.** Where
 the two would say the same thing, this one says nothing and points there.
+
+The 2026-09-17 pass re-read one section — the job system — against `master` at `8e7ccba`, and
+added known gap 12. Everything else carries its 2026-09-13 date and was not re-checked.
 
 **Where this file came from.** It was internal until now. Development moved into the public
 repository at 0.5.1, and this is the first version of it anybody outside the project can
@@ -26,7 +29,7 @@ internal file at its own date and has not been re-checked.
 | | |
 |---|---|
 | Released | **0.5.1**, 2026-09-13. `master` is the tag; `jmfts` and `jmfts-client` are both on PyPI |
-| Next | **0.6.0** — `docs/SPRINT_0_6_0.md`. Headline: a **web front end**. Seven blocks, thirty-five steps |
+| Next | **0.6.0** — `docs/SPRINT_0_6_0.md`. Headline: a **web front end**. Seven blocks, thirty-six steps. Gate M5 closed 2026-09-15 and step 8 answered the same day (`fadbcb4`), so M6 — `CHANGELOG.md`, the bump, the tag — is what is left |
 | Version rule | The two distributions release in lockstep: one number, two wheels, one tag |
 | Changing at 0.6.0 | A **third** distribution, `jmfts-web`, joins the lockstep. `jmfts[web]` depends on it |
 
@@ -64,7 +67,8 @@ holds D1–D7, all resolved, and is history.
 Items 1–6 were opened by an audit in 2026-08 and re-checked 2026-08-31. Items 7–11 were
 opened 2026-09-07 by `docs/ANN_INDEX_HEALTH.md` and `docs/STRESS_CORPUS.md` — the first time
 this appliance held a corpus it did not build for itself, and the first time six workers
-drained a queue at once.
+drained a queue at once. Item 12 was opened 2026-09-13 by a standing audit rather than by a
+one-off one, which is the difference 0.6.0 step 3 was for.
 
 1. ~~Constructive segmentation is conversation-only.~~ **CLOSED 2026-08-29.**
    `jmfts_core/pipeline.py` no longer exists; `structure:semantic` in `rollup_tasks.py` runs
@@ -178,6 +182,23 @@ drained a queue at once.
     reached through its `source_node_id`, or the duplication could stay and the exclusion be
     documented as required rather than default.
 
+12. **Ten `@expose`d verbs name a document and consult no principal. OPENED 2026-09-13**, by
+    the first run of the audit 0.6.0 step 3 landed. This entry is a pointer and not a copy:
+    each one is written out as an `OPEN GAP` string in
+    `tests/test_expose_principal_audit.py`, so the audit reports them and the test does not go
+    green by pretending otherwise. Five are `IndexService` verbs, in a service that reaches
+    `jmfts_core.access` nowhere at all; one of those rebuilds BM25 postings for every document
+    under an index's roots, and retrieval gates the postings again on the way out, so that one
+    is unauthorised **work** rather than disclosure. `TemplateService.get_template` and
+    `render_template` read a template by `session.get(Document, template_id)` with no
+    `can_read`, and a template IS a document. `DocumentService.embed_document` reaches
+    `DocumentRepository.embed_document` rather than `.update`, so it misses the
+    `require_write` at `repositories/document.py:401`. `IngestService.file_frontier`
+    distinguishes "a document with work under it" from "no such document" for a caller that
+    may read neither. The eleventh gap the audit found became step 35 and is closed.
+    **Each is a candidate 0.7.0 step and none is a 0.6.0 step**: eleven is more than Block A
+    can absorb without becoming a different sprint.
+
 ---
 
 ## Subtree RBAC — remaining follow-ups
@@ -205,6 +226,16 @@ gate shut was written against the description and not against the fix.
   across the whole graph and can leak existence. `get_neighbors` (`:295`) is the one that is
   gated — it calls `can_read` on the root and `walk_neighbors` hides unreadable nodes reached
   during the walk.
+- **Triple WRITE gating. CLOSED `c7bfc2b`, 2026-09-15.** Not found by this list — found by the
+  standing audit 0.6.0 step 3 landed, on its first run. Five `TripleService` write verbs took
+  a subject document and an object document and gated neither, while the triple READ side was
+  gated: the same shape as `create_link`, in a second table. Same answer as the edge case,
+  write on the subject and read on the object. It became 0.6.0 step 35.
+- **The standing audit exists**, which is what makes the three closures above checkable rather
+  than remembered. `tests/test_expose_principal_audit.py` asserts of every `@expose`d method
+  that it either reaches `jmfts_core.access` or is on a list that says why not, and the file
+  says in its own words that reachability is necessary and not sufficient. Ten of the eleven
+  gaps its first run found are known gap 12 below.
 - **Delegated (non-owner) grant management**, and **OAuth token minting**.
 - **Restrictive (non-additive) nested ACRs remain out of scope.** The additive model can
   widen access down the tree but cannot carve a more-restricted island inside a shared
@@ -224,7 +255,7 @@ gate shut was written against the description and not against the fix.
 | 2b | The storage migration: evidence to rows | **DONE** 2026-08-31 |
 | 3 | Scope on a rule; `produced_by`; one planner | **DONE** 2026-09-01 |
 | 4 | Guards with operators | **DONE** 2026-09-01 |
-| 5 | Multiplicity and the cost fold | open; depends on 3, independent of 4 |
+| 5 | Multiplicity and the cost fold | **DONE** 2026-09-15 |
 | 6 | Rule sets, requests, budget, parking | open; depends on 4 and 5 |
 | 7 | The walk generalised; the rollup special case deleted | open; depends on 6 |
 
@@ -232,14 +263,34 @@ gate shut was written against the description and not against the fix.
 subtree, not a bindings table: a setting on a node reaches the documents beneath it, and the
 ancestor walk that does it already runs one level down in `rollup_tasks._options_owner`. So
 per-collection configuration needs a route and a walk at upload, not a new scoping mechanism —
-and RBAC, which is already subtree-scoped, answers who may set it. **That route and that walk
-are not built**, and they are a fourth open item beside phases 5, 6 and 7.
+and RBAC, which is already subtree-scoped, answers who may set it.
+
+**That route and that walk were built 2026-09-15**, as 0.6.0 Block D step 15 (`0aa14ec`), so
+the fourth open item is closed and phases 6 and 7 are what remain. `GET` and `PUT
+/documents/{document_id}/ingest-options` are at `jmfts_core/services/ingest_service.py:1221`
+and `:1244`; the walk is `collection_option_layers` at `jmfts_core/ingest_tasks.py:2251`,
+which starts at the parent and collects every layer root-first rather than stopping at the
+first ancestor carrying a row. Phase 5 landed the same day (`6565385`): `PlanCost`
+(`jmfts_core/ingest_tasks.py:2461`) folds tasks, child nodes, embeddings and LLM calls, each
+as an interval whose top may be open, and names in `unmeasured` what it could not count.
+
+**A defect in the walk was found and fixed two days later (`580c1df`), and it is why the
+phase table above says DONE on a date rather than on a merge.** `_options_owner` passed the
+first ancestor's row as the complete override set, which was correct while only a file node
+could carry one; step 15 made a partial declaration writable on any collection, so a caller
+who set `max_children` on `/papers` and `penalty` on `/papers/2026` got `penalty` and the task
+default for the other.
 
 **One debt the phases inherit.** The `Fact.locus` vocabulary has no term for a write into
 another tree, and three shipped tasks write there. Recorded at `docs/INGEST_SPEC.md` 5.3, in
 `jmfts_core/atoms.py`, and in the handlers' own declarations rather than left implicit — so
 whichever phase takes `EXPLAIN` next inherits a written statement of what it is not
 reporting.
+
+**Phase 5 took `EXPLAIN` and did not pay it, read 2026-09-17.** Neither `PlanCost` nor
+`jmfts_core/explain_wire.py` mentions `locus`, so the statement the debt asked for is not in
+the answer `EXPLAIN` returns. Whether the fold's counts include a cross-tree write is
+unchecked. The debt moves to phase 6.
 
 ---
 
