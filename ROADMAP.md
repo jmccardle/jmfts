@@ -370,7 +370,11 @@ missed. Nothing here is a defect.
   graph where all edge types are the same relation. It is wrong now and nothing depends on it
   being right; it becomes load-bearing the moment a walk or a centrality score feeds
   retrieval ranking. Whether `compute_subtree_authority` is reachable from any search path
-  today is **unchecked**.
+  today is **unchecked**. **Half-closed 2026-09-29 for one verb:** `POST /graph/seeded-rank`
+  takes `relations`, which reaches `build_link_graph` as a `link_type` filter and
+  `build_triple_graph` as a predicate filter. That verb is the first one written to feed
+  recall, which is the moment named above. It filters and does not weight, and the other
+  centrality verbs still ignore `link_type`.
 * **`build_combined_graph`'s weight sum** — a link's `score` plus `1.0` per triple, producing
   a number with no unit. Same gate as the line above.
 * **A `link_type` index on `document_links`. ANSWERED 2026-09-05: do not build it.** Measured

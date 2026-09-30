@@ -387,6 +387,15 @@ export class JmftsClient extends JmftsTransport {
   }
 
   /**
+   * Personalized PageRank from seed documents, over the hops around them
+   *
+   * `POST /graph/seeded-rank` — GraphService.get_seeded_rank
+   */
+  get_seeded_rank(args = {}) {
+    return this.call("GraphService.get_seeded_rank", args);
+  }
+
+  /**
    * Top reading paths through the subtree of root_id
    *
    * `GET /graph/spines` — GraphService.get_spines

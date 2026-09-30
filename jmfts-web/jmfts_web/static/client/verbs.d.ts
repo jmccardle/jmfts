@@ -170,6 +170,10 @@ export interface AppliedFilters {
    * Whether an approximate (ANN) index scan behind this response came back with fewer rows than it asked for. True means the page is SHORT — vector and MaxSim retrieval walk approximate indexes whose scan is bounded, so a short page from them cannot be read as an exhausted corpus; it may be short because the walk stopped, because a subtree access grant removed rows the walk had already spent its budget on, or because nothing else matched, and the server cannot tell those apart. False means every such scan filled its request. Null means none was reported: BM25 and full-text run no ANN scan at all, so a short page from them IS the whole matching set.
    */
   truncated?: boolean | null;
+  /**
+   * Set when the request asked for a projection: what it ran and counted.
+   */
+  projection?: ProjectionApplied | null;
 }
 
 /**
@@ -1144,6 +1148,10 @@ export interface HybridSearchRequest {
    * Point-in-time retrieval cutoff: only return documents whose domain clock COALESCE(event_time, created_at) <= as_of. Naive datetimes are read as UTC. Orthogonal to `now` (which reweights by recency); `as_of` filters visibility. Off when omitted.
    */
   as_of?: string | null;
+  /**
+   * Match leaves, return their parents. The method scores the leaves exactly as it would without this; only what comes back changes. Omit for ordinary results.
+   */
+  project?: Projection | null;
 }
 
 /**
@@ -1652,6 +1660,72 @@ export interface ProbeFailure {
 }
 
 /**
+ * One leaf that put a projected result on the page.
+ */
+export interface ProjectedMatch {
+  document_id: number;
+  title?: string | null;
+  usetype?: string | null;
+  score: number;
+}
+
+/**
+ * Match on one set of nodes, return a related one.
+ *
+ * The method runs exactly as it would without this: the same filters, the same fusion,
+ * the same rerank, over the leaves. Only what comes back changes. Each hit is replaced by
+ * its parent, hits under one parent become one result, and the parent is scored by
+ * ``aggregate`` over them. The usetype filters choose what is MATCHED; they are not
+ * applied to the parent, because a caller who matched keyword leaves to reach their
+ * branch summary would otherwise have the summary held out by the default exclusion.
+ */
+export interface Projection {
+  /**
+   * Which related node to return. Only `parent` exists today.
+   */
+  to?: "parent";
+  /**
+   * How a parent is scored from the leaves that matched under it: `max` the best leaf, `sum` all of them, `count` how many (ties broken by the best leaf).
+   */
+  aggregate?: "max" | "sum" | "count";
+  /**
+   * How many leaves to match before grouping. Omit for 5 x `limit`. Several leaves can share a parent, so matching only `limit` of them would return a short page.
+   */
+  match_limit?: number | null;
+}
+
+/**
+ * What a projection ran with, and where every matched leaf went.
+ *
+ * ``matched`` = the leaves grouped under a returned or cut parent + ``no_parent`` +
+ * ``withheld``. A short page explains itself from these four numbers.
+ */
+export interface ProjectionApplied {
+  to: string;
+  aggregate: string;
+  /**
+   * Leaves requested from the method.
+   */
+  match_limit: number;
+  /**
+   * Leaves the method returned.
+   */
+  matched: number;
+  /**
+   * Distinct returnable parents, before the cut to `limit`.
+   */
+  parents: number;
+  /**
+   * Matched leaves that are roots: nothing to project to.
+   */
+  no_parent: number;
+  /**
+   * Matched leaves whose parent the caller may not read, or whose parent is not settled. A leaf carries its own `parent_id`, so this count discloses nothing the leaf does not.
+   */
+  withheld: number;
+}
+
+/**
  * Result of a single RAPTOR layer
  */
 export interface RaptorLayerItem {
@@ -2002,6 +2076,10 @@ export interface SearchRequest {
    * Point-in-time retrieval cutoff: only return documents whose domain clock COALESCE(event_time, created_at) <= as_of. Naive datetimes are read as UTC. Off when omitted.
    */
   as_of?: string | null;
+  /**
+   * Match leaves, return their parents. The method scores the leaves exactly as it would without this; only what comes back changes. Omit for ordinary results.
+   */
+  project?: Projection | null;
 }
 
 /**
@@ -2030,6 +2108,10 @@ export interface SearchResultItem {
   score: number;
   method: string;
   /**
+   * For a projected result, the matched leaves that put it here.
+   */
+  via?: Array<ProjectedMatch> | null;
+  /**
    * The source_anchor evidence row for this node, if it has one.
    */
   source_anchor?: Record<string, unknown> | null;
@@ -2045,6 +2127,94 @@ export interface SearchResultItem {
    * The render_anchor.unresolved row: why no rectangle was recovered from the rendition.
    */
   render_anchor_unresolved?: Record<string, unknown> | null;
+}
+
+/**
+ * A document the walk starts from, and how much of the restart mass it gets.
+ */
+export interface Seed {
+  document_id: number;
+  /**
+   * Relative share of the restart mass. Pass a search score here.
+   */
+  weight?: number;
+}
+
+export interface SeededRankItem {
+  document_id: number;
+  title: string | null;
+  usetype: string | null;
+  /**
+   * Depth in the document tree, as on centrality.
+   */
+  depth: number;
+  score: number;
+  is_seed: boolean;
+  /**
+   * Undirected edge distance to the nearest seed.
+   */
+  hops: number;
+  /**
+   * Within the seeded subgraph.
+   */
+  in_degree: number;
+  /**
+   * Within the seeded subgraph.
+   */
+  out_degree: number;
+}
+
+/**
+ * Personalized PageRank from a handful of documents, over the few hops around them.
+ *
+ * Global centrality answers "what is central in this corpus". This answers "what is
+ * central to THESE documents": the walk restarts at the seeds, so a node scores by what
+ * points at it from near them. Seeds are ids rather than a query, so the verb composes
+ * with any search method — search, then pass the hits and their scores.
+ */
+export interface SeededRankRequest {
+  seeds: Array<Seed>;
+  /**
+   * Which edges the walk follows. `both` sums a link's score with 1.0 per triple, a weight with no unit, so prefer one table unless both are wanted.
+   */
+  scope?: "links" | "triples" | "both";
+  /**
+   * Walk only these relations: `link_type` values for links, predicate names for triples, both for `both`. A name that is neither is refused, not ignored. Omit to walk every relation.
+   */
+  relations?: Array<string> | null;
+  /**
+   * How far from a seed, ignoring edge direction, the subgraph reaches.
+   */
+  hops?: number;
+  /**
+   * Probability of following an edge rather than restarting at a seed.
+   */
+  damping?: number;
+  /**
+   * Confine the graph to this subtree before seeding.
+   */
+  parent_id?: number | null;
+  /**
+   * Documents of these usetypes are not vertices.
+   */
+  exclude_usetypes?: Array<string> | null;
+  top?: number;
+}
+
+/**
+ * Response for /graph/seeded-rank.
+ *
+ * ``subgraph_vertices`` and ``subgraph_edges`` describe the graph the scores were computed
+ * on — the seeds' neighbourhood, not the corpus.
+ */
+export interface SeededRankResponse {
+  scope: string;
+  relations: Array<string> | null;
+  hops: number;
+  parent_id: number | null;
+  subgraph_vertices: number;
+  subgraph_edges: number;
+  results: Array<SeededRankItem>;
 }
 
 /**
@@ -3258,6 +3428,16 @@ export declare class JmftsClient extends JmftsTransport {
     link_types?: string | null;
     limit?: number;
   }): Promise<NeighborsResponse>;
+
+  /**
+   * Personalized PageRank from seed documents, over the hops around them
+   *
+   * `POST /graph/seeded-rank` — GraphService.get_seeded_rank
+   * RemoteJmftsClient method: `get_seeded_rank`.
+   */
+  get_seeded_rank(args: {
+    request: SeededRankRequest;
+  }): Promise<SeededRankResponse>;
 
   /**
    * Top reading paths through the subtree of root_id

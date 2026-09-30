@@ -5,7 +5,7 @@ depend on them without importing FastAPI. ``api/schemas.py`` re-exports these na
 """
 
 from datetime import datetime
-from typing import Any, Optional, Sequence, Union
+from typing import Any, Literal, Optional, Sequence, Union
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -165,6 +165,77 @@ def validate_usetype_filter(value: Optional[UsetypeFilter]) -> Optional[UsetypeF
     return value
 
 
+#: What a projection may aggregate a parent's matched leaves by. ``max`` keeps the best
+#: leaf's score, so a page with no shared parents ranks exactly as the leaves did. ``sum``
+#: adds them. ``count`` counts them and breaks ties by the best leaf, which scores a parent by
+#: how many of its children matched rather than by how well one of them did.
+PROJECTION_AGGREGATES = ("max", "sum", "count")
+
+
+class Projection(BaseModel):
+    """Match on one set of nodes, return a related one.
+
+    The method runs exactly as it would without this: the same filters, the same fusion,
+    the same rerank, over the leaves. Only what comes back changes. Each hit is replaced by
+    its parent, hits under one parent become one result, and the parent is scored by
+    ``aggregate`` over them. The usetype filters choose what is MATCHED; they are not
+    applied to the parent, because a caller who matched keyword leaves to reach their
+    branch summary would otherwise have the summary held out by the default exclusion.
+    """
+
+    to: Literal["parent"] = Field(
+        default="parent",
+        description="Which related node to return. Only `parent` exists today.",
+    )
+    aggregate: Literal["max", "sum", "count"] = Field(
+        default="max",
+        description=(
+            "How a parent is scored from the leaves that matched under it: `max` the best "
+            "leaf, `sum` all of them, `count` how many (ties broken by the best leaf)."
+        ),
+    )
+    match_limit: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=1000,
+        description=(
+            "How many leaves to match before grouping. Omit for 5 x `limit`. Several leaves "
+            "can share a parent, so matching only `limit` of them would return a short page."
+        ),
+    )
+
+
+class ProjectedMatch(BaseModel):
+    """One leaf that put a projected result on the page."""
+
+    document_id: int
+    title: Optional[str] = None
+    usetype: Optional[str] = None
+    score: float
+
+
+class ProjectionApplied(BaseModel):
+    """What a projection ran with, and where every matched leaf went.
+
+    ``matched`` = the leaves grouped under a returned or cut parent + ``no_parent`` +
+    ``withheld``. A short page explains itself from these four numbers.
+    """
+
+    to: str
+    aggregate: str
+    match_limit: int = Field(description="Leaves requested from the method.")
+    matched: int = Field(description="Leaves the method returned.")
+    parents: int = Field(description="Distinct returnable parents, before the cut to `limit`.")
+    no_parent: int = Field(description="Matched leaves that are roots: nothing to project to.")
+    withheld: int = Field(
+        description=(
+            "Matched leaves whose parent the caller may not read, or whose parent is not "
+            "settled. A leaf carries its own `parent_id`, so this count discloses nothing "
+            "the leaf does not."
+        )
+    )
+
+
 class AppliedFilters(BaseModel):
     """What the server actually ran, as opposed to what the request named.
 
@@ -221,6 +292,10 @@ class AppliedFilters(BaseModel):
             "request. Null means none was reported: BM25 and full-text run no ANN scan at "
             "all, so a short page from them IS the whole matching set."
         ),
+    )
+    projection: Optional[ProjectionApplied] = Field(
+        default=None,
+        description="Set when the request asked for a projection: what it ran and counted.",
     )
 
 
@@ -284,6 +359,13 @@ class HybridSearchRequest(BaseModel):
         default=None,
         description="Point-in-time retrieval cutoff: only return documents whose domain clock COALESCE(event_time, created_at) <= as_of. Naive datetimes are read as UTC. Orthogonal to `now` (which reweights by recency); `as_of` filters visibility. Off when omitted.",
     )
+    project: Optional[Projection] = Field(
+        default=None,
+        description=(
+            "Match leaves, return their parents. The method scores the leaves exactly as it "
+            "would without this; only what comes back changes. Omit for ordinary results."
+        ),
+    )
 
     _check_methods = field_validator("methods")(validate_search_methods)
     _check_usetype = field_validator("usetype")(validate_usetype_filter)
@@ -295,6 +377,14 @@ class SearchResultItem(BaseModel):
     document: DocumentResponse
     score: float
     method: str
+
+    #: Set only on a projected result: the leaves that matched under this node, best first.
+    #: ``None`` on an ordinary hit, which is a different fact from a projected result with
+    #: no leaves — that one cannot exist.
+    via: Optional[list[ProjectedMatch]] = Field(
+        default=None,
+        description="For a projected result, the matched leaves that put it here.",
+    )
 
     #: IC-4. Where in the source document this hit came from, verbatim from the node's
     #: ``source_anchor`` evidence row — a page and a rectangle for a PDF, a worksheet range
@@ -403,6 +493,13 @@ class SearchRequest(BaseModel):
     as_of: Optional[datetime] = Field(
         default=None,
         description="Point-in-time retrieval cutoff: only return documents whose domain clock COALESCE(event_time, created_at) <= as_of. Naive datetimes are read as UTC. Off when omitted.",
+    )
+    project: Optional[Projection] = Field(
+        default=None,
+        description=(
+            "Match leaves, return their parents. The method scores the leaves exactly as it "
+            "would without this; only what comes back changes. Omit for ordinary results."
+        ),
     )
 
     _check_usetype = field_validator("usetype")(validate_usetype_filter)

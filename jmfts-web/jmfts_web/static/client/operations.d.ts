@@ -43,6 +43,7 @@ export type OpId =
   | "GraphService.get_communities"
   | "GraphService.get_diff"
   | "GraphService.get_neighbors"
+  | "GraphService.get_seeded_rank"
   | "GraphService.get_spines"
   | "GraphService.get_stats"
   | "GraphService.get_subtree_authority"

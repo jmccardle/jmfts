@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 
 from jmfts_core.access import readable_filter, readable_id_subset
 from jmfts_core.models.document import Document, DocumentLink
-from jmfts_core.models.triple import Triple
+from jmfts_core.models.triple import Predicate, Triple
 
 logger = logging.getLogger(__name__)
 
@@ -117,22 +117,70 @@ def _gather_vertices(
     return idx_to_id, id_to_idx, meta
 
 
+def _link_edges_stmt(idx_to_id: list[int], relations: Optional[list[str]]):
+    """``(source_id, target_id, score)`` between vertices, of the named link types if any."""
+    stmt = select(DocumentLink.source_id, DocumentLink.target_id, DocumentLink.score).where(
+        DocumentLink.source_id.in_(idx_to_id),
+        DocumentLink.target_id.in_(idx_to_id),
+    )
+    if relations is not None:
+        stmt = stmt.where(DocumentLink.link_type.in_(relations))
+    return stmt
+
+
+def _triple_edges_stmt(idx_to_id: list[int], relations: Optional[list[str]]):
+    """``(subject_id, object_id)`` of live triples between vertices, of the named predicates."""
+    stmt = select(Triple.subject_id, Triple.object_id).where(
+        Triple.subject_id.in_(idx_to_id),
+        Triple.object_id.in_(idx_to_id),
+        Triple.invalidated_at.is_(None),
+    )
+    if relations is not None:
+        stmt = stmt.join(Predicate, Predicate.id == Triple.predicate_id).where(
+            Predicate.name.in_(relations)
+        )
+    return stmt
+
+
+def unknown_relations(session: Session, scope: Scope, relations: Iterable[str]) -> list[str]:
+    """The names in ``relations`` that no table ``scope`` reads could ever match.
+
+    A link type is known when at least one link carries it — there is no link-type
+    registry, so presence is the only vocabulary there is. A predicate is known when it is
+    registered, whether or not any triple uses it yet. An unknown name is worth refusing
+    because the filter it produces is an empty edge set, and an empty edge set reads
+    exactly like "these documents are not related that way".
+    """
+    names = list(dict.fromkeys(relations))
+    known: set[str] = set()
+    if scope in ("links", "both"):
+        known.update(
+            session.scalars(
+                select(DocumentLink.link_type).where(DocumentLink.link_type.in_(names)).distinct()
+            )
+        )
+    if scope in ("triples", "both"):
+        known.update(session.scalars(select(Predicate.name).where(Predicate.name.in_(names))))
+    return [n for n in names if n not in known]
+
+
 def build_link_graph(
     session: Session,
     *,
     parent_id: Optional[int] = None,
     exclude_usetypes: Optional[Iterable[str]] = None,
+    relations: Optional[list[str]] = None,
 ) -> _GraphBuild:
-    """Build a directed graph from the ``document_links`` table."""
+    """Build a directed graph from the ``document_links`` table.
+
+    ``relations``, when given, keeps only links whose ``link_type`` is in it.
+    """
     idx_to_id, id_to_idx, meta = _gather_vertices(session, parent_id, exclude_usetypes)
 
     if not idx_to_id:
         return _GraphBuild(ig.Graph(directed=True), [], {}, {})
 
-    link_stmt = select(DocumentLink.source_id, DocumentLink.target_id, DocumentLink.score).where(
-        DocumentLink.source_id.in_(idx_to_id),
-        DocumentLink.target_id.in_(idx_to_id),
-    )
+    link_stmt = _link_edges_stmt(idx_to_id, relations)
     rows = session.execute(link_stmt).all()
 
     edges: list[tuple[int, int]] = []
@@ -152,20 +200,18 @@ def build_triple_graph(
     *,
     parent_id: Optional[int] = None,
     exclude_usetypes: Optional[Iterable[str]] = None,
+    relations: Optional[list[str]] = None,
 ) -> _GraphBuild:
     """Build a directed graph from the ``triples`` table.
 
     Subject -> object edges, weighted uniformly. Excludes invalidated triples.
+    ``relations``, when given, keeps only triples whose predicate name is in it.
     """
     idx_to_id, id_to_idx, meta = _gather_vertices(session, parent_id, exclude_usetypes)
     if not idx_to_id:
         return _GraphBuild(ig.Graph(directed=True), [], {}, {})
 
-    triple_stmt = select(Triple.subject_id, Triple.object_id).where(
-        Triple.subject_id.in_(idx_to_id),
-        Triple.object_id.in_(idx_to_id),
-        Triple.invalidated_at.is_(None),
-    )
+    triple_stmt = _triple_edges_stmt(idx_to_id, relations)
     rows = session.execute(triple_stmt).all()
     edges = [(id_to_idx[s], id_to_idx[o]) for s, o in rows]
 
@@ -179,27 +225,25 @@ def build_combined_graph(
     *,
     parent_id: Optional[int] = None,
     exclude_usetypes: Optional[Iterable[str]] = None,
+    relations: Optional[list[str]] = None,
 ) -> _GraphBuild:
-    """Union of link and triple graphs. Edges from both sources, weights summed."""
+    """Union of link and triple graphs. Edges from both sources, weights summed.
+
+    ``relations`` applies to both tables: a name keeps links of that ``link_type`` and
+    triples of that predicate.
+    """
     idx_to_id, id_to_idx, meta = _gather_vertices(session, parent_id, exclude_usetypes)
     if not idx_to_id:
         return _GraphBuild(ig.Graph(directed=True), [], {}, {})
 
     edge_weights: dict[tuple[int, int], float] = {}
 
-    link_stmt = select(DocumentLink.source_id, DocumentLink.target_id, DocumentLink.score).where(
-        DocumentLink.source_id.in_(idx_to_id),
-        DocumentLink.target_id.in_(idx_to_id),
-    )
+    link_stmt = _link_edges_stmt(idx_to_id, relations)
     for src, tgt, score in session.execute(link_stmt).all():
         key = (id_to_idx[src], id_to_idx[tgt])
         edge_weights[key] = edge_weights.get(key, 0.0) + (float(score) if score else 1.0)
 
-    triple_stmt = select(Triple.subject_id, Triple.object_id).where(
-        Triple.subject_id.in_(idx_to_id),
-        Triple.object_id.in_(idx_to_id),
-        Triple.invalidated_at.is_(None),
-    )
+    triple_stmt = _triple_edges_stmt(idx_to_id, relations)
     for s, o in session.execute(triple_stmt).all():
         key = (id_to_idx[s], id_to_idx[o])
         edge_weights[key] = edge_weights.get(key, 0.0) + 1.0
@@ -218,14 +262,22 @@ def build_graph(
     *,
     parent_id: Optional[int] = None,
     exclude_usetypes: Optional[Iterable[str]] = None,
+    relations: Optional[list[str]] = None,
 ) -> _GraphBuild:
-    """Dispatch to the right builder based on ``scope``."""
+    """Dispatch to the right builder based on ``scope``.
+
+    ``relations`` of ``None`` walks every relation. An empty list would keep no edge at
+    all, which is never what a caller meant, so it is refused.
+    """
+    if relations is not None and not relations:
+        raise ValueError("relations is empty; omit it to walk every relation")
+    kwargs = dict(parent_id=parent_id, exclude_usetypes=exclude_usetypes, relations=relations)
     if scope == "links":
-        return build_link_graph(session, parent_id=parent_id, exclude_usetypes=exclude_usetypes)
+        return build_link_graph(session, **kwargs)
     if scope == "triples":
-        return build_triple_graph(session, parent_id=parent_id, exclude_usetypes=exclude_usetypes)
+        return build_triple_graph(session, **kwargs)
     if scope == "both":
-        return build_combined_graph(session, parent_id=parent_id, exclude_usetypes=exclude_usetypes)
+        return build_combined_graph(session, **kwargs)
     raise ValueError(f"Unknown scope: {scope!r}")
 
 
@@ -289,6 +341,111 @@ def compute_centrality(
     ]
     scored.sort(key=lambda r: r.score, reverse=True)
     return scored[:top]
+
+
+# ---------------------------------------------------------------------------
+# Seeded rank: personalized PageRank over the seeds' neighbourhood
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SeededRankScore:
+    document_id: int
+    title: Optional[str]
+    usetype: Optional[str]
+    depth: int
+    score: float
+    is_seed: bool
+    hops: int
+    in_degree: int
+    out_degree: int
+
+
+@dataclass
+class SeededRank:
+    """Scores over a seeded subgraph, with the size of the graph they are about."""
+
+    results: list[SeededRankScore]
+    subgraph_vertices: int
+    subgraph_edges: int
+
+
+def compute_seeded_rank(
+    build: _GraphBuild,
+    seeds: dict[int, float],
+    *,
+    hops: int = 2,
+    damping: float = 0.85,
+    top: int = 20,
+) -> SeededRank:
+    """Personalized PageRank restarting at ``seeds``, over their ``hops``-neighbourhood.
+
+    The subgraph is every vertex within ``hops`` undirected edges of any seed, and the
+    edges among them. The walk on it is directed and restarts at a seed in proportion to
+    its weight, so a node scores by what points at it from near the seeds — a node every
+    seed reaches outranks one only a single seed reaches. Global PageRank over the whole
+    graph answers a different question, "what is central in this corpus".
+
+    ``seeds`` maps document id to weight. A seed that is not a vertex of ``build`` raises
+    ``LookupError`` naming every such id: the vertex set is already access-gated, so an
+    unreadable seed and a nonexistent one are indistinguishable here, as they must be.
+    """
+    if not seeds:
+        raise ValueError("seeded rank needs at least one seed")
+    missing = sorted(d for d in seeds if d not in build.id_to_idx)
+    if missing:
+        raise LookupError(f"seed documents not in the graph: {missing}")
+    if any(w <= 0 for w in seeds.values()):
+        raise ValueError("seed weights must be positive")
+
+    g = build.graph
+    seed_idx = [build.id_to_idx[d] for d in seeds]
+    reach: set[int] = set()
+    for hood in g.neighborhood(vertices=seed_idx, order=hops, mode="all"):
+        reach.update(hood)
+    keep = sorted(reach)
+    g.vs["orig"] = list(range(g.vcount()))
+    sub = g.induced_subgraph(keep)
+    orig = sub.vs["orig"]
+    sub_of = {o: i for i, o in enumerate(orig)}
+
+    seed_sub = [sub_of[build.id_to_idx[d]] for d in seeds]
+    reset = [0.0] * sub.vcount()
+    for d, i in zip(seeds, seed_sub):
+        reset[i] = float(seeds[d])
+
+    has_weights = "weight" in sub.es.attribute_names() and sub.ecount() > 0
+    scores = sub.personalized_pagerank(
+        directed=True,
+        damping=damping,
+        reset=reset,
+        weights=sub.es["weight"] if has_weights else None,
+    )
+    distances = sub.distances(source=seed_sub, mode="all")
+    nearest = [min(row[i] for row in distances) for i in range(sub.vcount())]
+    in_deg = sub.degree(mode="in")
+    out_deg = sub.degree(mode="out")
+    seed_set = set(seed_sub)
+
+    results = []
+    for i in range(sub.vcount()):
+        doc_id = build.idx_to_id[orig[i]]
+        meta = build.meta[doc_id]
+        results.append(
+            SeededRankScore(
+                document_id=doc_id,
+                title=meta["title"],
+                usetype=meta["usetype"],
+                depth=meta["depth"],
+                score=float(scores[i]),
+                is_seed=i in seed_set,
+                hops=int(nearest[i]),
+                in_degree=int(in_deg[i]),
+                out_degree=int(out_deg[i]),
+            )
+        )
+    results.sort(key=lambda r: (-r.score, r.document_id))
+    return SeededRank(results[:top], sub.vcount(), sub.ecount())
 
 
 # ---------------------------------------------------------------------------

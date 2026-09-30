@@ -52,6 +52,9 @@ from jmfts_client.contracts.graph import (
     LintResponse,
     NeighborItem,
     NeighborsResponse,
+    SeededRankItem,
+    SeededRankRequest,
+    SeededRankResponse,
     SpineBranchAlternative,
     SpineBranchPoint,
     SpineItem,
@@ -63,11 +66,13 @@ from jmfts_client.contracts.graph import (
 from jmfts_core.graph_analysis import (
     build_graph,
     compute_centrality,
+    compute_seeded_rank,
     compute_communities,
     compute_diff,
     compute_spines,
     compute_stats,
     compute_subtree_authority,
+    unknown_relations,
     walk_neighbors,
 )
 from jmfts_core.access import can_read
@@ -187,6 +192,64 @@ class GraphService:
                     out_degree=s.out_degree,
                 )
                 for s in scores
+            ],
+        )
+
+    @expose(
+        "POST",
+        "/graph/seeded-rank",
+        response_model=SeededRankResponse,
+        errors={LookupError: 404, ValueError: 400},
+        tags=["graph"],
+        summary="Personalized PageRank from seed documents, over the hops around them",
+    )
+    def get_seeded_rank(self, request: SeededRankRequest) -> SeededRankResponse:
+        """Personalized PageRank restarting at the seeds, over their neighbourhood.
+
+        Seeds are ids, so this composes with any search: search, then pass the hits with
+        their scores as weights. The graph is gated the way every analytics verb here is —
+        at the vertex set, in ``_candidate_doc_query`` — so a seed the caller cannot read is
+        a 404 exactly like a seed that does not exist. ``relations`` restricts the walk to
+        the named link types or predicates, and a name no table in ``scope`` knows is a
+        400 rather than an empty graph.
+        """
+        if request.relations is not None:
+            unknown = unknown_relations(self.session, request.scope, request.relations)
+            if unknown:
+                raise ValueError(f"no {request.scope} relation named {unknown}")
+        seeds: dict[int, float] = {}
+        for seed in request.seeds:
+            seeds[seed.document_id] = seeds.get(seed.document_id, 0.0) + seed.weight
+        build = build_graph(
+            self.session,
+            scope=request.scope,
+            parent_id=request.parent_id,
+            exclude_usetypes=request.exclude_usetypes,
+            relations=request.relations,
+        )
+        ranked = compute_seeded_rank(
+            build, seeds, hops=request.hops, damping=request.damping, top=request.top
+        )
+        return SeededRankResponse(
+            scope=request.scope,
+            relations=request.relations,
+            hops=request.hops,
+            parent_id=request.parent_id,
+            subgraph_vertices=ranked.subgraph_vertices,
+            subgraph_edges=ranked.subgraph_edges,
+            results=[
+                SeededRankItem(
+                    document_id=r.document_id,
+                    title=r.title,
+                    usetype=r.usetype,
+                    depth=r.depth,
+                    score=r.score,
+                    is_seed=r.is_seed,
+                    hops=r.hops,
+                    in_degree=r.in_degree,
+                    out_degree=r.out_degree,
+                )
+                for r in ranked.results
             ],
         )
 
