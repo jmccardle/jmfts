@@ -1039,6 +1039,28 @@ export const OPERATIONS = Object.freeze(
     ],
     "summary": "Link-graph neighbors of a root document (bounded BFS)"
   },
+  "GraphService.get_seeded_rank": {
+    "op_id": "GraphService.get_seeded_rank",
+    "operation_id": "GraphService_get_seeded_rank_graph_seeded_rank_post",
+    "python_verb": "get_seeded_rank",
+    "method": "POST",
+    "path": "/graph/seeded-rank",
+    "path_params": [],
+    "path_slash_params": [],
+    "query_params": [],
+    "body_param": "request",
+    "body_media_type": "application/json",
+    "form_params": [],
+    "file_params": [],
+    "binary": false,
+    "response_media_type": "application/json",
+    "success_status": 200,
+    "security_scheme": "JMFTSToken",
+    "tags": [
+      "graph"
+    ],
+    "summary": "Personalized PageRank from seed documents, over the hops around them"
+  },
   "GraphService.get_spines": {
     "op_id": "GraphService.get_spines",
     "operation_id": "GraphService_get_spines_graph_spines_get",

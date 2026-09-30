@@ -29,6 +29,9 @@ from jmfts_client.contracts.search import (
     AutoSearchRequest,
     AutoSearchResponse,
     HybridSearchRequest,
+    ProjectedMatch,
+    Projection,
+    ProjectionApplied,
     RoutingMetadata,
     SearchRequest,
     SearchResponse,
@@ -46,6 +49,7 @@ from jmfts_client.contracts.anchor import (
 )
 from jmfts_client.contracts.document import DocumentResponse
 from jmfts_core.effective_content import project_effective_content
+from jmfts_core.projection import ProjectedHit, project_to_parents
 from jmfts_core.query_router import route_query
 from jmfts_core.registry import expose, register_service
 from jmfts_core.repositories.evidence import EvidenceRepository
@@ -59,6 +63,11 @@ from jmfts_core.repositories.search_context import SearchContextRepository
 from jmfts_core.synthesis import SynthesisResult, synthesize
 
 logger = logging.getLogger(__name__)
+
+#: Leaves matched per result asked for, when a projection names no ``match_limit``. Several
+#: leaves share a parent, so matching only ``limit`` of them returns a short page whenever
+#: any two do. Five is a starting point, not a measurement.
+PROJECTION_MATCH_FACTOR = 5
 
 
 @register_service
@@ -115,6 +124,36 @@ class SearchService:
         raise ValueError(f"unknown rerank_method {method!r}; expected 'cross_encoder' or 'maxsim'")
 
     @staticmethod
+    def _match_limit(limit: int, project: Optional[Projection]) -> int:
+        """How many hits the method is asked for: ``limit``, or more when projecting."""
+        if project is None:
+            return limit
+        return project.match_limit or limit * PROJECTION_MATCH_FACTOR
+
+    def _maybe_project(
+        self, results, project: Optional[Projection], limit: int, match_limit: int
+    ) -> tuple[list, Optional[ProjectionApplied]]:
+        """Replace leaf hits by their parents, if the request asked for it.
+
+        Runs AFTER the rerank, so a second stage scores the same leaves it would score
+        without a projection. See :mod:`jmfts_core.projection`.
+        """
+        if project is None:
+            return results, None
+        hits, counts = project_to_parents(
+            self.session, results, aggregate=project.aggregate, limit=limit
+        )
+        return hits, ProjectionApplied(
+            to=project.to,
+            aggregate=project.aggregate,
+            match_limit=match_limit,
+            matched=counts.matched,
+            parents=counts.parents,
+            no_parent=counts.no_parent,
+            withheld=counts.withheld,
+        )
+
+    @staticmethod
     def _applied(
         *,
         limit: int,
@@ -124,6 +163,7 @@ class SearchService:
         methods: Optional[list[str]] = None,
         weights: Optional[dict[str, float]] = None,
         truncated: Optional[bool] = None,
+        projection: Optional[ProjectionApplied] = None,
     ) -> AppliedFilters:
         """What this search actually ran with, for the response's ``applied`` block.
 
@@ -154,6 +194,7 @@ class SearchService:
             parent_id=parent_id,
             limit=limit,
             truncated=truncated,
+            projection=projection,
         )
 
     def _projected_text(self, results) -> dict:
@@ -244,8 +285,24 @@ class SearchService:
                 source_anchor_unresolved=anchors[document.id].get(ANCHOR_UNRESOLVED_ROW),
                 render_anchor=anchors[document.id].get(RENDER_ANCHOR_ROW),
                 render_anchor_unresolved=anchors[document.id].get(RENDER_ANCHOR_UNRESOLVED_ROW),
+                via=self._via(r),
             )
             for document, r in zip(documents, results)
+        ]
+
+    @staticmethod
+    def _via(result) -> Optional[list[ProjectedMatch]]:
+        """The leaves under a projected hit; ``None`` for an ordinary one."""
+        if not isinstance(result, ProjectedHit):
+            return None
+        return [
+            ProjectedMatch(
+                document_id=leaf.document.id,
+                title=leaf.document.title,
+                usetype=leaf.document.usetype,
+                score=leaf.score,
+            )
+            for leaf in result.via
         ]
 
     def _build_response(
@@ -308,6 +365,7 @@ class SearchService:
         )
 
         limit = params.get("limit", request.limit)
+        match_limit = self._match_limit(limit, request.project)
         # Resolved here as well as in the repo, so the response can report what ran. It is
         # also where a bad PRESET is caught: the contract validator only ever saw the
         # request, and a search context is free to store any list it likes.
@@ -320,7 +378,7 @@ class SearchService:
         # propagate; @expose maps it to HTTP 400.
         results = repo.hybrid_search(
             query_text=request.query,
-            limit=limit * 3 if rerank else limit,
+            limit=match_limit * 3 if rerank else match_limit,
             methods=methods,
             weights=weights,
             usetype=params.get("usetype"),
@@ -334,7 +392,10 @@ class SearchService:
             as_of=request.as_of,
         )
 
-        results = self._maybe_rerank(results, request.query, rerank, limit, method=rerank_method)
+        results = self._maybe_rerank(
+            results, request.query, rerank, match_limit, method=rerank_method
+        )
+        results, projection = self._maybe_project(results, request.project, limit, match_limit)
         return self._build_response(
             results,
             start,
@@ -346,6 +407,7 @@ class SearchService:
                 methods=methods,
                 weights=weights,
                 truncated=repo.scan_truncated,
+                projection=projection,
             ),
         )
 
@@ -379,10 +441,11 @@ class SearchService:
         )
 
         limit = params.get("limit", request.limit)
+        match_limit = self._match_limit(limit, request.project)
         repo = SearchRepository(self.session)
         results = repo.vector_search_text(
             query_text=request.query,
-            limit=limit * 3 if rerank else limit,
+            limit=match_limit * 3 if rerank else match_limit,
             usetype=params.get("usetype"),
             exclude_types=request.exclude_types,
             parent_id=params.get("parent_id"),
@@ -390,7 +453,10 @@ class SearchService:
             as_of=request.as_of,
         )
 
-        results = self._maybe_rerank(results, request.query, rerank, limit, method=rerank_method)
+        results = self._maybe_rerank(
+            results, request.query, rerank, match_limit, method=rerank_method
+        )
+        results, projection = self._maybe_project(results, request.project, limit, match_limit)
         return self._build_response(
             results,
             start,
@@ -400,6 +466,7 @@ class SearchService:
                 exclude_types=request.exclude_types,
                 parent_id=params.get("parent_id"),
                 truncated=repo.scan_truncated,
+                projection=projection,
             ),
         )
 
@@ -432,17 +499,21 @@ class SearchService:
         )
 
         limit = params.get("limit", request.limit)
+        match_limit = self._match_limit(limit, request.project)
         repo = SearchRepository(self.session)
         results = repo.fulltext_search(
             query_text=request.query,
-            limit=limit * 3 if rerank else limit,
+            limit=match_limit * 3 if rerank else match_limit,
             usetype=params.get("usetype"),
             exclude_types=request.exclude_types,
             parent_id=params.get("parent_id"),
             as_of=request.as_of,
         )
 
-        results = self._maybe_rerank(results, request.query, rerank, limit, method=rerank_method)
+        results = self._maybe_rerank(
+            results, request.query, rerank, match_limit, method=rerank_method
+        )
+        results, projection = self._maybe_project(results, request.project, limit, match_limit)
         return self._build_response(
             results,
             start,
@@ -452,6 +523,7 @@ class SearchService:
                 exclude_types=request.exclude_types,
                 parent_id=params.get("parent_id"),
                 truncated=repo.scan_truncated,
+                projection=projection,
             ),
         )
 
@@ -486,18 +558,22 @@ class SearchService:
         )
 
         limit = params.get("limit", request.limit)
+        match_limit = self._match_limit(limit, request.project)
         repo = SearchRepository(self.session)
         results = repo.bm25_search(
             query_text=request.query,
             index_name=params.get("index_name") or "default",
-            limit=limit * 3 if rerank else limit,
+            limit=match_limit * 3 if rerank else match_limit,
             usetype=params.get("usetype"),
             exclude_types=request.exclude_types,
             parent_id=params.get("parent_id"),
             as_of=request.as_of,
         )
 
-        results = self._maybe_rerank(results, request.query, rerank, limit, method=rerank_method)
+        results = self._maybe_rerank(
+            results, request.query, rerank, match_limit, method=rerank_method
+        )
+        results, projection = self._maybe_project(results, request.project, limit, match_limit)
         return self._build_response(
             results,
             start,
@@ -507,6 +583,7 @@ class SearchService:
                 exclude_types=request.exclude_types,
                 parent_id=params.get("parent_id"),
                 truncated=repo.scan_truncated,
+                projection=projection,
             ),
         )
 
@@ -540,10 +617,11 @@ class SearchService:
         )
 
         limit = params.get("limit", request.limit)
+        match_limit = self._match_limit(limit, request.project)
         repo = SearchRepository(self.session)
         results = repo.maxsim_search(
             query_text=request.query,
-            limit=limit * 3 if rerank else limit,
+            limit=match_limit * 3 if rerank else match_limit,
             embed_dim=embed_dim,
             usetype=params.get("usetype"),
             exclude_types=request.exclude_types,
@@ -551,7 +629,10 @@ class SearchService:
             as_of=request.as_of,
         )
 
-        results = self._maybe_rerank(results, request.query, rerank, limit, method=rerank_method)
+        results = self._maybe_rerank(
+            results, request.query, rerank, match_limit, method=rerank_method
+        )
+        results, projection = self._maybe_project(results, request.project, limit, match_limit)
         return self._build_response(
             results,
             start,
@@ -561,6 +642,7 @@ class SearchService:
                 exclude_types=request.exclude_types,
                 parent_id=params.get("parent_id"),
                 truncated=repo.scan_truncated,
+                projection=projection,
             ),
         )
 

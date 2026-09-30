@@ -55,6 +55,8 @@ from jmfts_client.contracts.graph import GraphStatsResponse
 from jmfts_client.contracts.graph import LintRequest
 from jmfts_client.contracts.graph import LintResponse
 from jmfts_client.contracts.graph import NeighborsResponse
+from jmfts_client.contracts.graph import SeededRankRequest
+from jmfts_client.contracts.graph import SeededRankResponse
 from jmfts_client.contracts.graph import SpineResponse
 from jmfts_client.contracts.graph import SubtreeAuthorityResponse
 from jmfts_client.contracts.index import IndexCreate
@@ -947,6 +949,24 @@ class _GeneratedVerbs(_VerbTransport):
                 "limit": limit,
             },
             response=NeighborsResponse,
+        )
+
+    def get_seeded_rank(
+        self,
+        request: SeededRankRequest,
+    ) -> SeededRankResponse:
+        """Personalized PageRank from seed documents, over the hops around them
+
+        ``POST /graph/seeded-rank`` — GraphService.get_seeded_rank
+
+        Raises on 400 (server: ValueError).
+        Raises on 404 (server: LookupError).
+        """
+        return self._call(
+            "POST",
+            "/graph/seeded-rank",
+            body=request,
+            response=SeededRankResponse,
         )
 
     def get_spines(

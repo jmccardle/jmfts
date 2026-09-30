@@ -8,7 +8,7 @@ communities, diff, stats, lint) — none of them carries an ORM document, so the
 ``Document→DocumentResponse`` converter involved on this surface.
 """
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -36,6 +36,95 @@ class CentralityResponse(BaseModel):
     total_vertices: int
     total_edges: int
     results: list[CentralityScoreItem]
+
+
+# -- seeded rank ----------------------------------------------------------------
+
+
+class Seed(BaseModel):
+    """A document the walk starts from, and how much of the restart mass it gets."""
+
+    document_id: int
+    weight: float = Field(
+        default=1.0,
+        gt=0,
+        description="Relative share of the restart mass. Pass a search score here.",
+    )
+
+
+class SeededRankRequest(BaseModel):
+    """Personalized PageRank from a handful of documents, over the few hops around them.
+
+    Global centrality answers "what is central in this corpus". This answers "what is
+    central to THESE documents": the walk restarts at the seeds, so a node scores by what
+    points at it from near them. Seeds are ids rather than a query, so the verb composes
+    with any search method — search, then pass the hits and their scores.
+    """
+
+    seeds: list[Seed] = Field(min_length=1, max_length=100)
+    scope: Literal["links", "triples", "both"] = Field(
+        default="links",
+        description=(
+            "Which edges the walk follows. `both` sums a link's score with 1.0 per triple, "
+            "a weight with no unit, so prefer one table unless both are wanted."
+        ),
+    )
+    relations: Optional[list[str]] = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Walk only these relations: `link_type` values for links, predicate names for "
+            "triples, both for `both`. A name that is neither is refused, not ignored. "
+            "Omit to walk every relation."
+        ),
+    )
+    hops: int = Field(
+        default=2,
+        ge=0,
+        le=4,
+        description="How far from a seed, ignoring edge direction, the subgraph reaches.",
+    )
+    damping: float = Field(
+        default=0.85,
+        gt=0,
+        lt=1,
+        description="Probability of following an edge rather than restarting at a seed.",
+    )
+    parent_id: Optional[int] = Field(
+        default=None, description="Confine the graph to this subtree before seeding."
+    )
+    exclude_usetypes: Optional[list[str]] = Field(
+        default=None, description="Documents of these usetypes are not vertices."
+    )
+    top: int = Field(default=20, ge=1, le=200)
+
+
+class SeededRankItem(BaseModel):
+    document_id: int
+    title: Optional[str]
+    usetype: Optional[str]
+    depth: int = Field(description="Depth in the document tree, as on centrality.")
+    score: float
+    is_seed: bool
+    hops: int = Field(description="Undirected edge distance to the nearest seed.")
+    in_degree: int = Field(description="Within the seeded subgraph.")
+    out_degree: int = Field(description="Within the seeded subgraph.")
+
+
+class SeededRankResponse(BaseModel):
+    """Response for /graph/seeded-rank.
+
+    ``subgraph_vertices`` and ``subgraph_edges`` describe the graph the scores were computed
+    on — the seeds' neighbourhood, not the corpus.
+    """
+
+    scope: str
+    relations: Optional[list[str]]
+    hops: int
+    parent_id: Optional[int]
+    subgraph_vertices: int
+    subgraph_edges: int
+    results: list[SeededRankItem]
 
 
 # -- subtree authority --------------------------------------------------------
