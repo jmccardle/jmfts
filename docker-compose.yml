@@ -54,6 +54,11 @@ services:
       # Pinned dev token so tau can point at this instance with a known value.
       # Override by exporting JMFTS_API_TOKEN before `docker compose up`.
       JMFTS_API_TOKEN: ${JMFTS_API_TOKEN:-jmfts-dev-local}
+      # Which browser origins may call this API directly (a JSON list of explicit origins; the
+      # server default is none). The two below are the standalone console's dev server in
+      # jmfts-ui/, so typing this API's address into its address bar works as well as going
+      # through Vite's proxy does. Add yours by exporting JMFTS_CORS_ORIGINS before `up`.
+      JMFTS_CORS_ORIGINS: ${JMFTS_CORS_ORIGINS:-["http://127.0.0.1:5183","http://localhost:5183"]}
     ports:
       - "127.0.0.1:8100:8100"
     volumes:
