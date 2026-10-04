@@ -303,7 +303,7 @@ convert = [
 # reads the tree rather than the installed package — so a `dev` that pulled this in would be
 # installing a wheel to test files it does not read.
 web = [
-    "jmfts-web==0.5.1",
+    "jmfts-web==0.5.2",
 ]
 
 # The suite embeds for real — it ingests documents and asserts on the vectors — so dev
