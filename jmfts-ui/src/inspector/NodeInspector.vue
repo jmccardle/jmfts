@@ -23,7 +23,7 @@ import Panel from "@/components/Panel.vue";
 import Rendered from "@/components/Rendered.vue";
 import ScopeTrail from "@/components/ScopeTrail.vue";
 import Tag from "@/components/Tag.vue";
-import { client, type DocumentResponse, type ViewResponse } from "@/api";
+import { baseUrl, client, token, type DocumentResponse, type ViewResponse } from "@/api";
 import { count, glossUsetype } from "@/lib/vocab";
 
 const props = defineProps<{ id: number }>();
@@ -70,7 +70,8 @@ async function load(id: number) {
   loading.value = false;
 }
 
-watch(() => props.id, load, { immediate: true });
+// The node is asked for again when the appliance or the token changes, not only the id.
+watch([() => props.id, baseUrl, token], () => load(props.id), { immediate: true });
 
 const usetypeGloss = computed(() => glossUsetype(node.value?.usetype)?.meaning ?? null);
 const childHandling = computed(() => view.value?.presentation.child_handling ?? "collapsed");

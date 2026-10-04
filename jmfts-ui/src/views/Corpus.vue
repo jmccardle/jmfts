@@ -6,11 +6,11 @@
 // the first question about an unfamiliar corpus is what is in it, and the histogram is also the
 // way in: every usetype in it is a filter `GET /documents` accepts.
 
-import { computed, onMounted, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import NodeLine from "@/components/NodeLine.vue";
 import Panel from "@/components/Panel.vue";
 import Tag from "@/components/Tag.vue";
-import { client, type DocumentResponse, type GraphStatsResponse } from "@/api";
+import { baseUrl, client, token, type DocumentResponse, type GraphStatsResponse } from "@/api";
 import { count, glossUsetype } from "@/lib/vocab";
 
 const stats = ref<GraphStatsResponse | null>(null);
@@ -18,7 +18,12 @@ const roots = ref<DocumentResponse[]>([]);
 const error = ref<string | null>(null);
 const loading = ref(true);
 
-onMounted(async () => {
+// Asked again whenever the answer could differ: a different appliance, or a token that was
+// missing a moment ago. A page that loads once and keeps its first failure after the reader
+// has fixed the cause reports a problem that no longer exists.
+async function load() {
+  loading.value = true;
+  error.value = null;
   try {
     const [s, r] = await Promise.all([client.get_stats(), client.get_root_documents()]);
     stats.value = s;
@@ -28,7 +33,9 @@ onMounted(async () => {
   } finally {
     loading.value = false;
   }
-});
+}
+
+watch([baseUrl, token], load, { immediate: true });
 
 /** Usetypes, largest first, with each one's share of the corpus. */
 const usetypes = computed(() => {
