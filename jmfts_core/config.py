@@ -443,7 +443,11 @@ class Settings(BaseSettings):
     def database_url(self) -> str:
         # URL-encode password to handle special characters
         encoded_password = quote_plus(self.db_password)
-        return f"postgresql://{self.db_user}:{encoded_password}@{self.db_host}:{self.db_port}/{self.db_name}"
+        # The driver is named because `postgresql://` means "whatever SQLAlchemy defaults to":
+        # psycopg2 through 2.0, psycopg 3 from 2.1. `pyproject.toml` declares psycopg2-binary
+        # and leaves sqlalchemy unbounded above, so a fresh install resolved 2.1.3 and failed
+        # with "No module named 'psycopg'".
+        return f"postgresql+psycopg2://{self.db_user}:{encoded_password}@{self.db_host}:{self.db_port}/{self.db_name}"
 
     # `async_database_url` used to sit here, building a `postgresql+asyncpg://` URL. It had
     # zero references in code, tests, scripts, benchmarks or docs, and `asyncpg` is not a

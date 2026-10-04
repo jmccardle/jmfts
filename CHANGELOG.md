@@ -10,6 +10,25 @@ Dates are the release commit's date. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses semantic
 versioning with the caveat that it is pre-1.0, so a minor version may break the wire.
 
+## [0.5.2] — 2026-10-03
+
+**A fresh install connects to its database again, and a test now holds the driver name.**
+0.5.1 built its connection string as `postgresql://`, which means "SQLAlchemy's default
+driver". That default was psycopg2 through SQLAlchemy 2.0 and is psycopg 3 from 2.1, and
+`pyproject.toml` declares `psycopg2-binary` while leaving `sqlalchemy` unbounded above. An
+install that resolved SQLAlchemy 2.1.3 therefore failed its first connection with
+`No module named 'psycopg'`, and `/health` answered `status: degraded` with that text.
+Found by building the development image on 2026-10-03; an environment that still holds
+SQLAlchemy 2.0 never saw it.
+
+### Fixed
+
+- **`Settings.database_url` names its driver**, `postgresql+psycopg2://`. The URL has one
+  consumer, `create_engine` in `jmfts_core/database.py`, so the change reaches every caller.
+- **`tests/test_database_url.py`** asserts the driver name and that the driver imports in
+  the environment under test. The second assertion is the one that fails on the old URL,
+  and only where SQLAlchemy is 2.1 or later.
+
 ## [0.5.1] — 2026-09-12
 
 **Development moves into this repository.** Up to 0.5.0 the public tree was a per-release
