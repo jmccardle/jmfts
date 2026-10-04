@@ -20,6 +20,40 @@ export type { CallEvent };
 // re-exports is the client instance below, so nothing else can construct a second one.
 export type * from "./client/verbs.js";
 
+/**
+ * An appliance address as the transport needs it: empty for this origin, otherwise an absolute
+ * http(s) URL with no trailing slash.
+ *
+ * The transport builds `baseUrl + path`, so an address without a scheme is not an address, it
+ * is a relative path. `127.0.0.1:8100` becomes `/127.0.0.1:8100/health` on the page's own
+ * origin, and the console reports the wrong thing — a server that answers HTML — instead of
+ * the right one, which is that the address is malformed. So it is refused here, once, where
+ * the address enters, rather than discovered at every call.
+ */
+export function parseApplianceUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+  let url: URL | null = null;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    // Falls through to the same refusal as a parseable address with the wrong scheme.
+  }
+  if (url === null || (url.protocol !== "http:" && url.protocol !== "https:")) {
+    const hint = trimmed.includes("://") ? "" : `, for example http://${trimmed}`;
+    throw new Error(`"${raw.trim()}" is not an appliance address. Include http:// or https://${hint}`);
+  }
+  return trimmed;
+}
+
+/**
+ * Set when the address remembered for this tab is not one `parseApplianceUrl` accepts — which
+ * is what an earlier build of this console would store for a schemeless address. The stored
+ * value is removed so it cannot break the next load as well, and the reason is kept here for
+ * the frame to show; it is not dropped silently.
+ */
+export const storedAddressProblem = ref<string | null>(null);
+
 /** Where the appliance is. */
 export const baseUrl = ref<string>(resolveBaseUrl());
 
@@ -29,7 +63,15 @@ function resolveBaseUrl(): string {
   // same-origin and means the appliance needs no CORS header to develop against.
   const declared = (window as { __JMFTS_BASE__?: string }).__JMFTS_BASE__;
   const remembered = safeRead("jmfts.base");
-  return remembered ?? declared ?? "";
+  if (remembered !== null) {
+    try {
+      return parseApplianceUrl(remembered);
+    } catch (failure) {
+      safeWrite("jmfts.base", null);
+      storedAddressProblem.value = `Ignored the remembered address. ${(failure as Error).message}`;
+    }
+  }
+  return declared ?? "";
 }
 
 /**
@@ -74,7 +116,7 @@ export function forget(): void {
 }
 
 export function pointAt(url: string): void {
-  baseUrl.value = url.replace(/\/+$/, "");
+  baseUrl.value = parseApplianceUrl(url);
   safeWrite("jmfts.base", baseUrl.value || null);
 }
 

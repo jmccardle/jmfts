@@ -7,11 +7,21 @@
 // control that lies.
 
 import { computed, onMounted, ref } from "vue";
-import { baseUrl, calls, client, connect, forget, pointAt, reachability, token } from "@/api";
+import {
+  baseUrl,
+  calls,
+  client,
+  connect,
+  forget,
+  pointAt,
+  reachability,
+  storedAddressProblem,
+  token,
+} from "@/api";
 
 const entry = ref("");
 const applianceField = ref(baseUrl.value);
-const problem = ref<string | null>(null);
+const problem = ref<string | null>(storedAddressProblem.value);
 
 const ways = [
   { to: "/", label: "Corpus", hint: "What this appliance holds, and the trees it holds it in." },
