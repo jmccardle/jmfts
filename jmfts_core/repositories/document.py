@@ -1025,6 +1025,11 @@ class DocumentRepository:
         doc = self.get(document_id)
         if not doc or not doc.content:
             return None
+        # Subtree RBAC write gate. Embedding WRITES vectors onto the document, and this
+        # method is reached by `DocumentService.embed_document` without passing through
+        # `update`. Hidden -> LookupError (404), readable but not writable -> 403. A worker
+        # binds no principal, so queued embedding is unaffected.
+        require_write(self.session, doc, "embed")
 
         # `get_embedder`, not `get_embedding_service`: this is the ingest WRITE path, and a
         # worker configured with JMFTS_RUNNER_URL produces its vectors on somebody else's
