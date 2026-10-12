@@ -11,7 +11,11 @@ Dates are the release commit's date. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses semantic
 versioning with the caveat that it is pre-1.0, so a minor version may break the wire.
 
-## [Unreleased]
+## [0.6.2] — 2026-10-12
+
+**A refused request says why, and a stale field says it was ignored.** The bugs and small
+fixes from the 0.6.1 cutover and the issue triage after it, the dependency floors brought up
+to what the suite runs on, and ten dead items the restored dead-code scan found.
 
 ### Breaking
 
@@ -807,7 +811,11 @@ says. Both paragraphs become steps in the 0.6.0 plan, and they are the entry con
 
 First release with packaging metadata and the tests that make a release possible.
 
-[Unreleased]: https://github.com/jmccardle/jmfts/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/jmccardle/jmfts/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/jmccardle/jmfts/releases/tag/v0.6.2
+[0.6.1]: https://github.com/jmccardle/jmfts/releases/tag/v0.6.1
+[0.6.0]: https://github.com/jmccardle/jmfts/releases/tag/v0.6.0
+[0.5.2]: https://github.com/jmccardle/jmfts/releases/tag/v0.5.2
 [0.5.1]: https://github.com/jmccardle/jmfts/releases/tag/v0.5.1
 [0.5.0]: https://github.com/jmccardle/jmfts/releases/tag/v0.5.0
 [0.3.0]: https://github.com/jmccardle/jmfts/releases/tag/v0.3.0
