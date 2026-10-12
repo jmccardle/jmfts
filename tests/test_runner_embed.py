@@ -64,6 +64,12 @@ class StubEmbeddingService:
     def check_fit(self, text, with_tokens=True, prefix="search_document: "):
         settings = get_settings()
         limit = settings.embedding_token_window if with_tokens else settings.embedding_doc_window
+        # A WORD count, not a token count, and deliberately so. The real `check_fit` asks the
+        # embedding model's tokenizer, which needs the model's files; this module exists to
+        # test the wire without them. No assertion here reads `token_count` — the tests check
+        # `limit`, and the over-window refusal is driven by `too_long` instead — so the value
+        # only has to be a plausible int. A test that needs a true count belongs where the
+        # model is loaded.
         return FitResult(
             token_count=len(text.split()),
             limit=limit,

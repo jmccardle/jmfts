@@ -207,7 +207,7 @@ def anchor_for_span(
 
     THE PAGE IS THE PAGE THE PASSAGE BEGINS ON, and the rectangle is the union of the
     segments it covers **on that page only**. A chunk that runs past a page break is
-    ordinary — the chunker packs to a token budget and knows nothing about pagination — and
+    ordinary — the chunker packs to a word budget and knows nothing about pagination — and
     it is not a failure to recover: the reader who clicks a citation wants to be taken to
     where the passage starts. What would be a failure is handing back a rectangle that
     looked complete when it was not, so an anchor whose passage continues overleaf carries
@@ -410,7 +410,7 @@ def anchor_for_ooxml_span(
 
     THE PATH IS THE FIRST ADDRESSED BLOCK THE PASSAGE TOUCHES, which is the rule
     :func:`anchor_for_span` applies to pages and for the same reason: the reader who clicks
-    a citation wants to be taken to where the passage starts. A chunk packs to a token
+    a citation wants to be taken to where the passage starts. A chunk packs to a word
     budget and knows nothing about paragraph boundaries, so covering several elements is
     ordinary rather than a failure — and saying so is what keeps a partial address
     distinguishable from a whole one:

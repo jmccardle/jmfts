@@ -145,10 +145,10 @@ def route_query(query: str) -> RoutingDecision:
     2. **Boolean operators** (AND, OR, NOT in caps) → fulltext
        These map directly to PostgreSQL tsquery operators.
 
-    3. **Very short keyword queries** (1-2 non-stop tokens) → bm25
+    3. **Very short keyword queries** (1-2 non-stop words) → bm25
        Short keyword lookups benefit from precise term-frequency scoring.
 
-    4. **Long natural-language questions** (≥8 tokens, high stopword ratio) → vector
+    4. **Long natural-language questions** (≥8 words, high stopword ratio) → vector
        Semantic search captures intent better than keyword matching for
        questions like "how does the authentication system work?"
 
@@ -175,23 +175,24 @@ def route_query(query: str) -> RoutingDecision:
     has_bool = len(bool_ops) > 0
     signals["boolean_operators"] = bool_ops
 
-    # Tokenize (lowercase, split on non-alphanum)
-    tokens = [t for t in re.split(r"[^a-z0-9]+", stripped.lower()) if len(t) >= 2]
-    signals["token_count"] = len(tokens)
+    # Words: lowercase, split on non-alphanumerics, two characters or more. These are a
+    # lexical routing signal and are named as words on purpose — the response that carries
+    # them sits beside a system with a real (embedding-model) token count, and calling a
+    # word count `token_count` there invites reading one as the other.
+    words = [w for w in re.split(r"[^a-z0-9]+", stripped.lower()) if len(w) >= 2]
+    signals["word_count"] = len(words)
 
-    # Content tokens (non-stopword)
-    content_tokens = [t for t in tokens if t not in _STOPWORDS]
-    signals["content_token_count"] = len(content_tokens)
+    # Content words (non-stopword)
+    content_words = [w for w in words if w not in _STOPWORDS]
+    signals["content_word_count"] = len(content_words)
 
     # Stopword ratio
-    stopword_ratio = 1 - (len(content_tokens) / len(tokens)) if tokens else 0
+    stopword_ratio = 1 - (len(content_words) / len(words)) if words else 0
     signals["stopword_ratio"] = round(stopword_ratio, 2)
 
     # Question pattern
     question_words = {"how", "what", "why", "when", "where", "who", "which", "explain", "describe"}
-    is_question = stripped.rstrip().endswith("?") or (
-        len(tokens) > 0 and tokens[0] in question_words
-    )
+    is_question = stripped.rstrip().endswith("?") or (len(words) > 0 and words[0] in question_words)
     signals["is_question"] = is_question
 
     # --- Decision logic ---
@@ -213,7 +214,7 @@ def route_query(query: str) -> RoutingDecision:
         )
 
     # 3. Very short keyword queries → bm25
-    if len(content_tokens) <= 2 and stopword_ratio < 0.4:
+    if len(content_words) <= 2 and stopword_ratio < 0.4:
         return RoutingDecision(
             method="bm25",
             reason="short keyword query — BM25 term-frequency scoring is most precise",
@@ -221,7 +222,7 @@ def route_query(query: str) -> RoutingDecision:
         )
 
     # 4. Long natural-language / question → vector
-    if len(tokens) >= 8 or (is_question and len(tokens) >= 4):
+    if len(words) >= 8 or (is_question and len(words) >= 4):
         return RoutingDecision(
             method="vector",
             reason="natural-language question — semantic vector search captures intent best",

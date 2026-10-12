@@ -3,7 +3,8 @@
 MultiHop-RAG Benchmark for JMFTS
 
 Benchmarks retrieval performance with:
-- Proper chunking (~256 tokens per chunk, matching reference implementation)
+- Production chunking (256-word windows, 25-word overlap, measured against the embedding
+  window — see chunk_body)
 - Tiered token storage for efficient percentage sweeps
 - Fact-based evaluation (matching against evidence facts, not just titles)
 - Standard metrics: Hits@k, MAP@k, MRR@k
@@ -38,15 +39,16 @@ from jmfts_core.repositories.search import SearchRepository
 from jmfts_core.models.document import Document
 from jmfts_core.models.token_embedding import TokenEmbedding
 from jmfts_core.models.search_index import SearchIndex, SearchIndexEntry, SearchTermPosting, SearchTermStats
-from jmfts_core.embedding import EmbeddingService
+from jmfts_core.embedding import EmbeddingService, get_embedding_service
+from jmfts_core.chunking import ChunkStrategy, chunk_text as jmfts_chunk_text
 
 DATASET_DIR = Path("/storage/jmfts_data/MultiHop-RAG/dataset")
 CORPUS_FILE = DATASET_DIR / "corpus.json"
 QUERIES_FILE = DATASET_DIR / "MultiHopRAG.json"
 
 # Chunking config (matching reference implementation)
-CHUNK_SIZE = 256  # tokens
-CHUNK_OVERLAP = 25  # ~10% overlap
+CHUNK_SIZE = 256  # WORDS — see chunk_body
+CHUNK_OVERLAP = 25  # words, ~10% overlap
 
 
 @dataclass
@@ -95,38 +97,29 @@ def load_queries() -> list[dict]:
         return json.load(f)
 
 
-def simple_tokenize(text: str) -> list[str]:
-    """Simple whitespace tokenization for chunking"""
-    return text.split()
+def chunk_body(text: str) -> list[str]:
+    """Split an article body into overlapping word windows, measured against the window.
 
+    This used to be a private copy of the word-window chunker with no measurement, so a
+    benchmark run chunked differently from the appliance it was measuring and nothing said
+    why. It is now the production `chunk_text` — the same `token_count` strategy (which
+    counts WORDS, whatever its name) with the same overlap — plus `fits`, the predicate
+    the structure rung passes, so every chunk is checked against the embedding tokenizer's
+    real window rather than trusted to a word count.
 
-def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
+    The reference implementation's 256 is 256 subword tokens; 256 words is more than that,
+    so this does not reproduce the reference and never did. Production chunking also caps
+    every chunk at `chunk_max_chars`, so chunk counts differ from runs recorded before this
+    change; compare against those with that in mind.
     """
-    Split text into overlapping chunks.
-
-    Args:
-        text: Text to chunk
-        chunk_size: Target tokens per chunk
-        overlap: Token overlap between chunks
-
-    Returns:
-        List of chunk strings
-    """
-    words = simple_tokenize(text)
-    if len(words) <= chunk_size:
-        return [text]
-
-    chunks = []
-    start = 0
-    while start < len(words):
-        end = start + chunk_size
-        chunk_words = words[start:end]
-        chunks.append(" ".join(chunk_words))
-        start = end - overlap
-        if start >= len(words) - overlap:
-            break
-
-    return chunks
+    chunks = jmfts_chunk_text(
+        text,
+        strategy=ChunkStrategy.token_count,
+        max_tokens=CHUNK_SIZE,
+        overlap=CHUNK_OVERLAP,
+        fits=get_embedding_service().fits_token_window,
+    )
+    return [c.text for c in chunks]
 
 
 def wipe_database(session):
@@ -193,7 +186,7 @@ def import_corpus_chunked(
         )
 
         # Chunk the body and create chunk documents
-        chunks = chunk_text(body)
+        chunks = chunk_body(body)
         for j, chunk_text_content in enumerate(chunks):
             chunk_doc = doc_repo.create(
                 title=f"{title[:50]}... [chunk {j+1}/{len(chunks)}]",

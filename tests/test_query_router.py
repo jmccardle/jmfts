@@ -89,8 +89,11 @@ class TestEdgeCases:
 
     def test_signals_always_present(self):
         d = route_query("test query")
-        assert "token_count" in d.signals
-        assert "content_token_count" in d.signals
+        # Words, split on non-alphanumerics — a lexical routing signal, not a token count.
+        assert "word_count" in d.signals
+        assert "content_word_count" in d.signals
+        assert "token_count" not in d.signals
+        assert "content_token_count" not in d.signals
         assert "stopword_ratio" in d.signals
         assert "is_question" in d.signals
         assert "quoted_phrases" in d.signals

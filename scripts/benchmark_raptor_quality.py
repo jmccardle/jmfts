@@ -26,6 +26,7 @@ import numpy as np
 from jmfts_core.config import get_settings
 from jmfts_core.chunking import chunk_text, ChunkStrategy
 from jmfts_core.database import get_session
+from jmfts_core.embedding import get_embedding_service
 from jmfts_core.repositories.document import DocumentRepository
 from jmfts_core.summarization import raptor_summarize
 
@@ -59,7 +60,14 @@ async def run_benchmark():
     print(f"Article: {TEST_ARTICLE.name} ({word_count} words, {len(article_text)} chars)")
 
     # ── 2. Chunk it ──
-    chunks = chunk_text(article_text, strategy=ChunkStrategy.paragraph)
+    # `fits`, as the structure rung passes it: every child below is embedded, so each
+    # chunk is measured against the embedding window rather than trusted to the character
+    # cap, and the benchmark chunks the way the appliance does.
+    chunks = chunk_text(
+        article_text,
+        strategy=ChunkStrategy.paragraph,
+        fits=get_embedding_service().fits_token_window,
+    )
     print(f"Chunked into {len(chunks)} paragraphs")
 
     # ── 3. Create parent + children with embeddings in DB ──
