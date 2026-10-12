@@ -263,6 +263,15 @@ class Settings(BaseSettings):
     # chunked into `chunk` pieces. Its SHORT values are in no index. 4.3 names that case —
     # "a search for a distinctive single value in a wide row" — and holds it open.
     bm25_exclude_usetypes: list[str] = ["entity", "entities", "summary", "derived", "cell"]
+    #
+    # `summary` HERE IS LOAD-BEARING, not only tidy. Every `summarize:tree` node stores its own
+    # 768-dim vector, and every one is byte-identical to its source node's: 13,755 of 13,755
+    # pairs at cosine distance 0.000000, all 14,101 derived nodes with zero children
+    # (`docs/STRESS_CORPUS.md` 4.4b, read from a real corpus; `ROADMAP.md` gap 11). They are
+    # stored and HNSW-indexed, and this list is the only thing keeping them out of a result
+    # set. Remove `summary` and every answer comes back twice. The alternative -- a derived
+    # node carrying no embedding, reached through `source_node_id` -- is undecided; until it
+    # is built, treat this exclusion as REQUIRED, not a default to loosen.
     search_exclude_usetypes: list[str] = ["entity", "entities", "summary", "derived"]
 
     # LLM endpoint (any OpenAI-compatible server: llama-server, vLLM, Ollama, ensonet, or
