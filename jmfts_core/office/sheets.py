@@ -570,7 +570,6 @@ class SheetMeasurement:
     interior_cardinality_at_least: int
     interior_cardinality_exact: bool
     merged_cells: int
-    merged_ranges: tuple
     columns: tuple
     rendered_markdown: Optional[str]
     rendered_unbounded_reason: Optional[str]
@@ -1043,7 +1042,6 @@ def _assemble(
         interior_cardinality_at_least=interior.count,
         interior_cardinality_exact=interior.exact,
         merged_cells=merged.count,
-        merged_ranges=merged.ranges,
         columns=columns,
         rendered_markdown=rendered,
         rendered_unbounded_reason=reason,

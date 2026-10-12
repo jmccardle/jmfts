@@ -11,6 +11,33 @@ Dates are the release commit's date. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses semantic
 versioning with the caveat that it is pre-1.0, so a minor version may break the wire.
 
+## [Unreleased]
+
+### Breaking
+
+- **`JMFTS_EMBEDDING_BATCH_SIZE` is gone, because nothing read it.** `.env.example` set it
+  uncommented, so a copied `.env` carried a knob that did nothing. If a `.env` FILE still
+  sets it, `Settings()` now refuses to start with
+  `jmfts_embedding_batch_size — Extra inputs are not permitted`; delete the line. Set as a
+  process environment variable it is ignored, which is pydantic-settings' own asymmetry.
+
+### Fixed
+
+- **`wiki:arxiv` no longer claims to keep paper metadata.** The usetype description, the
+  generated `docs/reference/INGEST.md` and the ingest skill said it fetched "metadata +
+  PDF" and filled in title, authors and abstract; it has stored the PDF only since the
+  evidence migration. The skill's account of what the pipeline writes into
+  `structured_content` was false more widely: it writes nothing there, and measurements are
+  read from `GET /documents/{id}/evidence`.
+
+### Removed
+
+- Dead code found by `scripts/deadcode_scan.py`, restored to the tree on 2026-10-12: the arXiv
+  Atom-feed metadata fetch, `DocumentRepository.append_attempts`,
+  `SearchContextRepository.get_by_id`, `app.state.ingest_worker`,
+  `SheetMeasurement.merged_ranges`, `Prepared.input_tokens` in `jmfts_batch`, and a loop in
+  fact extraction whose body was `pass`.
+
 ## [0.6.1] — 2026-10-12
 
 **The LLM URL is the one your server advertises, and EnsoNet becomes reachable.** One fix,

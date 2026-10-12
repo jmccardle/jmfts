@@ -801,11 +801,8 @@ async def extract_facts(
     )
     result.entities_resolved = len(entity_cache) - result.entities_created
 
-    # Predicate stats
-    for pred_name, pred_id in predicate_cache.items():
-        # We can't easily tell created vs reused from cache alone,
-        # so count predicates that exist
-        pass
+    # Created vs reused is not recoverable from the cache, so this counts every predicate
+    # the run touched.
     result.predicates_created = len(predicate_cache)  # conservative estimate
 
     session.flush()

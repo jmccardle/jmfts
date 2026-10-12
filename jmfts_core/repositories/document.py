@@ -470,27 +470,6 @@ class DocumentRepository:
                 counts[entry["task"]] = counts.get(entry["task"], 0) + 1
         return counts
 
-    def append_attempts(self, document: Document, records: Sequence[AttemptRecord]) -> None:
-        """Append attempt records to the `attempts` evidence row. Append-only.
-
-        Spec 3.4: a re-ingest ADDS to the log, it never rewrites it, because the log is
-        what makes "this file was ingested before a vision model existed" a recoverable
-        fact.
-
-        ONE STATEMENT, AND IT NO LONGER READS FIRST. While the log was a key in
-        `structured_content` this had to read the list, copy it, append and reassign — and
-        the reassignment was load-bearing, because SQLAlchemy's JSONB change tracking only
-        sees a whole-attribute assignment. That whole discipline is gone: `value || records`
-        against one row is atomic, so two writers appending to one log cannot lose an entry
-        between the read and the write. 13.1's first fact, on the name it mattered most for.
-        """
-        if not records:
-            return
-        EvidenceRepository(self.session).append(
-            document.id, "attempts", [r.to_jsonb() for r in records]
-        )
-        self.session.flush()
-
     def upsert_attempt(self, document: Document, record: AttemptRecord) -> None:
         """Write one attempt, replacing the LIVE entry for the same queue row if there is one.
 
@@ -511,8 +490,8 @@ class DocumentRepository:
         never had a queue row) always appends; there is nothing to match it against.
 
         THIS IS THE ONE READ-MODIFY-WRITE LEFT ON THE LOG, and it is not one this migration
-        could remove. :meth:`append_attempts` became a single ``value || records`` because
-        appending needs nothing from the stored list; replacing an entry needs to find it
+        could remove. Appending became a single ``value || records`` because it needs nothing
+        from the stored list (``append_attempts``, deleted 2026-10-12 — it had no caller); replacing an entry needs to find it
         first, and "the last non-terminal entry with this task_id" is not a predicate a
         JSONB update expresses. It races only with another write to the SAME row — Phase 2b
         removed the race with a write to a DIFFERENT name, which is the one 13.1 measured —

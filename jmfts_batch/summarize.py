@@ -59,7 +59,6 @@ class Prepared:
     document_id: int
     request: Optional[BatchRequest] = None
     outcome: Optional[TaskOutcome] = None
-    input_tokens: int = 0
 
     def __post_init__(self) -> None:
         if (self.request is None) == (self.outcome is None):
@@ -117,7 +116,6 @@ def prepare(
     return Prepared(
         task_id=task.id,
         document_id=doc.id,
-        input_tokens=fit.token_count,
         request=BatchRequest(
             custom_id=custom_id_for(task.id),
             model=model,

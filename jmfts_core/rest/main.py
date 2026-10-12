@@ -78,13 +78,11 @@ async def _lifespan(_app: FastAPI):
     if settings.ingest_worker_enabled:
         worker = build_worker_from_settings()
         worker.start()
-        _app.state.ingest_worker = worker
     try:
         yield
     finally:
         if worker is not None:
             worker.stop()
-            _app.state.ingest_worker = None
 
 
 # Create FastAPI app. The app-level `require_token` dependency (CR-4) gates

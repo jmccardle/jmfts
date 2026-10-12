@@ -193,7 +193,6 @@ class Settings(BaseSettings):
     # Embedding model
     embedding_model: str = "nomic-ai/modernbert-embed-base"
     embedding_device: str = "cpu"  # "cuda" for GPU-accelerated bulk ingestion
-    embedding_batch_size: int = 32
     token_batch_size: int = 32  # Documents per batch for token-level embedding
 
     # Embedding windows (see docs/archive/KNOWN-DEFECTS.md, D1)

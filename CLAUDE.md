@@ -133,7 +133,17 @@ One survivor is still in that file — `derived_roots.py:157 derived_root_ids`, 
 at the definition. **The count held at 12 across four days and sixteen commits, and that is
 a reading too, not a target**: the raw number moved 258 → 270 over the same window, which is
 the allowlist doing its job rather than the tree getting cleaner. `--published-only` reads
-42. Run the scan rather than trusting any of these.
+42.
+
+Read again 2026-10-12, after the scan was restored and taught the three wheels, validators,
+wire-model fields and stored enum members: **4 findings, 29 `--published-only`, 862 names
+excused.** Down from 14 and 42 the same day because ten were dead and were deleted (the
+arXiv metadata fetch, `JMFTS_EMBEDDING_BATCH_SIZE`, `append_attempts`,
+`SearchContextRepository.get_by_id`, `app.state.ingest_worker`, `merged_ranges`, the batch
+`input_tokens`, a `pass` loop), and four were false positives the scan now excuses. The
+four left are `derived_root_ids` (documented), `CONVERT_POLICY` (a preset operators are
+pointed at), and `TASK_STATUSES` / `EVIDENCE_STATES`, copies of two CHECK constraints that
+nothing ties to the SQL. Run the scan rather than trusting any of these.
 
 Two questions, two modes. The default counts `tests/` and `scripts/` as callers. The
 `--published-only` mode does not, which surfaces code whose only caller lives outside the
