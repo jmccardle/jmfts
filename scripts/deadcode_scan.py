@@ -15,7 +15,7 @@ registry-driven: ``@expose`` turns a service method into a REST route and
 ``@register_task_handler`` turns a function into a queue handler, so roughly a hundred
 functions are reachable with NO in-repo caller. Add Pydantic contract fields, SQLAlchemy
 mapped columns, and a generated client whose every method is public API, and a raw run
-reports 258 findings of which almost none are real. A report that is 95% noise is a
+reports about 256 findings (2026-10-12) of which almost none are real. A report that is 95% noise is a
 report nobody reads twice.
 
 So this builds the allowlist from the LIVE registries rather than from a checked-in list
@@ -33,12 +33,13 @@ Three limits, stated because each one has already produced a wrong conclusion:
   by a decorator this does not know about will be reported. ``jmfts-init-db`` and
   ``jmfts-batch-worker`` are console scripts; their modules have no importer.
 * **Uncovered is not dead.** ``coverage`` is the other half of the picture and answers a
-  different question. ``jmfts_core/arxiv_fetch.py`` sits at 0% and is perfectly
-  reachable through the ``wiki:arxiv`` pipeline; no test makes a network call.
-* **Reachable only from ``scripts/`` is a judgement call.** ``scripts/`` is not in
-  ``tests/test_readme_links.py::PUBLISHED``, so a method whose only caller lives there
-  has no caller in the shipped wheel. Run ``--published-only`` to see those; the answer
-  is a decision about what the package is for, not something a tool can settle.
+  different question: 0% covered means untested, not dead. A module reached only through
+  a network fetch is the usual case, because no test makes a network call.
+* **Reachable only from ``tests/`` or ``scripts/`` is a judgement call.** Both are in
+  the public repository (``tests/test_readme_links.py::PUBLISHED``) and neither is in any
+  WHEEL — the three ``[tool.setuptools.packages.find]`` tables decide that, and
+  :data:`SCAN_TARGETS` is read from them. Run ``--published-only`` to see those; the
+  answer is a decision about what the package is for, not something a tool can settle.
 
 Findings are a starting point for reading the code, never a delete list.
 """
@@ -56,25 +57,48 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 
+#: The three distributions, by the directory holding each one's ``pyproject.toml``.
+DISTRIBUTIONS = (".", "jmfts-client", "jmfts-web")
+
+
+def _wheel_packages() -> tuple[str, ...]:
+    """What ships: every top-level package each distribution's ``packages.find`` includes.
+
+    Read rather than listed, so a fourth package (or a fourth distribution added to
+    :data:`DISTRIBUTIONS`) is scanned from the edit that ships it.
+    """
+    import fnmatch
+    import tomllib
+
+    found = []
+    for dist in DISTRIBUTIONS:
+        root = REPO / dist
+        config = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        include = config["tool"]["setuptools"]["packages"]["find"]["include"]
+        for child in sorted(root.iterdir()):
+            if (child / "__init__.py").is_file() and any(
+                fnmatch.fnmatch(child.name, pattern) for pattern in include
+            ):
+                found.append(str(child.relative_to(REPO)))
+    if not found:
+        raise SystemExit("no wheel packages found; the packages.find tables have moved")
+    return tuple(found)
+
+
 #: What ships, and therefore what a finding can be reported IN.
-SCAN_TARGETS = (
-    "jmfts_core",
-    "jmfts-client/jmfts_client",
-    "jmfts_batch",
-)
+SCAN_TARGETS = _wheel_packages()
 
 #: Handed to vulture as well, so a name used only here still counts as referenced — but
 #: findings located in these paths are dropped. They are callers, not subjects.
 #:
 #: `--published-only` removes them from the reference set, which asks the other question:
-#: what has no caller in the SHIPPED tree? `scripts/` is not in
-#: `tests/test_readme_links.py::PUBLISHED`, so a method whose only caller lives there has
-#: no caller in the wheel. Both questions are legitimate; they are not the same question,
+#: what has no caller in the SHIPPED wheels? `tests/` and `scripts/` are in the public
+#: repository and in no wheel, so a method whose only caller lives there has no caller in
+#: an installed appliance. Both questions are legitimate; they are not the same question,
 #: and answering one while claiming the other is how a helper survives for a year.
 REFERENCE_ONLY = (
     "tests",
     "scripts",
-    "benchmarks",
 )
 
 #: Never reported, whatever vulture thinks. Every entry is a mechanism that makes a name
@@ -126,6 +150,7 @@ def build_allowlist() -> set[str]:
 
     # 3. Contract classes and their fields — the wire shapes, read by Pydantic.
     from pydantic import BaseModel
+    from pydantic_settings import BaseSettings
 
     import jmfts_client.contracts as contracts
 
@@ -136,11 +161,47 @@ def build_allowlist() -> set[str]:
                 names.add(attr_name)
                 names.update(obj.model_fields)
 
-    # 4. SQLAlchemy mapped classes, columns and relationships.
+    # 3b. Every other model in our packages. Validators and serializers are called by
+    # Pydantic, never by name, on contracts and on `Settings` alike. Fields are excused
+    # everywhere EXCEPT a `BaseSettings`: a wire model outside the contracts package (the
+    # health shapes in `rest/schemas.py`) is serialised by FastAPI, but a setting nothing
+    # reads is an env var that silently does nothing, and that is a finding.
+    def _subclasses(cls):
+        for sub in cls.__subclasses__():
+            yield sub
+            yield from _subclasses(sub)
+
+    for model in set(_subclasses(BaseModel)):
+        if not model.__module__.startswith(("jmfts_core", "jmfts_client", "jmfts_batch")):
+            continue
+        decorators = model.__pydantic_decorators__
+        for table in (
+            decorators.validators,
+            decorators.field_validators,
+            decorators.root_validators,
+            decorators.model_validators,
+            decorators.field_serializers,
+            decorators.model_serializers,
+            decorators.computed_fields,
+        ):
+            names.update(table)
+        if not issubclass(model, BaseSettings):
+            names.add(model.__name__)
+            names.update(model.model_fields)
+
+    # 4. SQLAlchemy mapped classes, columns and relationships — and the members of any
+    # Enum a column is typed with, which are reached by the stored VALUE (`FactType("static")`)
+    # and never by attribute.
+    import enum
+
     for mapper in Base.registry.mappers:
         names.add(mapper.class_.__name__)
         names.update(column.key for column in mapper.columns)
         names.update(rel.key for rel in mapper.relationships)
+        for column in mapper.columns:
+            enum_class = getattr(column.type, "enum_class", None)
+            if isinstance(enum_class, type) and issubclass(enum_class, enum.Enum):
+                names.update(enum_class.__members__)
 
     # 5. The generated client's public surface.
     from jmfts_client import RemoteJmftsClient
@@ -163,7 +224,7 @@ def build_allowlist() -> set[str]:
     for handler in getattr(app, "exception_handlers", {}).values():
         names.add(getattr(handler, "__name__", ""))
 
-    # 6. Console-script entry points: a module nothing imports, called by name.
+    # 8. Console-script entry points: a module nothing imports, called by name.
     import tomllib
 
     pyproject = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
@@ -175,7 +236,10 @@ def build_allowlist() -> set[str]:
 
 def run_vulture(allowlist: set[str], min_confidence: int, published_only: bool) -> list[str]:
     """Vulture's findings, minus everything the allowlist or a caller explains."""
-    vulture = shutil.which("vulture")
+    # The interpreter's own bin/ first: `.venv/bin/python -m scripts.deadcode_scan` should
+    # find the vulture installed beside it without the caller also fixing PATH.
+    beside = Path(sys.executable).parent / "vulture"
+    vulture = str(beside) if beside.is_file() else shutil.which("vulture")
     if vulture is None:
         raise SystemExit(
             "vulture is not installed. It is deliberately NOT a project dependency — this "
@@ -238,7 +302,7 @@ def main() -> int:
         action="store_true",
         help=(
             "do not count tests/ or scripts/ as callers, which surfaces code that only "
-            "something outside the shipped wheel still uses"
+            "something outside the shipped wheels still uses"
         ),
     )
     parser.add_argument(
@@ -265,7 +329,7 @@ def main() -> int:
     if survivors:
         print(
             "\nEach one is a question, not a verdict. Before deleting anything, grep the "
-            "WHOLE tree — tests/, scripts/, benchmarks/, plugin/ — and check whether the "
+            "WHOLE tree — tests/, scripts/, plugin/, jmfts-web/static/ — and check whether the "
             "only caller lives outside the published subset."
         )
 

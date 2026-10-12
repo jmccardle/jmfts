@@ -203,94 +203,13 @@ import pytest  # noqa: E402
 requires_db = pytest.mark.skipif(not DB_READY, reason="test database not provisioned")
 
 
-#: The path whose presence says "this is the development tree".
-#:
-#: It was ``docs/`` until 0.5.0, on the stated ground that ``docs/`` is the one top-level
-#: directory ``tests/test_readme_links.py::PUBLISHED`` will never name. 0.5.0 published
-#: ``docs/reference/``, which made that ground false: the public tree then HAD a ``docs/``
-#: directory, ``IS_INTERNAL_TREE`` read True there, and all four tests this marker skips
-#: ran in the tree they were marked to skip in. The first public CI run of 0.5.0 failed on
-#: exactly that, eleven days after the run that introduced the marker failed on the
-#: unmarked versions of the same four tests.
-#:
-#: The marker is a FILE now, and the property that matters about it is not "it is in
-#: ``docs/``" but "``PUBLISHED`` does not name it" — which is a claim a test can hold, and
-#: ``test_readme_links.py::test_the_internal_tree_marker_is_not_published`` does. That test
-#: runs in BOTH trees, which is what the old premise lacked: nothing anywhere failed when
-#: adding a path to ``PUBLISHED`` invalidated it.
-#:
-#: It was ``ROADMAP.md`` from 0.5.0 until 0.5.1, on the ground that publishing another
-#: ``docs/`` subdirectory could not reach a top-level file. That ground held and the
-#: decision under it did not: ``ROADMAP.md`` is published now, so the marker moved rather
-#: than being invalidated a second time. The mechanism worked — the marker is a claim about
-#: ``PUBLISHED`` and there is a test that holds it against ``PUBLISHED`` in both trees.
-#:
-#: ``docs/OFFICE_SPEC.md`` was the marker from 0.5.0 until 2026-09-15, and it was chosen
-#: for a relationship it has now used up: it was what three of the skipped tests actually
-#: READ, so that *"if that document is ever published those tests SHOULD start running, and
-#: this marker is what makes them"*. It was published on 2026-09-15
-#: (``SPRINT_0_6_0.md`` Block E step 4) and those three tests are no longer marked, which is
-#: the mechanism finishing rather than failing. The note that stood here also named the risk
-#: it was trading into — *"publishing ``docs/`` wholesale is what this file would need to
-#: survive next"* — and nine files is not wholesale, but it is the same move.
-#:
-#: **``scripts/deadcode_scan.py`` is the marker now, and it is the only path left that is
-#: both in this tree and genuinely not copied.** That is what a marker has to be, and it is
-#: why the choice is narrow rather than a preference: ``NOT_PUBLISHED`` is a one-entry list
-#: and this is the entry. The file is an occasional internal audit — it shells out to
-#: ``vulture``, which is deliberately not a project dependency — so on a public clone it is
-#: a script that fails with an install hint for a tool the project never asks for, which is
-#: exactly why it is carved out.
-#:
-#: **The marker distinguishes nothing today, and saying so is the point of this note.**
-#: ``scripts/deadcode_scan.py`` IS NOT IN THIS TREE — ``NOT_PUBLISHED`` names a file that
-#: is gone — so ``IS_INTERNAL_TREE`` reads False here and in a public checkout alike, and
-#: ``internal_tree_only`` skips its tests in both. That was already true before this commit:
-#: the old marker was ``docs/OFFICE_SPEC.md``, which was equally absent, so the six tests it
-#: gated ran NOWHERE for as long as `docs/` was empty. Three of those were
-#: ``tests/test_reference_docs.py``'s and three were ``tests/corpus/test_vocabulary.py``'s;
-#: all six are unmarked now, because their subjects are published and the mark was wrong by
-#: this module's own rule.
-#:
-#: What is left gated is one test —
-#: ``test_excluded_paths_still_exist_and_sit_inside_a_published_one`` — whose subject is
-#: ``NOT_PUBLISHED`` itself, and which therefore cannot fire on the very condition it
-#: exists to catch: an exclusion pointing at a path that is not there. **That is a live
-#: defect and it is recorded here rather than worked around.** Either
-#: ``scripts/deadcode_scan.py`` comes back — ``CLAUDE.md`` documents running it, so
-#: something already assumes it is here — or ``NOT_PUBLISHED`` empties, and then this
-#: marker has no referent at all and ``internal_tree_only`` should be deleted with it
-#: rather than pointed at something arbitrary.
-#:
-#: The marker still has to be a path the release does not copy, which is why it moved here
-#: rather than to a ``docs/`` file: from 0.5.1 the development tree and the public
-#: repository are the same tree, and ``NOT_PUBLISHED`` is the whole of what is left of the
-#: difference between them.
-INTERNAL_TREE_MARKER = "scripts/deadcode_scan.py"
-
-#: True in the development tree, False in a public checkout.
-IS_INTERNAL_TREE = (_REPO_ROOT / INTERNAL_TREE_MARKER).is_file()
-
-#: Marker for a test that reads a file the release does not copy.
-#:
-#: ``tests/`` IS published, so every test in this suite runs again in the public
-#: repository, against a tree that is missing the working record in ``docs/`` (all of it
-#: except the generated ``docs/reference/`` pages and the current sprint plan),
-#: ``benchmarks/`` and whatever ``NOT_PUBLISHED`` carves out. A test that reads one of
-#: those does not fail
-#: there because anything is wrong; it fails because it was asked a question that tree
-#: cannot answer.
-#:
-#: This is not a way to excuse a test from the public gate. It is for the narrow case
-#: where the SUBJECT of the test is internal — the office spec's pattern tables, the
-#: exclusion list's own entries. A test of shipped behaviour must run in both trees, and
-#: the first public CI run found four tests that had quietly never been checked against
-#: the tree they ship into. The marker skipping them is itself a claim about the public
-#: tree, so it has a test too — see ``INTERNAL_TREE_MARKER`` above.
-internal_tree_only = pytest.mark.skipif(
-    not IS_INTERNAL_TREE,
-    reason="reads a path the release does not publish; see conftest.IS_INTERNAL_TREE",
-)
+#: There is no "internal tree" marker any more, and no ``internal_tree_only``. Removed
+#: 2026-10-12: from 0.5.1 the development tree and the public repository are one tree, and
+#: the last path that distinguished them — ``scripts/deadcode_scan.py``, the one entry of
+#: ``tests/test_readme_links.py::NOT_PUBLISHED`` — was restored and published in 66778c0.
+#: The note that stood here said what to do when that happened: empty the list and delete
+#: the marker with it rather than pointing it at something arbitrary. Every test runs in
+#: every checkout; a test whose subject is not in the tree has nothing to test.
 
 
 @pytest.fixture

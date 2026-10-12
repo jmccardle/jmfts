@@ -27,7 +27,7 @@ added with no principal in sight lands in the analysis's ungated set, is not in 
 and turns this test red on the commit that adds it.
 
 The list is a decision with a reason attached, the same shape as
-``tests/test_readme_links.py::NOT_PUBLISHED``. A reason is one of three things: this verb has
+``tests/test_readme_links.py::PUBLISHED``. A reason is one of three things: this verb has
 no document to scope (fine), this verb names documents and is an OPEN GAP (said so, in
 those words), or Block A scoped past it deliberately. **The front end reads this list to know
 which verbs are safe to put on a page** — Part 2's placement of Block A alongside Block F is

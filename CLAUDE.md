@@ -88,8 +88,8 @@ python -m scripts.benchmark_centroid_recall
 `black` and `ruff` run over `jmfts_core jmfts-client tests` — everything that goes into a
 wheel, plus the suite that proves it. `.githooks/pre-commit` and
 `.github/workflows/ci.yml` run the same three paths, so the three cannot disagree.
-`jmfts-needle/`, `scripts/`, `benchmarks/` and `analysis/` are research code and are
-outside the gate on purpose; `ruff check .` reports findings there and that is expected.
+`scripts/` is outside the gate on purpose — it is tooling and one-off research, not a
+wheel — and `ruff check .` reports findings there; that is expected.
 
 Activate the hook once per clone:
 
@@ -101,7 +101,7 @@ git config core.hooksPath .githooks
 
 ### Auditing for dead code
 
-**Do not run `vulture` directly on this tree.** It reports 270 findings and almost none
+**Do not run `vulture` directly on this tree.** It reports about 256 findings and almost none
 are real: `@expose` and `@register_task_handler` make about a hundred functions reachable
 with no in-repo caller, and Pydantic fields, SQLAlchemy columns and the generated client
 account for most of the rest.
@@ -112,13 +112,17 @@ python -m scripts.deadcode_scan                  # what nothing in the repo call
 python -m scripts.deadcode_scan --published-only # what nothing in the WHEEL calls
 ```
 
-`scripts/deadcode_scan.py` finds vulture with `shutil.which`, so the commands above report
-"vulture is not installed" when it lives in `.venv/bin` and `.venv/bin` is not on `PATH`.
-Prefix it: `PATH=.venv/bin:$PATH ./.venv/bin/python -m scripts.deadcode_scan`.
+It finds `vulture` next to the running interpreter first, then on `PATH`, so
+`.venv/bin/python -m scripts.deadcode_scan` works without activating the venv.
+
+**It was missing from this tree from the 0.5.1 history switchover until 2026-10-12.** It was
+held back as an internal audit (`NOT_PUBLISHED`), and when it came back it was published,
+which retired `NOT_PUBLISHED` and `conftest`'s internal-tree marker with it.
 
 The script builds its allowlist from the **live** registries — it imports the app and
 reads `REGISTRY`, `TASK_HANDLERS`, the mounted route table, contract `model_fields`, the
-SQLAlchemy mappers — so deleting an `@expose` drops its name from the allowlist the same
+SQLAlchemy mappers, plus the fields and validators of every Pydantic model, and members of
+enums a mapped column stores — so deleting an `@expose` drops its name from the allowlist the same
 day. A checked-in list of excused names would hide exactly what the audit is for. That
 takes 260 findings down to 12, read 2026-09-10 (770 names excused). It was 17 on 2026-09-05
 and 12 on 2026-09-06, and the five that cleared are the reason to run the scan rather than
@@ -133,17 +137,16 @@ the allowlist doing its job rather than the tree getting cleaner. `--published-o
 
 Two questions, two modes. The default counts `tests/` and `scripts/` as callers. The
 `--published-only` mode does not, which surfaces code whose only caller lives outside the
-WHEEL — `pyproject.toml` packages `jmfts_core*` and `jmfts_batch*` and nothing else, so
-code reachable only from `tests/` or `scripts/` is reachable in the repository and dead in
-an installed appliance. (Both of those directories ARE in
-`tests/test_readme_links.py::PUBLISHED` — that constant is what the public *repository*
-carries, which is a different question from what the wheel carries. `scripts/deadcode_scan.py`
-cites it the same wrong way at its `REFERENCE_ONLY` definition; the mode is right, the
-citation is not.)
+WHEELS — all three, read from each distribution's `packages.find` table rather than listed
+(`jmfts_core`, `jmfts_batch`, `jmfts_client`, `jmfts_web`), so code reachable only from
+`tests/` or `scripts/` is reachable in the repository and dead in an installed appliance.
+(Both of those directories ARE in `tests/test_readme_links.py::PUBLISHED` — that constant is
+what the public *repository* carries, which is a different question from what a wheel
+carries.)
 
 Neither mode is a delete list. Coverage answers a different question again: 0% covered
-means untested, not dead. `jmfts_core/arxiv_fetch.py` is 0% and is reached through the
-`wiki:arxiv` pipeline; no test makes a network call.
+means untested, not dead — a module reached only through a network fetch is the usual case,
+because no test makes a network call.
 
 ## Architecture
 
@@ -394,8 +397,8 @@ published", and the rule did not.
 
 **`PUBLISHED` describes rather than drives, from 0.5.1 on.** It was the copy list for a
 release step that built a public tree out of an internal one, and that step no longer runs —
-development happens here. It is still the definition four tests and
-`conftest.INTERNAL_TREE_MARKER` are written against, so adding a path is still a decision
+development happens here. It is still the definition the tests in
+`tests/test_readme_links.py` are written against, so adding a path is still a decision
 about what the world sees; what changed is that the decision takes effect by committing the
 file.
 

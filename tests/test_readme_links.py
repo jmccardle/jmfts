@@ -21,8 +21,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from tests.conftest import INTERNAL_TREE_MARKER, internal_tree_only
-
 REPO = Path(__file__).resolve().parents[1]
 README = (REPO / "README.md").read_text(encoding="utf-8")
 
@@ -49,8 +47,7 @@ README = (REPO / "README.md").read_text(encoding="utf-8")
 #: **This constant describes rather than drives, from 0.5.1 on.** It was the copy list for a
 #: release step that built the public tree out of an internal one, and that step no longer
 #: runs: development happens in the public repository. It is kept because it is still the
-#: definition of "what the world sees" that four tests in this file and
-#: ``conftest.INTERNAL_TREE_MARKER`` are written against, and because the held-back half of
+#: definition of "what the world sees" that the tests in this file are written against, and because the held-back half of
 #: ``docs/`` is still held back. Adding a path here remains a decision about what the world
 #: sees; what changed is that the decision now takes effect by committing the file rather
 #: than by a copy.
@@ -72,7 +69,7 @@ PUBLISHED = (
     "Dockerfile.worker",
     "LICENSE",
     "README.md",
-    # Published 2026-09-13, and it took `conftest.INTERNAL_TREE_MARKER` with it — the marker
+    # Published 2026-09-13, and it took the then internal-tree marker with it — the marker
     # WAS this file. `CHANGELOG.md` is still the account of what shipped and this is still
     # the account of what has not; what changed is that the second one is no longer a reason
     # to keep a reader out. The dated status narrative and the archive index did not come
@@ -150,20 +147,10 @@ PUBLISHED = (
     "uv.lock",
 )
 
-#: Carved back OUT of a published directory. A path here is inside something ``PUBLISHED``
-#: names, and is still not copied.
-#:
-#: The list exists because ``PUBLISHED`` is directory-granular and one file needed to be
-#: finer than that. Keep it short: an exclusion is a thing the copy step has to remember,
-#: and the reason ``PUBLISHED`` is a constant rather than a habit is that the copy step
-#: should not have to remember anything.
-#:
-#: ``scripts/deadcode_scan.py`` is an occasional internal audit. It shells out to
-#: ``vulture``, which is deliberately not a project dependency, and it imports the app to
-#: read its registries — so on a public clone it is a script that fails with an install
-#: hint for a tool the project never asks for. ``docs/`` is where its findings are acted
-#: on, and ``docs/`` is internal.
-NOT_PUBLISHED = ("scripts/deadcode_scan.py",)
+#: There is no ``NOT_PUBLISHED`` list any more. Its one entry, ``scripts/deadcode_scan.py``,
+#: was held back as an internal audit and was restored and published on 2026-10-12
+#: (66778c0); publishing is one-way, so the list emptied and went, and with it
+#: ``conftest``'s internal-tree marker and the two tests that held the pair together.
 
 #: Suffixes that make a token without a slash still a file reference.
 FILE_SUFFIXES = {
@@ -249,70 +236,3 @@ def test_published_paths_all_exist():
         + ", ".join(missing)
         + " — delete them, or create them before the next release."
     )
-
-
-def test_the_internal_tree_marker_is_not_published():
-    """``conftest.IS_INTERNAL_TREE`` is a claim about this list, so hold it against it.
-
-    The marker is the path whose presence means "development tree". If a release adds that
-    path to ``PUBLISHED``, the marker reads True in the public tree and every test
-    ``internal_tree_only`` skips runs there — which is how 0.5.0 broke it: the marker was
-    ``docs/`` and this release published ``docs/reference/``.
-
-    This test runs in BOTH trees, deliberately. Nothing in the old arrangement failed at
-    the moment the premise stopped being true; the failure arrived a release later, in
-    public CI, as four tests nobody had changed.
-
-    **``NOT_PUBLISHED`` counts here, and it did not until 2026-09-15.** This assertion asked
-    only whether a ``PUBLISHED`` prefix reaches the marker, which is ``PUBLISHED`` read as if
-    it were directory-granular — and the exclusion list exists precisely because it is not.
-    A marker inside a published directory that ``NOT_PUBLISHED`` carves back out **is** a
-    path the release does not copy, so the public tree reads ``IS_INTERNAL_TREE`` as False
-    and the question this test asks is answered correctly. Before the change it answered
-    wrongly, in the safe direction, and that only became visible when Block E published the
-    nine ``docs/`` files and left no held-back path outside ``scripts/`` for the marker to
-    be. The test above is still the decision; this is the test modelling the release rather
-    than a looser version of it.
-    """
-    covered = [
-        p
-        for p in PUBLISHED
-        if (INTERNAL_TREE_MARKER == p or INTERNAL_TREE_MARKER.startswith(p))
-        and not any(
-            INTERNAL_TREE_MARKER == x or INTERNAL_TREE_MARKER.startswith(x) for x in NOT_PUBLISHED
-        )
-    ]
-    assert not covered, (
-        f"conftest.INTERNAL_TREE_MARKER is {INTERNAL_TREE_MARKER}, which PUBLISHED now "
-        f"carries via {covered}. The public tree will read IS_INTERNAL_TREE as True and "
-        "run every internal_tree_only test. Point the marker at something the release "
-        "does not copy — that is the decision, not this assertion."
-    )
-
-
-@internal_tree_only
-def test_excluded_paths_still_exist_and_sit_inside_a_published_one():
-    """An exclusion that stopped matching is an exclusion that silently stopped working.
-
-    Rename or delete the file and this list keeps carving out a path that is not there,
-    so the next release publishes whatever took its place. Both halves are asserted: the
-    path is real, and it is genuinely inside something ``PUBLISHED`` copies — because an
-    entry that excludes nothing is a note pretending to be a rule.
-
-    Internal tree only, and the reason is the rule working. In a public checkout every
-    ``NOT_PUBLISHED`` path is absent BY CONSTRUCTION, so asserting it exists there asks
-    the release to prove it did not do the thing it was told to do. The first public CI
-    run failed on exactly that, which is a better demonstration of the mechanism than the
-    test was — and so did the first public CI run of 0.5.0, because the marker itself had
-    stopped distinguishing the two trees. See
-    ``test_the_internal_tree_marker_is_not_published`` above.
-    """
-    for path in NOT_PUBLISHED:
-        assert (REPO / path).exists(), (
-            f"NOT_PUBLISHED names {path}, which is not in this tree. Drop the entry, or "
-            "point it at wherever that file went."
-        )
-        assert any(path.startswith(p) for p in PUBLISHED if p.endswith("/")), (
-            f"NOT_PUBLISHED names {path}, which no PUBLISHED directory contains. It was "
-            "never going to be copied, so excluding it says nothing."
-        )
