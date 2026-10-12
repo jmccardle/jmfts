@@ -2,9 +2,10 @@
 
 ``readme = "README.md"`` in pyproject.toml means this file is uploaded verbatim and
 rendered as the project page. It is also the landing page of the public repository,
-which is a **subset** of this tree: ``docs/``, ``benchmarks/``, ``ROADMAP.md`` and
-``jmfts-needle/`` are not published. Until 0.1.1 the README linked into all four, so a
-reader arriving from either place followed seven dead links.
+which is a **subset** of this tree. Until 0.1.1 the README linked into four paths that
+subset did not carry, so a reader arriving from either place followed seven dead links.
+Three of those four have since been published; ``jmfts-needle/`` and ``benchmarks/`` have
+not, and neither has the held-back half of ``docs/`` — see ``PUBLISHED`` below.
 
 ``PUBLISHED`` below is the list of top-level paths the release copies into the public
 repository. ``docs/RELEASING.md`` cites this constant rather than repeating it, so the
@@ -53,6 +54,12 @@ README = (REPO / "README.md").read_text(encoding="utf-8")
 #: ``docs/`` is still held back. Adding a path here remains a decision about what the world
 #: sees; what changed is that the decision now takes effect by committing the file rather
 #: than by a copy.
+#:
+#: **And it is one-way for a ``docs/`` file.** ``docs/SPRINT_0_6_0.md`` question 4.5 says so
+#: where it decided which of them to publish: publishing later is always available,
+#: unpublishing is not. Ten landed on 2026-09-15 and three sprint plans are held
+#: permanently, which is why the entries below carry dates and reasons rather than only
+#: paths.
 PUBLISHED = (
     ".dockerignore",
     ".env.example",
@@ -75,21 +82,53 @@ PUBLISHED = (
     "bump-version.sh",
     "deploy/",
     "docker-compose.yml",
-    # The ONLY part of docs/ that ships, and it ships because none of it is written by
-    # hand: `scripts/generate_reference.py` renders all three pages from the registries the
-    # appliance reads at runtime, and `tests/test_reference_docs.py` refuses a stale or
-    # hand-written one. The working record in `docs/` explains WHY the appliance is shaped
-    # the way it is and stays internal; these say WHAT it accepts, which is what an
-    # integrator needs and what the held-back citations currently deny them.
+    # The only GENERATED part of docs/ that ships, and it ships because none of it is
+    # written by hand: `scripts/generate_reference.py` renders all three pages from the
+    # registries the appliance reads at runtime, and `tests/test_reference_docs.py` refuses
+    # a stale or hand-written one. It was the ONLY part of docs/ that shipped until
+    # 2026-09-13; these say WHAT the appliance accepts, and the specifications below now say
+    # WHY beside them.
     "docs/reference/",
     # The CURRENT sprint plan, and only the current one. `ROADMAP.md` above says what is
     # open and this says what is being done about it in this release; a reader who can see
     # the first and not the second can see that a decision was made and not what it was.
-    # The plans for releases already cut stay internal until they have had the review pass
-    # the README's note describes — so this file cites `docs/SPRINT_0_4_0.md` and
+    # The plans for releases already cut stay internal PERMANENTLY, which stopped being
+    # "until they have had a review pass" on 2026-09-13 — `docs/SPRINT_0_6_0.md` question
+    # 4.5 is the decision and its reasoning. So this file cites `docs/SPRINT_0_4_0.md` and
     # `docs/SPRINT_0_5_0.md` the way every other citation to a held-back document works,
     # and says so where it does it.
     "docs/SPRINT_0_6_0.md",
+    # The specifications shipped code cites, published 2026-09-15 — `SPRINT_0_6_0.md`
+    # Block E step 4, deciding 4.5. 530 citations from files in this list name these three
+    # (read 2026-10-12; 500 on 2026-09-15), and until then every one of them resolved to
+    # nothing. Each carries a dated
+    # review note at its head saying what in it had gone false and was corrected; the
+    # review pass is the entry condition, not the citation count.
+    #
+    # They cite `docs/SPRINT_0_3_0.md`, `docs/SPRINT_0_4_0.md` and `docs/SPRINT_0_5_0.md`,
+    # which stay held. That is expected and those citations must not be deleted — `CLAUDE.md`
+    # calls them the anchors the documents would be republished against, and for these three
+    # the anchor is now permanent rather than pending.
+    "docs/INGEST_SPEC.md",
+    "docs/OFFICE_SPEC.md",
+    "docs/SPRINT_JOBS.md",
+    # The measurement records, published 2026-09-15 — Block E step 5. Each one is the
+    # evidence behind a decision the code carries, and three of 0.6.0's own Part 4 questions
+    # cite them for their numbers. `docs/STRESS_CORPUS.md` was redacted in the same commit:
+    # it measures a corpus of the author's own documents on a named machine, and neither the
+    # machine's name nor two of the filenames survive the review pass.
+    "docs/ANN_INDEX_HEALTH.md",
+    "docs/CORPUS.md",
+    "docs/MEASURE_BM25_BOUNDARY.md",
+    # Committed 2026-09-15 by `b9fcfee` as a new record, outside the Block E pass and without
+    # an entry here, and on the public remote ever since — so it was published already and
+    # this line describes that rather than deciding it, which is what this list does from
+    # 0.5.1 on. Its review note is dated 2026-10-12. Cited from `scripts/` and from
+    # `docs/SPRINT_0_6_0.md` step 8.
+    "docs/MEASURE_MAXSIM_MARGIN.md",
+    "docs/MEASURE_SHACL_SCOPE.md",
+    "docs/MEASURE_TYPED_WALK.md",
+    "docs/STRESS_CORPUS.md",
     "jmfts-client/",
     # The THIRD distribution, added 2026-09-13 with `docs/SPRINT_0_6_0.md` Block F step 19.
     # Published for the reason `jmfts-client/` is: it is a distribution living in this tree,
@@ -223,9 +262,25 @@ def test_the_internal_tree_marker_is_not_published():
     This test runs in BOTH trees, deliberately. Nothing in the old arrangement failed at
     the moment the premise stopped being true; the failure arrived a release later, in
     public CI, as four tests nobody had changed.
+
+    **``NOT_PUBLISHED`` counts here, and it did not until 2026-09-15.** This assertion asked
+    only whether a ``PUBLISHED`` prefix reaches the marker, which is ``PUBLISHED`` read as if
+    it were directory-granular — and the exclusion list exists precisely because it is not.
+    A marker inside a published directory that ``NOT_PUBLISHED`` carves back out **is** a
+    path the release does not copy, so the public tree reads ``IS_INTERNAL_TREE`` as False
+    and the question this test asks is answered correctly. Before the change it answered
+    wrongly, in the safe direction, and that only became visible when Block E published the
+    nine ``docs/`` files and left no held-back path outside ``scripts/`` for the marker to
+    be. The test above is still the decision; this is the test modelling the release rather
+    than a looser version of it.
     """
     covered = [
-        p for p in PUBLISHED if INTERNAL_TREE_MARKER == p or INTERNAL_TREE_MARKER.startswith(p)
+        p
+        for p in PUBLISHED
+        if (INTERNAL_TREE_MARKER == p or INTERNAL_TREE_MARKER.startswith(p))
+        and not any(
+            INTERNAL_TREE_MARKER == x or INTERNAL_TREE_MARKER.startswith(x) for x in NOT_PUBLISHED
+        )
     ]
     assert not covered, (
         f"conftest.INTERNAL_TREE_MARKER is {INTERNAL_TREE_MARKER}, which PUBLISHED now "

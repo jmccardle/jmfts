@@ -191,7 +191,8 @@ python -m scripts.generate_client
 `tests/test_client_codegen.py` fails if it is stale, and `tests/test_client_roundtrip.py`
 drives the generated client against the real app to check the wire, not just the shape.
 
-**`docs/reference/` is generated too, and it is the only part of `docs/` that ships.**
+**`docs/reference/` is generated too, and it is the only GENERATED part of `docs/` that
+ships.**
 Three pages — what can be ingested, what gets indexed by which rung, what can be retrieved
 and under which filters — rendered from `INGEST_USETYPES`, `TASK_ROWS`, `ATOMS`, `probe`'s
 format tables, `SEARCH_METHODS` and `Settings`. Tables only; no history, no sprint numbers.
@@ -202,9 +203,11 @@ python -m scripts.generate_reference --check   # exit 1 if any is stale
 ```
 
 `tests/test_reference_docs.py` runs the check and also refuses a hand-written page in that
-directory, because the directory is published wholesale. The working record in `docs/`
-explains WHY and stays internal; these say WHAT and ship, which is what the four hundred
-held-back citations otherwise deny an outside reader.
+directory, because the directory is published wholesale. These pages say WHAT the appliance
+accepts; the specifications beside them say WHY, and since 2026-09-15 both ship. The
+division still holds and is why both exist: a generated page cannot drift from the code and
+carries no argument, and a specification carries nothing but argument and has to be reviewed
+by hand before it can be published.
 
 **`jmfts-web/jmfts_web/static/client/` is generated too, and it is the THIRD generated
 artefact with the same seal.** Four files — the operation table, the verb class and their two
@@ -264,7 +267,9 @@ a rung means registering a handler.
 
 `docs/INGEST_SPEC.md` is the normative specification for the pipeline and
 `docs/SPRINT_JOBS.md` for the declaration machinery; between them they are cited by around
-three hundred source comments, by part and section.
+370 source comments (read 2026-10-12), by part and section, and **both are in this repository** — so a
+citation to 5.3 or to Phase 3 resolves. Read each one's dated review note first: they are the
+working record, and what has moved under them is marked in place rather than edited out.
 
 ### Office formats, in three dependency tiers
 
@@ -338,9 +343,9 @@ unconditional rather than tagging along with subtree/`as_of`/access filtering.
 ## Test Corpus
 
 `tests/corpus/` is the fidelity corpus for office formats — one vocabulary of pattern
-names interrogated out of `probe`, a manifest with one record per file, and twenty
+names interrogated out of `probe`, a manifest with one record per file, and 23
 generated fixtures. Nothing binary is committed; `fixtures.py` builds them
-deterministically. `docs/CORPUS.md` is the runbook.
+deterministically. `docs/CORPUS.md` is the runbook and it is published.
 
 ```bash
 python -m scripts.corpus report    # coverage, and what shipped code can measure
@@ -356,11 +361,36 @@ pytest tests/corpus -q             # no database, no optional dependency
 
 ## Documentation
 
-`docs/` is the working record. Most of it is still held back; what this repository carries is
-`README.md`, `CLAUDE.md`, `CHANGELOG.md`, `ROADMAP.md`, the current sprint plan
-(`docs/SPRINT_0_6_0.md`) and the generated `docs/reference/` pages. The subset is
-`tests/test_readme_links.py::PUBLISHED`, and `docs/RELEASING.md` cites that constant rather
-than repeating it.
+`docs/` is the working record, and **most of the load-bearing half of it is now published**.
+What this repository carries is `README.md`, `CLAUDE.md`, `CHANGELOG.md`, `ROADMAP.md`, the
+current sprint plan (`docs/SPRINT_0_6_0.md`), the generated `docs/reference/` pages, and —
+since 2026-09-15, `SPRINT_0_6_0.md` Block E — the three specifications and the seven
+measurement records:
+
+| | |
+|---|---|
+| Specifications | `docs/INGEST_SPEC.md`, `docs/SPRINT_JOBS.md`, `docs/OFFICE_SPEC.md` |
+| Measurement records | `docs/ANN_INDEX_HEALTH.md`, `docs/STRESS_CORPUS.md`, `docs/MEASURE_BM25_BOUNDARY.md`, `docs/MEASURE_SHACL_SCOPE.md`, `docs/MEASURE_TYPED_WALK.md`, `docs/MEASURE_MAXSIM_MARGIN.md`, `docs/CORPUS.md` |
+
+The subset is `tests/test_readme_links.py::PUBLISHED`, and `docs/RELEASING.md` cites that
+constant rather than repeating it.
+
+**Each published document carries a dated review note at its head**, saying what in it had
+gone false against the code and was corrected. **Corrections are marked in place, never
+edited in.** That is the convention `STRESS_CORPUS.md` §4 states and the others follow: *"a
+defect report that is edited into agreement with the patch stops being evidence that the
+patch was needed."* A document that says something the tree no longer does, with a dated
+note under it saying so, is worth more than one silently brought up to date — and a
+citation to a section has to still resolve to the section that was cited.
+
+**The sprint plans and the archive stay internal, permanently, and that is decided rather
+than pending.** `docs/SPRINT_0_6_0.md` question 4.5, 2026-09-13: 0.6.0 is already past
+`docs/SPRINT_0_3_0.md`, `docs/SPRINT_0_4_0.md` and `docs/SPRINT_0_5_0.md`, so everything
+open in them is a numbered step in the current plan, and publishing them would hand a
+reader an earlier, worse copy of a plan they can already read. **Around two hundred
+citations to those three names therefore stay dangling permanently.** Do not treat them as
+broken links and do not delete them; the reason changed from "not published yet" to "not
+published", and the rule did not.
 
 **`PUBLISHED` describes rather than drives, from 0.5.1 on.** It was the copy list for a
 release step that built a public tree out of an internal one, and that step no longer runs —
@@ -378,52 +408,62 @@ git grep -hoE "(research/)?[A-Z][A-Z0-9_-]*\.md" -- \
   sort | uniq -c | sort -rn
 ```
 
-Read 2026-09-13: `SPRINT_JOBS.md` 158, `INGEST_SPEC.md` 149, `SPRINT_0_5_0.md` 87,
-`OFFICE_SPEC.md` 80, `SPRINT_0_3_0.md` 70, `SPRINT_0_4_0.md` 44, `STRESS_CORPUS.md` 28,
-`ANN_INDEX_HEALTH.md` 26, `CORPUS.md` 12,
-`RELEASING.md` 11, `ROADMAP.md` 12 (**published 2026-09-13**, so these twelve now resolve),
-`MEASURE_SHACL_SCOPE.md` 7, `KNOWN-DEFECTS.md` 7 (D1–D4
-anchors, all resolved; the file moved to `docs/archive/` on 2026-09-04 and the six
-citations that carried a path were updated with it — the bare `KNOWN-DEFECTS D1` form
-names an anchor, not a path, and was left alone),
-`AGENTIC_KNOWLEDGEBASE.md` 4, `MEASURE_TYPED_WALK.md` 5, `archive/ROADMAP_HISTORY.md` 2,
-`RERANKER_CRITIQUE.md` 1,
-`research/INTERMEDIATE_FORMATS.md` 1,
-`MEASURE_BM25_BOUNDARY.md` 1, `archive/SPRINT_0_4_0_DRAFT.md` 1, `SPRINT_0_6_0.md` 1. The
-command also reports
+Read 2026-10-12, on the Block E branch rebased onto 0.5.2. **Resolving now:**
+`SPRINT_JOBS.md` 185, `INGEST_SPEC.md` 184, `OFFICE_SPEC.md` 161, `STRESS_CORPUS.md` 37,
+`ANN_INDEX_HEALTH.md` 30, `CORPUS.md` 13, `MEASURE_BM25_BOUNDARY.md` 9,
+`MEASURE_SHACL_SCOPE.md` 8, `MEASURE_TYPED_WALK.md` 6, `MEASURE_MAXSIM_MARGIN.md` 2 — 635
+citations, of which the first nine's 633 pointed at nothing until Block E (600 when first read
+on 2026-09-15). Plus `ROADMAP.md` 14 and `SPRINT_0_6_0.md` 100, published 2026-09-13.
+
+**Still dangling, and now permanently:** `SPRINT_0_5_0.md` 91, `SPRINT_0_3_0.md` 82,
+`SPRINT_0_4_0.md` 51 — 224 by decision 4.5, not by backlog (221 on 2026-09-15). Then
+`RELEASING.md` 11, `KNOWN-DEFECTS.md` 7 (D1–D4 anchors, all resolved; the file moved to
+`docs/archive/` on 2026-09-04 and the six citations that carried a path were updated with
+it — the bare `KNOWN-DEFECTS D1` form names an anchor, not a path, and was left alone),
+`AGENTIC_KNOWLEDGEBASE.md` 4, `archive/ROADMAP_HISTORY.md` 2, `RERANKER_CRITIQUE.md` 1,
+`research/INTERMEDIATE_FORMATS.md` 1, `archive/SPRINT_0_4_0_DRAFT.md` 1. Of those seven,
+`RELEASING.md`, `AGENTIC_KNOWLEDGEBASE.md`, `RERANKER_CRITIQUE.md` and
+`research/INTERMEDIATE_FORMATS.md` have not had a review pass; `KNOWN-DEFECTS.md`,
+`ROADMAP_HISTORY.md` and `SPRINT_0_4_0_DRAFT.md` are the archive, which 4.5 holds with the
+three sprint plans — the split the README's note makes.
+
+The command also reports
 `README.md`, `CLAUDE.md`, `CHANGELOG.md` and `INVENTORY-2026-04-05.md`; the first three
 ship, and the fourth is a corpus filename in `scripts/ingest_missing_steelman.py` rather
 than a `docs/` citation. It also reports `INDEXING.md`, `INGEST.md` and `RETRIEVAL.md`,
 which are the generated `docs/reference/` pages and ship. A held-back document is absent
 from this tree by design; there is no second tree it is present in any more, only a
 directory on the author's machine. **Do not treat
-the citations as broken links to fix, and do not delete them** — they are the anchors the
-documents will be republished against.
+the citations as broken links to fix, and do not delete them** — for the seven still
+pending they are the anchors the documents will be republished against, and for the three
+plans they are anchors into a record that stays internal.
 
 The numbers move fast and unevenly — `SPRINT_0_5_0.md` went 41 → 80 in four days — which is
-why the command is here and the reading is dated. `docs/PROPOSE_TASK_RESOURCES.md` is new on
-2026-09-10 and has **zero** citations; it is the one recent document the redaction rule below
-does not reach, and that is the rule working rather than an omission.
+why the command is here and the reading is dated. `docs/PROPOSE_TASK_RESOURCES.md` has
+**zero** citations from any shipped file, checked again 2026-10-12; it is the one recent
+document the redaction rule does not reach, and that is the rule working rather than an
+omission. It therefore does not join the README's list and is not published.
 
-The public README's "A note on documentation" names the same list in prose, so a reader
-who follows a citation finds out why it goes nowhere. A release that adds a new `docs/`
-file which source comments cite adds its name there too; that is the redaction step, and
-it is the only one — no shipped file is rewritten at release time. `SPRINT_0_4_0.md` joined
-that prose list when `tests/test_filtered_recall.py` cited it and `tests/` ships.
-`SPRINT_0_5_0.md` joined it on 2026-09-06 for the same reason: nine shipped test files
-cite it. `MEASURE_SHACL_SCOPE.md` joined it the same day on ONE citation
-(`tests/test_atom_declarations.py`), which is the rule working as written — the count does
-not matter, only whether a shipped file names it.
+The public README's "A note on documentation" names the held-back list in prose, so a
+reader who follows a citation finds out why it goes nowhere. A release that adds a new
+`docs/` file which source comments cite adds its name there too; that is the redaction
+step, and it is the only one — no shipped file is rewritten at release time. **`scripts/`
+is in `PUBLISHED`**, which is the step that was missed twice, and it is why the rule says
+"shipped file" rather than "source comment": a document cited only from `scripts/` is cited
+from a shipped file. The count never mattered — `MEASURE_SHACL_SCOPE.md` joined the prose
+list on ONE citation.
 
-Four more joined it on 2026-09-10, and only one of them is new: `MEASURE_BM25_BOUNDARY.md`
-(`scripts/measure_bm25_boundary.py`), and then `MEASURE_TYPED_WALK.md`
-(`scripts/measure_typed_walk.py`), `ROADMAP_HISTORY.md`
-(`tests/test_search_context_presets.py`, `sql/schema.sql`) and `SPRINT_0_4_0_DRAFT.md`
-(`sql/migrations/017_migration_ledger.sql`), which had been cited from shipped files for
-days without being listed. **`scripts/` is in `PUBLISHED`** — that is the step that was
-missed, twice, and it is why the rule says "shipped file" rather than "source comment".
-`PROPOSE_TASK_RESOURCES.md`, also new on 2026-09-10, is NOT listed, because nothing shipped
-cites it; if something starts to, it joins.
+**Publishing works the other way round and it is one-way.** Ten names left that list on
+2026-09-15 rather than joining it — nine through Block E's pass, and
+`MEASURE_MAXSIM_MARGIN.md` by being committed to a public branch the same day, which is the
+one-way door taken without the pass; its review note came after, on 2026-10-12. 4.5 says
+explicitly that the decision cannot be retracted: publishing later is always available,
+unpublishing is not. **The entry condition
+is a review pass, not a citation count** — read for exactly three things, which is
+`SPRINT_0_6_0.md` Block E's definition: a private host name or path, a named third party
+who has not agreed to be named, and a claim about the tree that has gone false. It is not a
+rewrite and not a tidy-up. The documents are the working record and are allowed to read
+like one.
 
 ### Where the plans are, and where defects are
 
@@ -431,8 +471,12 @@ cites it; if something starts to, it joins.
 |---|---|
 | What is 0.6.0 | `docs/SPRINT_0_6_0.md`, **published** |
 | What is open, deferred, or gated — and the Experiment Log | `ROADMAP.md`, **published** |
-| What is 0.4.0 | `docs/SPRINT_0_4_0.md` |
-| What is 0.5.0 | `docs/SPRINT_0_5_0.md` |
+| How the ingest pipeline is specified | `docs/INGEST_SPEC.md`, **published 2026-09-15** |
+| How a task declares what it reads, writes and is scoped to | `docs/SPRINT_JOBS.md`, **published 2026-09-15** |
+| Office formats, the anchor, renditions, and the unbuilt write half | `docs/OFFICE_SPEC.md`, **published 2026-09-15** |
+| What the measurements behind a decision actually read | the four `docs/MEASURE_*`, `ANN_INDEX_HEALTH.md`, `STRESS_CORPUS.md`, `CORPUS.md` — **all published 2026-09-15** |
+| What is 0.4.0 | `docs/SPRINT_0_4_0.md` — **held, permanently** (4.5) |
+| What is 0.5.0 | `docs/SPRINT_0_5_0.md` — **held, permanently** (4.5) |
 | What was cut, and what verified a scope decision | `docs/ROADMAP_PLANS_AFTER_0_3_0.md` |
 | What is beyond 0.5.0 | the same file, tiers 3 through 6 |
 | What shipped | `CHANGELOG.md`, and `docs/archive/ROADMAP_HISTORY.md` behind it |

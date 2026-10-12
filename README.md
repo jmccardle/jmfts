@@ -266,45 +266,76 @@ tests/             pytest suite against an ephemeral database, plus the fidelity
 
 ## A note on documentation
 
-The design documents this code was written against — most importantly the
-ingest specification that a hundred source comments cite by section number —
-are not in this release. They are being refined for publication separately.
-The whole working record is held back, not a chosen few files, so a comment
-naming any of INGEST_SPEC.md, SPRINT_JOBS.md, OFFICE_SPEC.md, SPRINT_0_3_0.md,
-SPRINT_0_4_0.md, SPRINT_0_5_0.md, SPRINT_0_4_0_DRAFT.md, CORPUS.md, RELEASING.md,
-KNOWN-DEFECTS.md, MEASURE_SHACL_SCOPE.md, MEASURE_TYPED_WALK.md,
-MEASURE_BM25_BOUNDARY.md, MEASURE_MAXSIM_MARGIN.md, ANN_INDEX_HEALTH.md, STRESS_CORPUS.md,
-ROADMAP_HISTORY.md, AGENTIC_KNOWLEDGEBASE.md, RERANKER_CRITIQUE.md,
+**Ten of the documents this code was written against are now in this
+repository, under docs/ — including the ingest specification that 184 source
+comments cite by section number.** Nine landed on 2026-09-15, each after the
+review pass described below. The tenth, `docs/MEASURE_MAXSIM_MARGIN.md`, was
+committed the same day as a new measurement record, outside that pass, and has
+been public since; its review note is dated 2026-10-12. What is here:
+
+- `docs/INGEST_SPEC.md` — the normative specification for the ingest pipeline.
+- `docs/SPRINT_JOBS.md` — the declaration machinery behind it: atoms, evidence,
+  rules, scopes and the settling walk.
+- `docs/OFFICE_SPEC.md` — office formats in three dependency tiers, the anchor,
+  renditions, and the write half that is not built.
+- `docs/ANN_INDEX_HEALTH.md`, `docs/STRESS_CORPUS.md`,
+  `docs/MEASURE_BM25_BOUNDARY.md`, `docs/MEASURE_SHACL_SCOPE.md`,
+  `docs/MEASURE_TYPED_WALK.md`, `docs/MEASURE_MAXSIM_MARGIN.md`, `docs/CORPUS.md` —
+  the measurement records, each one the evidence behind a decision the code carries.
+
+**They are the working record and they read like one.** Each carries a dated
+review note at the top saying what in it had gone false against the code and was
+corrected, and corrections are marked in place rather than edited in — a defect
+report rewritten into agreement with its patch stops being evidence the patch
+was needed. They cite each other, and they cite documents that are still held
+back; those citations are anchors, not broken links.
+
+**What is still held back.** A comment naming SPRINT_0_3_0.md, SPRINT_0_4_0.md,
+SPRINT_0_5_0.md, SPRINT_0_4_0_DRAFT.md, ROADMAP_HISTORY.md, KNOWN-DEFECTS.md,
+RELEASING.md, AGENTIC_KNOWLEDGEBASE.md, RERANKER_CRITIQUE.md,
 API_UNIFICATION_CONTRACT_NOTES.md or research/INTERMEDIATE_FORMATS.md points at
-a document that will land later.
+a document that is not here. Five of them — RELEASING.md,
+AGENTIC_KNOWLEDGEBASE.md, RERANKER_CRITIQUE.md, API_UNIFICATION_CONTRACT_NOTES.md
+and research/INTERMEDIATE_FORMATS.md — have not had a review pass yet. The other six
+are the three sprint plans and the archive behind them, and they are a different
+case:
 
-**`ROADMAP.md` left that list on 2026-09-13 and is the first name to do so.** It
-is here, at the top level: what is open, what is deferred and what gates each,
-and the Experiment Log — including the negative results, which are the reason
-several things are *not* in the tree. `docs/SPRINT_0_6_0.md` is the current
-sprint plan and is here for the same reason. The plans for releases already cut
-are not.
+**The sprint plans stay internal, and that is a decision rather than a backlog.**
+It was taken on 2026-09-13 and the reasoning is in `docs/SPRINT_0_6_0.md`
+question 4.5: 0.6.0 is already past the plans for 0.3.0, 0.4.0 and 0.5.0, so
+everything still open in them is a numbered step in the current plan, and
+publishing them would hand a reader an earlier, worse copy of a plan they can
+already read. Around two hundred citations to those three names will therefore
+stay dangling permanently. That is a real cost and it is a decided one. The same
+decision holds the archive behind them, which is history that `CHANGELOG.md`
+already summarises.
 
-Those names are deliberately not written as links. There is nothing in this
+**`ROADMAP.md` left the held-back list on 2026-09-13 and was the first name to
+do so.** It is here, at the top level: what is open, what is deferred and what
+gates each, and the Experiment Log — including the negative results, which are
+the reason several things are *not* in the tree. `docs/SPRINT_0_6_0.md` is the
+current sprint plan and is here for the same reason.
+
+Held-back names are deliberately not written as links. There is nothing in this
 tree for them to point at, and marking them up as paths would promise
 otherwise.
 
-**This list is meant to shrink.** Up to 0.5.0 it could not: the public tree was
-a per-release squash of a private one and holding a document back was the same
-act as publishing the code. From 0.5.1 development happens here, so a document
-joins this repository when it has had a review pass rather than when a release
-runs. A name above that is still here in a later version is one that has not had
-that pass yet.
+**The remaining list is meant to shrink, less the three sprint plans.** Up to
+0.5.0 it could not: the public tree was a per-release squash of a private one
+and holding a document back was the same act as publishing the code. From 0.5.1
+development happens here, so a document joins this repository when it has had a
+review pass rather than when a release runs. A name still held back in a later
+version is one that has not had that pass — or, for the three plans, one that is
+not getting it.
 
-**`docs/reference/` is the exception, and it is here now.** Around four hundred
-source comments cite a held-back document, so for a reader outside this project
-the explanation layer of the code pointed at files they could not open. The
-three pages under `docs/reference/` are the answer to that: they say what the
-appliance accepts, indexes and retrieves, in tables, with no history and no
-argument. They ship because nothing in them is written by hand — they are
-generated from the registries the appliance itself reads, so publishing them
-costs no editorial pass and cannot drift from the code. What stays internal is
-the *why*, which is what those citations are anchors for.
+**`docs/reference/` answers a different question and is generated.** The three
+pages under it say what the appliance accepts, indexes and retrieves, in tables,
+with no history and no argument. Nothing in them is written by hand — they are
+rendered from the registries the appliance itself reads, so they cost no
+editorial pass and cannot drift from the code. They were the first part of the
+working record to ship, back when almost seven hundred source comments cited a
+document an outside reader could not open. The ten documents listed above are
+the *why* behind those same registries; these three are the *what*.
 
 ## Licence
 

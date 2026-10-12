@@ -34,13 +34,21 @@ document *declares*, while half of Part 10's fixture generator produces containe
 attacks (zip-slip, duplicate members, a truncated archive) that Part 2 names no pattern
 for. Those terms are carried as ``PROPOSED``, they are counted separately, and
 ``docs/CORPUS.md`` writes out the Part 2 rows that would close the gap.
+
+**The three spec-parsing tests below stopped being ``internal_tree_only`` on 2026-09-15**,
+because their subject stopped being internal: ``docs/OFFICE_SPEC.md`` was published
+(``SPRINT_0_6_0.md`` Block E step 4). ``conftest.INTERNAL_TREE_MARKER`` was pointed at that
+file precisely so this would happen — *"if that document is ever published those tests
+SHOULD start running, and this marker is what makes them"* — so removing the mark is the
+mechanism finishing rather than an exemption being taken. The marker moved to
+``scripts/deadcode_scan.py`` in the same commit, and ``conftest`` says why that is the only
+path left that can be one.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from tests.conftest import internal_tree_only
 from tests.corpus.vocabulary import (
     Kind,
     Status,
@@ -87,7 +95,6 @@ def test_no_probed_term_describes_a_pattern_probe_stopped_emitting():
     )
 
 
-@internal_tree_only
 def test_every_pattern_the_spec_names_is_in_the_vocabulary():
     """``OFFICE_SPEC.md`` Part 2's tables, parsed, against the table."""
     named = spec_patterns()
@@ -99,7 +106,6 @@ def test_every_pattern_the_spec_names_is_in_the_vocabulary():
     )
 
 
-@internal_tree_only
 def test_every_planned_term_is_named_by_the_spec():
     """A planned term with no spec row is an invention, which is the drift itself."""
     named = spec_patterns()
@@ -115,7 +121,6 @@ def test_every_planned_term_is_named_by_the_spec():
     )
 
 
-@internal_tree_only
 def test_proposed_terms_are_the_gap_and_are_named_as_such():
     """PROPOSED means: this corpus can label the file, and no shipped code can measure it.
 
