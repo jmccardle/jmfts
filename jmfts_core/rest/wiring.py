@@ -55,6 +55,7 @@ from jmfts_client.contracts.rdf import TurtleDocument
 from jmfts_client.contracts.upload import UploadedFile
 from jmfts_core.database import get_db
 from jmfts_core.registry import REGISTRY, ExposeSpec
+from jmfts_core.rest.ignored_fields import IgnoredFieldsRoute
 
 #: What ``TurtleDocument`` becomes on the wire. A single non-model ``Body`` parameter is
 #: NOT embedded by FastAPI, so the whole request body is the value — which is the point:
@@ -258,7 +259,7 @@ def build_exposed_router() -> APIRouter:
     Importing the service modules (which triggers ``@register_service``) must happen
     before this is called; ``jmfts_core.rest.main`` imports them, then mounts this router.
     """
-    router = APIRouter()
+    router = APIRouter(route_class=IgnoredFieldsRoute)
     for spec in REGISTRY:
         extra: dict = {}
         if spec.media_type:
