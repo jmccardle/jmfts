@@ -34,8 +34,10 @@ from jmfts_client.contracts.runner import (
 )
 from jmfts_core.embedding import TextTooLongError, get_embedding_service
 from jmfts_core.rest.auth import RUNNER_PREFIX, require_runner
+from jmfts_core.rest.ignored_fields import IgnoredFieldsRoute
 
 router = APIRouter(
+    route_class=IgnoredFieldsRoute,
     prefix=RUNNER_PREFIX,
     tags=["runner"],
     dependencies=[Depends(require_runner)],
