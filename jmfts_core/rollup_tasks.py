@@ -1065,9 +1065,9 @@ def summarize_span(text: str, settings: Settings, model: str) -> str:
 
     Deliberately not ``summarization._llm_summarize``. That one is written for a RAPTOR
     cluster — its prompt says the passages "belong to the same topic cluster", which is
-    the wrong instruction for a span whose order carries meaning — and it silently
-    truncates its input to a character budget, which would produce a summary of the first
-    part of a span and label it a summary of the span.
+    the wrong instruction for a span whose order carries meaning. (It also used to cut its
+    input to a character budget, which would have produced a summary of the first part of
+    a span labelled a summary of the span; that cut is gone, and both now send everything.)
 
     The full text is sent. If it is over the model's context the server refuses, the
     worker classifies that refusal and records it, and the answer is to segment further —

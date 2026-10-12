@@ -92,7 +92,6 @@ class JMFTSClient:
         *,
         search_method: str = "auto",
         top_k: int = 5,
-        max_context_tokens: int = 4096,
         llm_model: Optional[str] = None,
         usetype: Optional[str] = None,
         parent_id: Optional[int] = None,
@@ -101,7 +100,6 @@ class JMFTSClient:
             "query": query,
             "search_method": search_method,
             "top_k": top_k,
-            "max_context_tokens": max_context_tokens,
         }
         if llm_model is not None:
             body["llm_model"] = llm_model

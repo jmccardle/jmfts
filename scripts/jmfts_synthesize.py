@@ -93,12 +93,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=None,
         help="Override LLM model (only with --use-llm).",
     )
-    parser.add_argument(
-        "--max-context-tokens",
-        type=int,
-        default=4096,
-        dest="max_context_tokens",
-    )
 
     parser.add_argument("--no-ancestors", action="store_true")
     parser.add_argument("--no-triples", action="store_true")
@@ -115,7 +109,6 @@ def main(argv: Optional[list[str]] = None) -> int:
                     args.query,
                     search_method=args.method,
                     top_k=args.top_k,
-                    max_context_tokens=args.max_context_tokens,
                     llm_model=args.llm_model,
                     usetype=args.usetype,
                     parent_id=args.parent_id,

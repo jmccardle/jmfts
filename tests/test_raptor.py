@@ -7,6 +7,7 @@ See test_methodology_raptor_pipeline.md § 2.1 for the full test plan.
 """
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -16,6 +17,7 @@ from jmfts_core.summarization import (
     _build_knn_graph,
     _leiden_cluster,
     _detect_bridge_chunks,
+    _llm_summarize,
     raptor_summarize,
     ClusterInfo,
 )
@@ -261,6 +263,36 @@ class TestSeedReproducibility:
         ids_1 = sorted([sorted(c.member_ids) for c in c1])
         ids_2 = sorted([sorted(c.member_ids) for c in c2])
         assert ids_1 == ids_2
+
+
+class TestSummarizeSendsEveryPassage:
+    """Every passage in a cluster reaches the summarization request.
+
+    `_llm_summarize` used to cut the joined passages at `summarization_context * 4`
+    characters — 16,384 at the default — on an assumed four characters per token, mid-word
+    and with no record. The prompt still said "Summarize the following N passages", so the
+    summary claimed to cover passages the model never saw. JMFTS owns no LLM tokenizer and
+    cannot know what fits; an over-context request fails at the endpoint instead.
+    """
+
+    def test_passages_past_the_old_budget_are_all_sent(self, monkeypatch):
+        seen = {}
+
+        async def _capture(**kwargs):
+            seen["messages"] = kwargs["messages"]
+            return SimpleNamespace(text="a summary", usage={})
+
+        monkeypatch.setattr("jmfts_core.summarization.complete", _capture)
+
+        texts = [f"passage-{i}-start " + ("w " * 2_000) + f"passage-{i}-end" for i in range(12)]
+        assert sum(len(t) for t in texts) > 16_384
+
+        settings = Settings(llm_base_url="http://llm.invalid:8853", llm_model="never-called")
+        _run(_llm_summarize(texts, settings, None))
+
+        user = next(m["content"] for m in seen["messages"] if m["role"] == "user")
+        for i, text in enumerate(texts, 1):
+            assert f"[Passage {i}]\n{text}" in user
 
 
 # ============================================================================

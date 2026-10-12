@@ -259,7 +259,7 @@ class TestSynthesisSeesItToo:
 
         seen = {}
 
-        async def _capture(*, query, documents, max_context_tokens, llm_model):
+        async def _capture(*, query, documents, llm_model):
             seen["documents"] = documents
             return SynthesisResult(text="an answer", model="stub", usage={})
 

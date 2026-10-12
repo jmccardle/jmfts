@@ -764,7 +764,6 @@ class SearchService:
             result: SynthesisResult = await synthesize(
                 query=request.query,
                 documents=doc_dicts,
-                max_context_tokens=request.max_context_tokens,
                 llm_model=llm_model,
             )
             synthesis_text = result.text

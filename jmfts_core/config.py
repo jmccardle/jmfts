@@ -296,8 +296,11 @@ class Settings(BaseSettings):
     ensonet_timeout: float = 180.0  # generous for cold-start model loading
 
     # Summarization request shape. These describe how to call the configured endpoint, not
-    # which one — the endpoint is llm_base_url above.
-    summarization_context: int = 4096
+    # which one — the endpoint is llm_base_url above. There is no context-size setting: it
+    # existed only to truncate the passages to `context * 4` characters, and that cut is
+    # gone. A `.env` still naming JMFTS_SUMMARIZATION_CONTEXT is refused at load
+    # (`extra_forbidden`, since `.env` keys are validated against these fields), which is
+    # the intent: a knob that does nothing should not look as though it did something.
     summarization_temperature: float = 0.3
 
     # OpenAI-compatible endpoint settings (used by synthesis, RAPTOR, extraction)

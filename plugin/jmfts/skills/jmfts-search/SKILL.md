@@ -54,8 +54,10 @@ asks the configured LLM to compose. Without `--use-llm`, the script
 returns enriched search results (with ancestors and triples expanded) but
 does not invoke the LLM.
 
-Useful flags: `--top-k 5`, `--max-context-tokens 4096`,
-`--llm-model <override>`.
+Useful flags: `--top-k 5`, `--llm-model <override>`. Every one of the
+top-K documents is sent to the LLM whole; if they do not fit its context
+window the endpoint refuses and the response says `llm_available: false`,
+so lower `--top-k` rather than expecting the context to be trimmed.
 
 ## Scope and exclusions
 
