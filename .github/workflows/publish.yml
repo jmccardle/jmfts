@@ -13,20 +13,25 @@
 # `github.com/jmccardle/jmfts`. Run from the internal git remote it has no identity to
 # exchange, and no amount of configuration here changes that.
 #
-# THE BOOTSTRAP IS DONE FOR THESE TWO NAMES, and the note below is kept because it is
-# waiting for the next name anyone points this file at. Both `jmfts` and `jmfts-client`
-# exist on PyPI and each carries a trusted publisher under the project itself; the earlier
-# wording here said neither name existed, which stopped being true at 0.2.0.
+# THE BOOTSTRAP IS DONE FOR `jmfts` AND `jmfts-client`: both exist on PyPI and each carries
+# a trusted publisher under the project itself.
 #
-# Trusted Publishing cannot create a project that has never been published. A new project
-# is registered as a *pending* publisher, and PyPI allows exactly one pending row per
-# configuration, so the second name registered against this same (owner, repo, workflow,
-# environment) is refused with "A pending trusted publisher matching this configuration has
-# already been registered for a different project name." Each distribution therefore needs
-# ONE hand upload with an account-scoped token before this file can ever publish it — and a
-# hand upload does NOT consume the pending row, which is what made 0.2.1 fail with
-# `invalid-pending-publisher`. docs/RELEASING.md step 5 is the long version; read it before
-# adding a second entry to the `dist` matrix below.
+# A name that has never been published is registered as a *pending* publisher, and the
+# first trusted upload creates the project and consumes the pending row. No hand upload is
+# needed. Two constraints, both learned at 0.2.x:
+#
+#   1. PyPI allows ONE pending row per (owner, repo, workflow, environment). A second name
+#      registered while the first is still pending is refused with "A pending trusted
+#      publisher matching this configuration has already been registered for a different
+#      project name." So new names are bootstrapped one release at a time.
+#   2. A hand upload does NOT consume the pending row, and a pending row cannot authorise an
+#      upload to a project that already exists. Hand-uploading a name that has a pending
+#      row is what made 0.2.1 fail with `invalid-pending-publisher`; the fix then was a
+#      publisher added under each project and the pending row deleted.
+#
+# `jmfts-web` is the third name. Its pending publisher was registered on pypi.org and
+# test.pypi.org on 2026-10-12, with no other pending row against this configuration, so
+# v0.6.0 is its first, creating, upload. docs/RELEASING.md step 5 is the long version.
 #
 # "Fail Early" (CLAUDE.md): no `continue-on-error`, no `|| true`, no `skip-existing`. A
 # half-finished release must fail loudly, because a PyPI version number cannot be reused
@@ -119,10 +124,9 @@ jobs:
           # front end and has no dependencies, so it is the cheapest of the three to build
           # and the one whose absence from an appliance is a deployment choice.
           #
-          # THIS NAME HAS NEVER BEEN PUBLISHED, so read the pending-publisher note at the
-          # top of this file before the first release that includes it: one hand upload with
-          # an account-scoped token is required, and a hand upload does not consume the
-          # pending row. That is what made 0.2.1 fail with `invalid-pending-publisher`.
+          # First published at v0.6.0 through its pending publisher — see the note at the
+          # top of this file. Do NOT hand upload it: a hand upload leaves the pending row
+          # matching nothing, which is what made 0.2.1 fail with `invalid-pending-publisher`.
           - name: jmfts-web
             path: jmfts-web
             version_file: jmfts-web/jmfts_web/__init__.py
