@@ -225,18 +225,48 @@ requires_db = pytest.mark.skipif(not DB_READY, reason="test database not provisi
 #: than being invalidated a second time. The mechanism worked — the marker is a claim about
 #: ``PUBLISHED`` and there is a test that holds it against ``PUBLISHED`` in both trees.
 #:
-#: ``docs/OFFICE_SPEC.md`` is the marker now, and it is the narrower and more honest
-#: choice: it is not merely absent from the public tree, it is what three of the skipped
-#: tests actually READ. ``tests/corpus/test_vocabulary.py`` parses Part 2's pattern tables,
-#: so if that document is ever published those tests SHOULD start running, and this marker
-#: is what makes them. The old marker had no such relationship to anything it skipped.
+#: ``docs/OFFICE_SPEC.md`` was the marker from 0.5.0 until 2026-09-15, and it was chosen
+#: for a relationship it has now used up: it was what three of the skipped tests actually
+#: READ, so that *"if that document is ever published those tests SHOULD start running, and
+#: this marker is what makes them"*. It was published on 2026-09-15
+#: (``SPRINT_0_6_0.md`` Block E step 4) and those three tests are no longer marked, which is
+#: the mechanism finishing rather than failing. The note that stood here also named the risk
+#: it was trading into — *"publishing ``docs/`` wholesale is what this file would need to
+#: survive next"* — and nine files is not wholesale, but it is the same move.
 #:
-#: The risk this trades into is the one the 0.5.0 failure came from — a ``docs/`` path can
-#: be reached by publishing a ``docs/`` subdirectory — and it is bounded by the same test,
-#: which compares the marker against every entry in ``PUBLISHED`` by prefix. Publishing
-#: ``docs/`` wholesale is what this file would need to survive next, and that is a decision
-#: somebody makes on purpose rather than a side effect.
-INTERNAL_TREE_MARKER = "docs/OFFICE_SPEC.md"
+#: **``scripts/deadcode_scan.py`` is the marker now, and it is the only path left that is
+#: both in this tree and genuinely not copied.** That is what a marker has to be, and it is
+#: why the choice is narrow rather than a preference: ``NOT_PUBLISHED`` is a one-entry list
+#: and this is the entry. The file is an occasional internal audit — it shells out to
+#: ``vulture``, which is deliberately not a project dependency — so on a public clone it is
+#: a script that fails with an install hint for a tool the project never asks for, which is
+#: exactly why it is carved out.
+#:
+#: **The marker distinguishes nothing today, and saying so is the point of this note.**
+#: ``scripts/deadcode_scan.py`` IS NOT IN THIS TREE — ``NOT_PUBLISHED`` names a file that
+#: is gone — so ``IS_INTERNAL_TREE`` reads False here and in a public checkout alike, and
+#: ``internal_tree_only`` skips its tests in both. That was already true before this commit:
+#: the old marker was ``docs/OFFICE_SPEC.md``, which was equally absent, so the six tests it
+#: gated ran NOWHERE for as long as `docs/` was empty. Three of those were
+#: ``tests/test_reference_docs.py``'s and three were ``tests/corpus/test_vocabulary.py``'s;
+#: all six are unmarked now, because their subjects are published and the mark was wrong by
+#: this module's own rule.
+#:
+#: What is left gated is one test —
+#: ``test_excluded_paths_still_exist_and_sit_inside_a_published_one`` — whose subject is
+#: ``NOT_PUBLISHED`` itself, and which therefore cannot fire on the very condition it
+#: exists to catch: an exclusion pointing at a path that is not there. **That is a live
+#: defect and it is recorded here rather than worked around.** Either
+#: ``scripts/deadcode_scan.py`` comes back — ``CLAUDE.md`` documents running it, so
+#: something already assumes it is here — or ``NOT_PUBLISHED`` empties, and then this
+#: marker has no referent at all and ``internal_tree_only`` should be deleted with it
+#: rather than pointed at something arbitrary.
+#:
+#: The marker still has to be a path the release does not copy, which is why it moved here
+#: rather than to a ``docs/`` file: from 0.5.1 the development tree and the public
+#: repository are the same tree, and ``NOT_PUBLISHED`` is the whole of what is left of the
+#: difference between them.
+INTERNAL_TREE_MARKER = "scripts/deadcode_scan.py"
 
 #: True in the development tree, False in a public checkout.
 IS_INTERNAL_TREE = (_REPO_ROOT / INTERNAL_TREE_MARKER).is_file()

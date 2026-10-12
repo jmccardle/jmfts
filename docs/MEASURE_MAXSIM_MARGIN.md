@@ -5,6 +5,15 @@
 port 5496 — postgres 16.15, pgvector 0.8.6, `JMFTS_EMBEDDING_DEVICE=cpu`, which is the
 image and the device `.github/workflows/ci.yml` runs the suite on.
 
+> **Reviewed for publication 2026-10-12, after the fact.** This record was committed on
+> 2026-09-15 (`b9fcfee`) outside `SPRINT_0_6_0.md` Block E's pass and has been on the public
+> remote since, so the review could not decide whether to publish it — only whether it says
+> anything it should not. Read for Block E's three things: no private host name or path (the
+> database is a throwaway container on a loopback port), no named third party, and no claim
+> about the tree that has gone false — `tests/test_maxsim_recall.py`, `RECALL_FLOOR`,
+> `scripts/measure_maxsim_margin.py`, `jmfts_core/repositories/search.py` and
+> `.github/workflows/ci.yml` have no commits after it. Nothing was changed below this note.
+
 4.4 named three accounts of the reading that failed public CI and said the one thing
 nobody had done was to **run the fixture enough times to get a distribution rather than a
 reading**. This is that distribution: **79 readings**, and no threshold was moved to fit

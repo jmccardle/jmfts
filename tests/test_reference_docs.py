@@ -13,12 +13,20 @@ from __future__ import annotations
 from pathlib import Path
 
 from scripts.generate_reference import TARGET_DIR, generate
-from tests.conftest import internal_tree_only
 
 REPO = Path(__file__).resolve().parents[1]
 
+# NOT ``internal_tree_only``, since 2026-09-15, and the mark was wrong by ``conftest``'s own
+# rule for as long as it was here: that mark is for a test whose SUBJECT is internal, and
+# this file's subject is ``docs/reference/`` and ``scripts/generate_reference.py``, both of
+# which ``tests/test_readme_links.py::PUBLISHED`` carries. The public gate is where a stale
+# generated page matters most — it is what an outside reader reads.
+#
+# It cost real coverage while it stood. ``INTERNAL_TREE_MARKER`` pointed at a ``docs/`` file
+# absent from this tree, so ``IS_INTERNAL_TREE`` was False HERE too and these three ran
+# nowhere at all.
 
-@internal_tree_only
+
 def test_reference_pages_are_not_stale():
     """Every page on disk is what the generator would write from the live registries."""
     for name, expected in generate().items():
@@ -30,7 +38,6 @@ def test_reference_pages_are_not_stale():
         )
 
 
-@internal_tree_only
 def test_every_reference_page_carries_the_do_not_edit_banner():
     """A reader who opens one of these has to be told not to edit it."""
     for path in sorted(TARGET_DIR.glob("*.md")):
@@ -41,7 +48,6 @@ def test_every_reference_page_carries_the_do_not_edit_banner():
         )
 
 
-@internal_tree_only
 def test_reference_pages_are_all_generated():
     """Nothing hand-written lives in ``docs/reference/``.
 
