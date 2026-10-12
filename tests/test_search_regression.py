@@ -10,6 +10,7 @@ No test data persists after the test suite runs.
 """
 
 import numpy as np
+from sqlalchemy import text
 
 from jmfts_core.models.document import Document
 from jmfts_core.repositories.document import DocumentRepository
@@ -39,6 +40,13 @@ def _near(query, k):
     So this removes the dependency rather than fixing an observed failure. The offset is
     taken orthogonal to ``query`` and the result normalised, so every ``k`` lands the same
     cosine distance away and no document outranks another on content.
+
+    **2026-10-12: it was not enough, and the failure was observed.** CI run 38314528229 on
+    016276b returned an EMPTY page to four of :class:`TestEntityPollution`'s vector tests.
+    Distinct points stop dead copies piling up at the query; they do nothing about the
+    rest of the graph, and in this suite the class's one or two rows are the only VISIBLE
+    vectors in an index holding hundreds of entries every earlier test rolled back. See
+    :func:`_exact_order`, which is the repair and carries the measurement.
     """
     base = np.asarray(query, dtype=np.float64)
     base = base / np.linalg.norm(base)
@@ -47,6 +55,36 @@ def _near(query, k):
     off /= np.linalg.norm(off)
     vec = base + 0.1 * off
     return (vec / np.linalg.norm(vec)).tolist()
+
+
+def _exact_order(session):
+    """Answer the next ``vector_search`` by an exact scan, not by ``idx_documents_embed``.
+
+    The usetype tests below claim the PREDICATE: which rows the statement admits. Through
+    the HNSW index they also claimed recall, which none of them is about and which this
+    suite's database cannot give them. Every earlier test rolls its rows back, and a
+    rolled-back row leaves its node in the graph, so by the time this file runs the one or
+    two rows a test inserts are the only visible vectors among hundreds of invisible ones.
+    That is ``docs/ANN_INDEX_HEALTH.md`` 1.7's dead-entry dose at 100%, and 1.7 records that
+    ``strict_order`` is not immunity to it: "the worst single query still returned 0.0".
+
+    Observed in CI run 38314528229 (4 tests, every page empty). Reproduced 2026-10-12 on
+    CI's image (pgvector 0.8.7) only with the dose AMPLIFIED — a second connection inserting
+    and rolling back 300 rows a cycle and VACUUMing between, while this class ran 100 times
+    over: 9 empty pages in 6,820 executions across seven runs, six in the custom-list test
+    and three in the ``exclude_types=[]`` one, which has NO usetype predicate, so the
+    predicate is not the cause. In each, an exact scan of the same statement in the same
+    snapshot returned the row; where the state held still long enough to re-ask, so did
+    ``hnsw.ef_search = 1000``. With this function in place: 0 in 3,300 under the same load.
+
+    ``enable_indexscan = off`` leaves the shipped statement untouched — same predicate,
+    same ``ORDER BY embed <=> q``, same ``LIMIT`` — and removes the one plan that can lose a
+    row; HNSW has no bitmap path, so what remains sorts exactly. ``SET LOCAL``, called
+    AFTER the fixture's writes, so it lives in the test's transaction and no savepoint
+    rollback between it and the search can undo it. Whether a filtered HNSW scan still
+    answers is ``tests/test_filtered_recall.py``'s claim, not this file's.
+    """
+    session.execute(text("SET LOCAL enable_indexscan = off"))
 
 
 def _create_doc(session, title=None, content=None, parent_id=None, usetype=None):
@@ -596,6 +634,7 @@ class TestEntityPollution:
         db_session.flush()
 
         repo = SearchRepository(db_session)
+        _exact_order(db_session)
         results = repo.vector_search(fake_embed, limit=10)
         result_ids = {r.document.id for r in results}
         assert chunk.id in result_ids, "Chunk must appear in vector results"
@@ -649,6 +688,7 @@ class TestEntityPollution:
         db_session.flush()
 
         repo = SearchRepository(db_session)
+        _exact_order(db_session)
         results = repo.vector_search(fake_embed, limit=10, usetype="entity")
         result_ids = {r.document.id for r in results}
         assert entity.id in result_ids, "Entity must appear when usetype='entity' is explicit"
@@ -666,6 +706,7 @@ class TestEntityPollution:
         db_session.flush()
 
         repo = SearchRepository(db_session)
+        _exact_order(db_session)
         results = repo.vector_search(fake_embed, limit=10)
         result_ids = {r.document.id for r in results}
         assert doc.id in result_ids, "Doc with NULL usetype must appear in default results"
@@ -690,6 +731,7 @@ class TestEntityPollution:
         db_session.flush()
 
         repo = SearchRepository(db_session)
+        _exact_order(db_session)
         results = repo.vector_search(fake_embed, limit=10, exclude_types=[])
         result_ids = {r.document.id for r in results}
         assert (
@@ -724,6 +766,7 @@ class TestEntityPollution:
         db_session.flush()
 
         repo = SearchRepository(db_session)
+        _exact_order(db_session)
         results = repo.vector_search(fake_embed, limit=10, exclude_types=["entity"])
         result_ids = {r.document.id for r in results}
         assert chunk.id in result_ids, "Chunk must appear when exclude_types excludes only entity"
