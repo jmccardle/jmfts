@@ -30,7 +30,8 @@ value this module invented and none of them is:
   streaming UI, and a buffered completion is byte-for-byte the request the four
   hand-written call sites were already sending.
 
-**What a failure looks like now, and what that costs.** τ 0.9.3's OpenAI provider catches
+**What a failure looks like now, and what that costs.** τ's OpenAI provider (0.9.3, and
+still 0.12.0, read 2026-10-12) catches
 every transport exception inside its event generator and reports it as an error event
 carrying a message; ``complete_simple`` then raises a bare ``Exception`` with that text.
 So an ``httpx.ConnectError``, an ``httpx.TimeoutException`` and a non-200 status all reach

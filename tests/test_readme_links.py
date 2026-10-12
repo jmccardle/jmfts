@@ -144,7 +144,6 @@ PUBLISHED = (
     "pyproject.toml",
     "scripts/",
     "tests/",
-    "uv.lock",
 )
 
 #: There is no ``NOT_PUBLISHED`` list any more. Its one entry, ``scripts/deadcode_scan.py``,
