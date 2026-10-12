@@ -423,3 +423,49 @@ class TestParagraphPackedRespectsTheAuthorsBoundary:
         )
 
         assert [c.text for c in chunks] == ["Short one.", "Short two.", "Short three."]
+
+
+class TestChunkCeiling:
+    """The EXPLAIN ceiling for the chunk rung must hold against what `chunk_text` writes.
+
+    Issue #5: `_chunk_ceiling` declared `characters // min_chunk_length`, but `fits` splits
+    pieces below `min_chunk_length` and a merge never crosses `max_chars`, so a run could
+    write more chunks than EXPLAIN said it might. No database: the ceiling is a pure
+    function of (characters, min_chunk_length, max_chars).
+    """
+
+    @staticmethod
+    def _dense_sentences(count: int, width: int = 400) -> str:
+        sentence = ("w" * 9 + " ") * (width // 10) + "end."
+        return " ".join(sentence for _ in range(count))
+
+    @pytest.mark.parametrize("minimum", [1, 100, 900, 1799, 1800])
+    @pytest.mark.parametrize("window", [None, 700, 150])
+    def test_actual_count_never_exceeds_ceiling(self, minimum, window):
+        from jmfts_core.structure_tasks import _chunk_ceiling
+
+        text = self._dense_sentences(60)
+        fits = None if window is None else (lambda piece, w=window: len(piece) <= w)
+        chunks = chunk_text(
+            text,
+            strategy=ChunkStrategy.sentence,
+            min_chunk_length=minimum,
+            max_chars=1800,
+            fits=fits,
+        )
+        _, ceiling = _chunk_ceiling(
+            {"extraction.characters": len(text)}, {"min_chunk_length": minimum}
+        )
+        assert len(chunks) <= ceiling
+
+    def test_the_old_division_was_exceeded(self):
+        """Pin the defect: min near max_chars, a fits that splits, naive ceiling beaten."""
+        text = self._dense_sentences(60)
+        chunks = chunk_text(
+            text,
+            strategy=ChunkStrategy.sentence,
+            min_chunk_length=1800,
+            max_chars=1800,
+            fits=lambda piece: len(piece) <= 300,
+        )
+        assert len(chunks) > len(text) // 1800

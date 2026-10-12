@@ -238,6 +238,35 @@ def _enforce_fit(text: str, max_chars: int, fits) -> list[str]:
     return pieces
 
 
+def chunk_count_ceiling(characters: int, min_chunk_length: int, max_chars: int) -> int:
+    """The most chunks one ``chunk_text`` call can return for ``characters`` characters.
+
+    Sound for every strategy with ``overlap == 0``, with or without ``fits``. It is an
+    upper bound, not an estimate, and it is deliberately loose, because two things
+    stop ``characters // min_chunk_length`` being one:
+
+    * The merge only glues a short chunk onto its predecessor when the result stays inside
+      ``max_chars``. A chunk that is short and cannot merge has a predecessor over
+      ``max_chars - len(chunk)``, so any two ADJACENT chunks together hold at least
+      ``min(min_chunk_length, max_chars)`` characters, and no more than
+      ``2 * characters / that + 1`` chunks fit. With ``min_chunk_length`` near ``max_chars``
+      that is twice the naive division.
+    * ``fits`` splits after the merge and ``min_chunk_length`` yields to it. A piece is only
+      split when it is longer than ``_MIN_FIT_CHARS`` (a shorter one that does not fit
+      raises), and each split halves a budget that floors at ``_MIN_FIT_CHARS``, so two
+      adjacent pieces of one split hold more than that budget: at most ``3 * length / 64``
+      pieces from a piece of ``length``.
+
+    Each chunk holds at least one character, so ``characters`` caps the result.
+    """
+    if characters <= 0:
+        return 0
+    effective = max(1, min(min_chunk_length, max_chars))
+    merged = 2 * characters // effective + 1
+    fit_split = 3 * characters // _MIN_FIT_CHARS + 1
+    return min(characters, merged + fit_split)
+
+
 def chunk_text(
     text: str,
     strategy: ChunkStrategy = ChunkStrategy.sentence,
