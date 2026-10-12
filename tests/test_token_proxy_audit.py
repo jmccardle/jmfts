@@ -95,12 +95,23 @@ CHARACTER_CAPS = {
     "jmfts_core.chunking:_enforce_max_chars:max_chars",
     "jmfts_core.chunking:_enforce_fit:max_chars",
     "jmfts_core.chunking:chunk_text:max_chars",
+    # The ceiling EXPLAIN declares for a chunking run is a function of the same cap (#5).
+    "jmfts_core.chunking:chunk_count_ceiling:max_chars",
+    "jmfts_core.structure_tasks:_chunk_ceiling:max_chars",
     "jmfts_core.chunking:<module>:_MIN_FIT_CHARS",
     "jmfts_core.embedder:RemoteEmbedder.chunk_to_fit:max_chars",
     "jmfts_core.embedding:EmbeddingService.chunk_to_fit:max_chars",
     "jmfts_core.probe:<module>:SCANNED_MAX_CHARS_PER_PAGE",
     "jmfts_core.repositories.view:_snippet_around:max_chars",
     "jmfts_client.contracts.document:ChunkRequest:max_chars",
+}
+
+#: Multiplications by a ``_CONVERSION`` constant that are not a chars-per-token ratio.
+#: ``chunk_count_ceiling``'s 3 is from its proof: adjacent pieces of one ``fits`` split hold
+#: more than ``_MIN_FIT_CHARS`` together, so a length splits into at most
+#: ``3 * length / _MIN_FIT_CHARS`` pieces. Characters in, a count of pieces out (#5).
+NOT_CONVERSIONS = {
+    "jmfts_core.chunking:chunk_count_ceiling:3 * characters",
 }
 
 _TOKEN_NAME = re.compile(r"token", re.I)
@@ -254,8 +265,15 @@ def test_no_token_named_value_is_a_text_length():
 
 
 def test_no_chars_to_tokens_conversion_constant():
-    found = sorted(c for a in _audit_all() for c in a.conversions)
-    assert not found, "length scaled by a chars-per-token style constant:\n  " + "\n  ".join(found)
+    found = {c for a in _audit_all() for c in a.conversions}
+    unexplained = sorted(found - NOT_CONVERSIONS)
+    stale = sorted(NOT_CONVERSIONS - found)
+    assert not unexplained, "length scaled by a chars-per-token style constant:\n  " + (
+        "\n  ".join(unexplained)
+    )
+    assert not stale, "NOT_CONVERSIONS entries that match nothing now; delete them:\n  " + (
+        "\n  ".join(stale)
+    )
 
 
 def test_every_max_tokens_is_classified():
