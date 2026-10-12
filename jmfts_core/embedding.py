@@ -70,6 +70,31 @@ _INSTALL_HINT = (
 )
 
 
+class TokenizerNotCached(OSError):
+    """The tokenizer for the configured model is not in the local HF cache and could not be fetched.
+
+    Raised instead of the bare ``OSError`` ``AutoTokenizer.from_pretrained`` produces, which
+    on an offline host (``HF_HUB_OFFLINE=1``) talks about a hub nobody asked it to reach and
+    never names the model or the way out. An ``OSError`` because that is what it wraps, so a
+    caller that already handles one still does; ``jmfts_core.task_errors`` classifies every
+    ``OSError`` but a full disk PERMANENT, and an absent cache entry does not appear on the
+    third attempt. (Bundling the tokenizer so this cannot happen is issue #6's other half,
+    and is deliberately not done here.)
+    """
+
+    def __init__(self, model_name: str, cause: BaseException):
+        self.model_name = model_name
+        super().__init__(
+            f"The tokenizer for {model_name!r} is not cached on this host and could not be "
+            f"fetched ({type(cause).__name__}: {cause}).\n"
+            "Ways out:\n"
+            f"    huggingface-cli download {model_name}   # once, on a host with network access\n"
+            "    unset HF_HUB_OFFLINE                    # if this host may reach the hub\n"
+            "    export HF_HOME=<dir>                    # mount or copy a populated HF cache "
+            "there (default ~/.cache/huggingface)"
+        )
+
+
 def _torch():
     """``(torch, torch.nn.functional)``, or say what is missing and what to do."""
     try:
@@ -216,7 +241,10 @@ class EmbeddingService:
         if self._tokenizer is None:
             from transformers import AutoTokenizer
 
-            self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            try:
+                self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            except OSError as exc:
+                raise TokenizerNotCached(self.model_name, exc) from exc
         return self._tokenizer
 
     def check_fit(
