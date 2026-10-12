@@ -104,12 +104,6 @@ GAP_TEMPLATE_IS_A_DOCUMENT = (
     "under an access-control root is readable by anyone with a token."
 )
 
-GAP_EMBED = (
-    "OPEN GAP. Writes embeddings onto a document named by id, reached through "
-    "DocumentRepository.embed_document rather than .update — so it misses the require_write "
-    "at repositories/document.py:401 that every other write to a document goes through."
-)
-
 GAP_FRONTIER = (
     "OPEN GAP. Reports settle counts under a document named by id with no can_read, so it "
     "distinguishes 'a document with work under it' from 'no such document' for a caller "
@@ -128,7 +122,9 @@ GAP_BINDING_SCOPE = (
 #: Every ``@expose``d operation that provably does not consult the current principal, and
 #: why that is so. Keys are ``Service.method`` — the ``name`` on the registry entry.
 NOT_PRINCIPAL_SCOPED: dict[str, str] = {
-    "DocumentService.embed_document": GAP_EMBED,
+    # DocumentService.embed_document was here, as an OPEN GAP. It left this list on
+    # 2026-10-12: DocumentRepository.embed_document now takes require_write, so a hidden
+    # document is a 404 and a read-only one a 403. `tests/test_access_embed_write.py`.
     "GraphService.get_diff": AGGREGATE_COUNTS,
     "GraphService.get_stats": AGGREGATE_COUNTS,
     "IndexService.list_indexes": CONFIG_OBJECT,

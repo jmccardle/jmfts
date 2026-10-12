@@ -191,9 +191,12 @@ one-off one, which is the difference 0.6.0 step 3 was for.
     under an index's roots, and retrieval gates the postings again on the way out, so that one
     is unauthorised **work** rather than disclosure. `TemplateService.get_template` and
     `render_template` read a template by `session.get(Document, template_id)` with no
-    `can_read`, and a template IS a document. `DocumentService.embed_document` reaches
+    `can_read`, and a template IS a document. ~~`DocumentService.embed_document` reaches
     `DocumentRepository.embed_document` rather than `.update`, so it misses the
-    `require_write` at `repositories/document.py:401`. `IngestService.file_frontier`
+    `require_write` at `repositories/document.py:401`.~~ **CLOSED 2026-10-12 (0.6.2):**
+    `DocumentRepository.embed_document` now takes `require_write` (404 for a hidden
+    document, 403 for a read-only one), held by `tests/test_access_embed_write.py`; nine
+    verbs remain. `IngestService.file_frontier`
     distinguishes "a document with work under it" from "no such document" for a caller that
     may read neither. The eleventh gap the audit found became step 35 and is closed.
     **Each is a candidate 0.7.0 step and none is a 0.6.0 step**: eleven is more than Block A
