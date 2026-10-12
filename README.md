@@ -292,10 +292,10 @@ back; those citations are anchors, not broken links.
 
 **What is still held back.** A comment naming SPRINT_0_3_0.md, SPRINT_0_4_0.md,
 SPRINT_0_5_0.md, SPRINT_0_4_0_DRAFT.md, ROADMAP_HISTORY.md, KNOWN-DEFECTS.md,
-RELEASING.md, AGENTIC_KNOWLEDGEBASE.md, RERANKER_CRITIQUE.md,
-API_UNIFICATION_CONTRACT_NOTES.md or research/INTERMEDIATE_FORMATS.md points at
-a document that is not here. Five of them — RELEASING.md,
-AGENTIC_KNOWLEDGEBASE.md, RERANKER_CRITIQUE.md, API_UNIFICATION_CONTRACT_NOTES.md
+RELEASING.md, AGENTIC_KNOWLEDGEBASE.md, RERANKER_CRITIQUE.md
+or research/INTERMEDIATE_FORMATS.md points at
+a document that is not here. Four of them — RELEASING.md,
+AGENTIC_KNOWLEDGEBASE.md, RERANKER_CRITIQUE.md
 and research/INTERMEDIATE_FORMATS.md — have not had a review pass yet. The other six
 are the three sprint plans and the archive behind them, and they are a different
 case:
