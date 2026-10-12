@@ -63,8 +63,9 @@ from jmfts_core.atoms import (
     ChildKey,
     Fanout,
 )
+from jmfts_core.config import get_settings
 from jmfts_core.conversation_ingest import conversation_markdown, parse_adjutant_jsonl
-from jmfts_core.chunking import ChunkStrategy, chunk_text
+from jmfts_core.chunking import ChunkStrategy, chunk_count_ceiling, chunk_text
 from jmfts_core.embedding import get_embedding_service
 from jmfts_core.ingest_options import STRUCTURE_CHUNK_PARAMS
 from jmfts_core.ingest_tasks import (
@@ -730,12 +731,19 @@ def _chunk_ceiling(evidence: dict, params: dict) -> tuple[int, int]:
     that found no prose at all writes none, which is why the floor is zero and is not the
     interesting half of the interval.
 
-    ``min_chunk_length`` is a character count and so is ``extraction.characters``, so this
-    is the same division ``chunk_text`` cannot exceed rather than an estimate of it.
+    The upper end is ``chunk_count_ceiling``: a bound ``chunk_text`` cannot exceed on one
+    call, deliberately loose. It is NOT ``characters // min_chunk_length``, which an earlier
+    version of this docstring called "the same division chunk_text cannot exceed" and which
+    was false: a merge never crosses ``max_chars``, and ``fits`` splits a piece below
+    ``min_chunk_length`` when the embedding window demands it. What this still does not
+    cover is that ``_write_chunks`` calls ``chunk_text`` once PER SECTION, so every
+    non-empty section body is at least one chunk however short; nothing in
+    ``(evidence, params)`` says how many sections there are (``SPRINT_JOBS.md`` 2.4).
     """
     minimum = int(params["min_chunk_length"])
     characters = int(evidence["extraction.characters"])
-    return (0, characters // minimum if minimum else characters)
+    max_chars = get_settings().chunk_max_chars
+    return (0, chunk_count_ceiling(characters, minimum, max_chars))
 
 
 #: The two rungs write the same shapes from different boundaries, so they declare the same
@@ -744,7 +752,7 @@ def _chunk_ceiling(evidence: dict, params: dict) -> tuple[int, int]:
 _RUNG_FANOUT = Fanout(
     bound=_chunk_ceiling,
     reads=("extraction.characters",),
-    basis="⌊characters / min_chunk_length⌋ chunks",
+    basis="chunk_count_ceiling(characters, min_chunk_length, chunk_max_chars) chunks",
     # The chunks, not the sections. A titled region becomes a `section` node with chunks
     # under it and an untitled one becomes chunks directly, so the section count varies
     # with the document's shape while the ceiling is a function of its LENGTH — counting
