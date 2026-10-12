@@ -296,6 +296,38 @@ class TestLLMExtractParsing:
         assert result[0]["object"] == "B"
 
 
+class TestLLMExtractSendsEverything:
+    """The input reaches the model whole, however long it is.
+
+    `_llm_extract` used to cut its input at 240,000 characters — "60K tokens" at an assumed
+    four characters per token — and say nothing. A long document was then extracted from
+    its first part and the result read as though it covered all of it. JMFTS owns no LLM
+    tokenizer, so it cannot know whether a text fits the model; the endpoint can, and an
+    over-context request failing there is the honest outcome. The stub stands in for the
+    transport so the assertion is about the message this module builds.
+    """
+
+    def test_a_long_document_is_not_truncated(self, monkeypatch):
+        seen = {}
+
+        async def _capture(**kwargs):
+            seen["messages"] = kwargs["messages"]
+            return SimpleNamespace(text="[]", usage={})
+
+        monkeypatch.setattr("jmfts_core.fact_extraction.complete", _capture)
+
+        # Distinct head and tail markers, so a cut anywhere shows up as a missing marker
+        # rather than as an arithmetic coincidence on the length.
+        text = "HEAD" + ("x" * 299_992) + "TAIL"
+        assert len(text) == 300_000
+
+        _run(_llm_extract(text, _make_settings()))
+
+        user = next(m["content"] for m in seen["messages"] if m["role"] == "user")
+        assert text in user
+        assert user.endswith("TAIL")
+
+
 class TestEntityMatching:
     """The parts of entity resolution that are a decision rather than a query.
 

@@ -230,11 +230,10 @@ async def _llm_extract(
     """
     base_url, model = settings.require_llm("Fact extraction", llm_model)
 
-    # Truncate to fit context budget (rough: 4 chars/token, leave room for prompt)
-    char_budget = 60_000 * 4  # ~60K tokens for input
-    if len(text) > char_budget:
-        text = text[:char_budget]
-
+    # The text goes whole. A character cap here would be a guess at the model's window made
+    # with no tokenizer for that model, and cutting to it extracts from the first part of a
+    # document while the result reads as though it covered all of it. Whether the text fits
+    # is the endpoint's to answer: an over-context request fails there, loudly.
     result = await complete(
         settings=settings,
         base_url=base_url,

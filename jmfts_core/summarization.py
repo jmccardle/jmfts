@@ -218,12 +218,12 @@ async def _llm_summarize(texts: list[str], settings: Settings, llm_model: str | 
     passages = []
     for i, text in enumerate(texts, 1):
         passages.append(f"[Passage {i}]\n{text}")
+    # Every passage goes. The prompt below tells the model how many passages it is
+    # summarising, so cutting the joined text to a character budget made the summary claim
+    # passages it never saw. JMFTS has no tokenizer for the summarising model and cannot know
+    # what fits; an over-context request fails at the endpoint instead, and the repair is to
+    # segment further, not to send less and say the same.
     context = "\n\n".join(passages)
-
-    # Truncate context to fit within budget
-    char_budget = settings.summarization_context * 4  # rough chars-per-token
-    if len(context) > char_budget:
-        context = context[:char_budget]
 
     user_message = (
         f"Summarize the following {len(texts)} passages into a single cohesive summary:\n\n"
