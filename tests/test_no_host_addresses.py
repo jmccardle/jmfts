@@ -69,6 +69,17 @@ SHIPPED = (
     "Dockerfile",
     "Dockerfile.worker",
     "docker-compose.yml",
+    # The 0.6.0 release audit held this list against `PUBLISHED` and found eight published
+    # paths it did not walk, one of them a wheel. A git grep for `LEAKS` over all eight
+    # found nothing on 2026-10-12; they are here so that stays checked rather than lucky.
+    "jmfts-client/",
+    "tests/",
+    ".githooks/",
+    "bump-version.sh",
+    "LICENSE",
+    "uv.lock",
+    ".gitignore",
+    ".dockerignore",
 )
 
 #: This file names the patterns it forbids, so it cannot hold itself.
