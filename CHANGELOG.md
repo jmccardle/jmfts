@@ -20,8 +20,51 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
   sets it, `Settings()` now refuses to start with
   `jmfts_embedding_batch_size — Extra inputs are not permitted`; delete the line. Set as a
   process environment variable it is ignored, which is pydantic-settings' own asymmetry.
+- **Synthesis no longer turns an unexpected error into `llm_available: false`.** It catches
+  only LLM failures now; any other exception reaches the caller as a 500 rather than a 200
+  that looked like a missing LLM (#32).
+- **Dependency floors rose to the versions the suite runs against**, among them fastapi
+  0.135, transformers 5.5, numpy 2.4, sentence-transformers 5.3, pgvector 0.4 and
+  `ffwf-tau-llm` 0.12.0 (#10, #31). There are still no upper bounds; `pyproject.toml` says
+  why. The old `pgvector>=0.2.4` floor admitted a version with no `HALFVEC`, which fails at
+  import.
+
+### Added
+
+- **`X-JMFTS-Ignored-Fields`.** A JSON request body carrying fields the operation's contract
+  does not declare still succeeds, but the response now lists them (`max_context_tokens`,
+  `inner.shade`, `items[].hue`) and the server logs one WARNING per route and field set.
+  tectum's `max_context_tokens`, dropped silently since 0.6.0, is the case that found it.
+  Rejecting such fields (`extra="forbid"`) is planned for 0.7.0 (#33).
+- **`llm_error` on the synthesize response:** `{reason: not_configured|refused|failed,
+  status, message, attempts}`. `llm_available` is unchanged on the wire (#32).
+- **A 502, 503 or 504 from the LLM is retried during synthesis**, the wait doubling from
+  0.5 s, within `JMFTS_SYNTHESIS_RETRY_BUDGET` (default 4 s; 0 disables). EnsoNet's
+  "model is loading" 503 is what made midlife's first synthesis after the 0.6.1 cutover
+  report `llm_available: false`. A 400, including over-context, is reported and not retried.
+- `tests/test_token_proxy_audit.py`: a character or word count may not stand in for a token
+  count outside an allowlist keyed by symbol, not line (#9).
 
 ### Fixed
+
+- **An uncached tokenizer on an offline host raises `TokenizerNotCached`**, which names the
+  model and the three ways out, classifies PERMANENT in the queue and answers 501 over REST.
+  It was a raw `OSError` from `transformers`, and a bare 500 (#6; bundling the tokenizer
+  stays open).
+- **`POST /documents/{id}/embed` takes the subtree write gate**: 404 for a document the
+  caller cannot read, 403 for a read-only one, like the other write verbs. One of the ten
+  verbs of ROADMAP gap 12 (#30).
+- **EXPLAIN's chunk ceiling is an upper bound for one `chunk_text` call** (`chunk_count_ceiling`).
+  `characters // min_chunk_length` was exceeded twice over: a merge never crosses
+  `max_chars`, and `fits` splits below `min_chunk_length`. Chunk output is unchanged. The
+  bound is loose, and a document with many sections can still exceed it (#5).
+- `search_exclude_usetypes` is documented as load-bearing: it is what keeps the summary
+  tree's 13,755 duplicate vectors out of results (#17).
+- The `--dsn` examples in five measurement scripts name the `psycopg2` driver (#25), and the
+  README's held-back list no longer names a document nothing cites (#26).
+- `scripts/run_tests_docker.sh` waited for postgres over the unix socket, which the image's
+  temporary initdb server also answers; the re-check could land in the restart and abort the
+  run with `TIMED OUT`. It checks over TCP now.
 
 - **`wiki:arxiv` no longer claims to keep paper metadata.** The usetype description, the
   generated `docs/reference/INGEST.md` and the ingest skill said it fetched "metadata +
@@ -37,6 +80,8 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
   `SearchContextRepository.get_by_id`, `app.state.ingest_worker`,
   `SheetMeasurement.merged_ranges`, `Prepared.input_tokens` in `jmfts_batch`, and a loop in
   fact extraction whose body was `pass`.
+- `uv.lock`. It described jmfts 0.1.0, nothing installed from it, and pip is the installer
+  CI, both Dockerfiles and the README use (#31).
 
 ## [0.6.1] — 2026-10-12
 

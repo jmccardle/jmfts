@@ -79,16 +79,19 @@ docker run -d --name "$CONTAINER" \
   -p "127.0.0.1:${HOST_PORT}:5432" \
   "$IMAGE" >/dev/null
 
+# Over TCP, not the socket. On first start the image runs a temporary server for initdb that
+# listens on the unix socket only, then stops it and starts the real one; a socket check can
+# answer "ready" from the temporary server and the re-check below then lands in the restart.
 echo -n ">> waiting for postgres to be ready"
 for _ in $(seq 1 60); do
-  if docker exec "$CONTAINER" pg_isready -U jmfts -d jmfts >/dev/null 2>&1; then
+  if docker exec "$CONTAINER" pg_isready -h 127.0.0.1 -U jmfts -d jmfts >/dev/null 2>&1; then
     echo " — ready"
     break
   fi
   echo -n "."
   sleep 1
 done
-if ! docker exec "$CONTAINER" pg_isready -U jmfts -d jmfts >/dev/null 2>&1; then
+if ! docker exec "$CONTAINER" pg_isready -h 127.0.0.1 -U jmfts -d jmfts >/dev/null 2>&1; then
   echo " — TIMED OUT" >&2
   docker logs "$CONTAINER" >&2 || true
   exit 1
