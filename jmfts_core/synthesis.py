@@ -27,24 +27,21 @@ class SynthesisResult:
     usage: dict | None = None
 
 
-def _format_context(documents: list[dict], max_context_tokens: int) -> str:
-    """Format search results into a context string, respecting approximate token budget."""
-    parts = []
-    char_budget = max_context_tokens * 4  # rough chars-per-token estimate
+def _format_context(documents: list[dict]) -> str:
+    """Format every search result into one context string, in rank order.
 
+    Nothing is dropped. This used to pack to ``max_context_tokens * 4`` characters, dropping
+    results from the tail and trimming one mid-block, so an answer could cite four of twelve
+    retrieved documents and read as though all twelve had been considered. JMFTS has no
+    tokenizer for the synthesising model, so any budget here would be a guess; the caller
+    chooses how many documents to send (``top_k``) and the endpoint says whether they fit.
+    """
+    parts = []
     for i, doc in enumerate(documents, 1):
         title = doc.get("title") or f"Document {doc['id']}"
         content = doc.get("content") or ""
         header = f"[Source {i}: {title} (id={doc['id']}, score={doc['score']:.3f})]"
-        block = f"{header}\n{content}\n"
-
-        if len("\n".join(parts)) + len(block) > char_budget:
-            remaining = char_budget - len("\n".join(parts))
-            if remaining > len(header) + 40:
-                parts.append(f"{header}\n{content[:remaining - len(header) - 10]}...\n")
-            break
-
-        parts.append(block)
+        parts.append(f"{header}\n{content}\n")
 
     return "\n".join(parts)
 
@@ -52,15 +49,16 @@ def _format_context(documents: list[dict], max_context_tokens: int) -> str:
 async def synthesize(
     query: str,
     documents: list[dict],
-    max_context_tokens: int = 4096,
     llm_model: str | None = None,
 ) -> SynthesisResult:
     """Call the LLM to synthesize a response from search results.
 
+    Every document is sent. A set too large for the model's context is refused by the
+    endpoint, and that refusal propagates like any other non-200 (below).
+
     Args:
         query: The user's original search query.
         documents: List of dicts with keys: id, title, content, score.
-        max_context_tokens: Approximate token budget for the context window.
         llm_model: Override the default LLM model name.
 
     Returns:
@@ -80,7 +78,7 @@ async def synthesize(
     settings = get_settings()
     base_url, model = settings.require_llm("Synthesis", llm_model)
 
-    context = _format_context(documents, max_context_tokens)
+    context = _format_context(documents)
 
     user_message = f"Query: {query}\n\nSources:\n{context}\n\nSynthesize an answer to the query based on the sources above."
 

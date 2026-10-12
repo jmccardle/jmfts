@@ -2544,8 +2544,10 @@ export interface SynthesizeRequest {
    * Search method: auto, hybrid, maxsim, bm25, vector, fulltext
    */
   search_method?: string;
+  /**
+   * How many retrieved documents to synthesize from. Every one is sent to the model whole and none is cut to fit; a set too large for its context window is refused by the LLM endpoint, and the response then reports `llm_available: false`.
+   */
   top_k?: number;
-  max_context_tokens?: number;
   /**
    * Override the default LLM model
    */

@@ -549,8 +549,16 @@ class SynthesizeRequest(BaseModel):
         default="auto",
         description="Search method: auto, hybrid, maxsim, bm25, vector, fulltext",
     )
-    top_k: int = Field(default=5, ge=1, le=20)
-    max_context_tokens: int = Field(default=4096, ge=256, le=32768)
+    top_k: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description=(
+            "How many retrieved documents to synthesize from. Every one is sent to the model "
+            "whole and none is cut to fit; a set too large for its context window is refused "
+            "by the LLM endpoint, and the response then reports `llm_available: false`."
+        ),
+    )
     llm_model: Optional[str] = Field(default=None, description="Override the default LLM model")
     usetype: Optional[UsetypeFilter] = Field(default=None, description=USETYPE_FIELD_DESCRIPTION)
     parent_id: Optional[int] = None

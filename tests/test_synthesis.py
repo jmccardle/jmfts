@@ -5,6 +5,7 @@ graceful degradation. Avoids real DB/LLM calls via mocking.
 """
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -43,7 +44,7 @@ class TestFormatContext:
             {"id": 1, "title": "Alpha", "content": "Content A", "score": 0.95},
             {"id": 2, "title": "Beta", "content": "Content B", "score": 0.80},
         ]
-        result = _format_context(docs, max_context_tokens=4096)
+        result = _format_context(docs)
         assert "[Source 1: Alpha (id=1, score=0.950)]" in result
         assert "Content A" in result
         assert "[Source 2: Beta (id=2, score=0.800)]" in result
@@ -51,23 +52,46 @@ class TestFormatContext:
 
     def test_missing_title_uses_fallback(self):
         docs = [{"id": 7, "title": None, "content": "Some text", "score": 0.5}]
-        result = _format_context(docs, max_context_tokens=4096)
+        result = _format_context(docs)
         assert "Document 7" in result
 
-    def test_budget_truncation(self):
+    def test_every_retrieved_document_reaches_the_model(self, monkeypatch):
+        """Twelve documents in, twelve source headers out.
+
+        `_format_context` used to pack to `max_context_tokens * 4` characters, dropping
+        documents from the tail and trimming one mid-block. The answer then cited four of
+        twelve retrieved documents and read as though all twelve had been considered. JMFTS
+        owns no LLM tokenizer and cannot know what fits a model's window; the endpoint can,
+        so the whole set is sent and an over-context request fails there. Driven through
+        `synthesize` so the assertion holds on what the request carries.
+        """
+        from jmfts_core.config import Settings
+
+        seen = {}
+
+        async def _capture(**kwargs):
+            seen["messages"] = kwargs["messages"]
+            return SimpleNamespace(text="an answer", usage={})
+
+        monkeypatch.setattr("jmfts_core.synthesis.complete", _capture)
+        monkeypatch.setattr(
+            "jmfts_core.synthesis.get_settings",
+            lambda: Settings(llm_base_url="http://llm.invalid:8853", llm_model="never-called"),
+        )
+
         docs = [
-            {"id": 1, "title": "A", "content": "x" * 5000, "score": 0.9},
-            {"id": 2, "title": "B", "content": "y" * 5000, "score": 0.8},
-            {"id": 3, "title": "C", "content": "z" * 5000, "score": 0.7},
+            {"id": i, "title": f"T{i}", "content": f"body-{i} " + "w " * 2_000, "score": 0.5}
+            for i in range(1, 13)
         ]
-        # ~250 tokens * 4 chars = 1000 chars budget — not enough for all 3
-        result = _format_context(docs, max_context_tokens=250)
-        assert "Source 1" in result
-        # Third doc should be cut or absent
-        assert result.count("Source 3") == 0 or "..." in result
+        _run(synthesize(query="q", documents=docs))
+
+        user = next(m["content"] for m in seen["messages"] if m["role"] == "user")
+        for i, doc in enumerate(docs, 1):
+            assert f"[Source {i}: T{i} (id={i}, score=0.500)]\n{doc['content']}" in user
+        assert user.count("[Source ") == 12
 
     def test_empty_documents(self):
-        result = _format_context([], max_context_tokens=4096)
+        result = _format_context([])
         assert result == ""
 
 
@@ -106,7 +130,6 @@ class TestSynthesize:
                     synthesize(
                         query="What is X?",
                         documents=docs,
-                        max_context_tokens=4096,
                         llm_model="test-model",
                     )
                 )
@@ -216,6 +239,16 @@ def _make_mock_search_result(doc_id, title, content, score, method="hybrid"):
 
 
 class TestSynthesizeEndpoint:
+    def test_the_request_has_no_context_budget(self):
+        """`max_context_tokens` left the contract with the packer it fed.
+
+        Once nothing divides by it, keeping it would claim a budget the server does not
+        apply. `top_k` is how a caller bounds what is sent.
+        """
+        from jmfts_core.rest.schemas import SynthesizeRequest
+
+        assert "max_context_tokens" not in SynthesizeRequest.model_fields
+
     def test_endpoint_with_llm_available(self):
         from jmfts_core.services.search_service import SearchService
         from jmfts_core.rest.schemas import SynthesizeRequest
