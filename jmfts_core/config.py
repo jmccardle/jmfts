@@ -278,10 +278,10 @@ class Settings(BaseSettings):
     # LLM-backed work is optional. Ingestion, embedding, chunking, indexing and all four
     # search modes run with these empty; only summarize:llm, RAPTOR, fact extraction and
     # synthesis need them.
-    # `llm_base_url` is the SERVER ROOT and must not end in `/v1` — `llm_client.py` appends
-    # it. Named here as well as in `.env.example` because every OpenAI-compatible server
-    # advertises the `/v1` form, so the value an operator is handed is one segment too long
-    # and the resulting 404 at `/v1/v1` arrives per task rather than at startup.
+    # `llm_base_url` is the base URL AS THE SERVER ADVERTISES IT, version segment included
+    # (`http://host:8080/v1`, EnsoNet's `http://host:8853/v1d`). JMFTS appends only
+    # `/chat/completions` and `/models`. Before 0.6.1 it appended `/v1` itself, so a root
+    # URL that worked then 404s now — `GET /health/llm` names the URL it tried.
     llm_base_url: str = ""  # env JMFTS_LLM_BASE_URL
     llm_model: str = ""  # env JMFTS_LLM_MODEL
     llm_timeout: float = 0  # env JMFTS_LLM_TIMEOUT; 0 = use ensonet_timeout

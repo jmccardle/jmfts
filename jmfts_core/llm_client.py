@@ -1,7 +1,7 @@
 """The one door from JMFTS to an LLM endpoint. ``SPRINT_0_3_0.md`` Part 2.
 
 Four call sites used to each open their own ``httpx`` client, post to
-``{base_url}/v1/chat/completions`` and parse the reply: ``synthesis.synthesize``,
+``{base_url}/chat/completions`` and parse the reply: ``synthesis.synthesize``,
 ``summarization._llm_summarize``, ``fact_extraction._llm_extract`` and
 ``rollup_tasks.summarize_span``. Four copies of one wire format is four places for a
 header, a timeout or a response shape to drift, and it is also four places that would
@@ -100,10 +100,16 @@ class LlmCompletion:
 def build_model(*, base_url: str, model: str, max_tokens: int, settings: Settings) -> Model:
     """Describe one JMFTS LLM endpoint to τ.
 
-    ``base_url`` is what :meth:`Settings.require_llm` returned — the server root, with no
-    ``/v1``. τ's OpenAI provider posts to ``/chat/completions`` relative to the base URL
-    it is given, so the ``/v1`` the four call sites used to write into the path literal is
-    appended here instead. One place, one spelling.
+    ``base_url`` is what :meth:`Settings.require_llm` returned, and it is used AS GIVEN:
+    the base URL the server advertises, version segment included — ``http://host:8080/v1``,
+    or EnsoNet's ``http://host:8853/v1d``. τ's OpenAI provider posts to
+    ``/chat/completions`` relative to it, which is the convention the OpenAI SDK and every
+    OpenAI-compatible server document.
+
+    Until 0.6.1 this appended ``/v1`` to a "server root". That was the four call sites'
+    old path literal, centralised rather than removed, and it cost twice: the advertised
+    ``/v1`` URL 404'd at ``/v1/v1``, and a server that versions under any other segment
+    could not be reached by any value of the setting at all.
 
     ``max_tokens`` reaches the wire through τ rather than through the request body, which
     is what lets ``tau_llm.compat`` choose between ``max_tokens`` and
@@ -116,7 +122,7 @@ def build_model(*, base_url: str, model: str, max_tokens: int, settings: Setting
         name=model,
         api=OPENAI_COMPLETIONS_API,
         provider=JMFTS_PROVIDER,
-        base_url=f"{base_url.rstrip('/')}/v1",
+        base_url=base_url.rstrip("/"),
         # Not known, and not consulted on the request path. See the module docstring.
         context_window=0,
         max_tokens=max_tokens,

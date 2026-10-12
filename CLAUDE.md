@@ -46,7 +46,7 @@ uvicorn jmfts_core.rest.main:app --host 0.0.0.0 --port 8100 --reload
 #   GET /capabilities
 #
 # Health: `/health` is the CHEAP one (one SELECT 1, no token) and is the probe path.
-# `/health/llm` runs the LLM reachability probe — two outbound calls at 5 s each — and
+# `/health/llm` runs the LLM reachability probe — one outbound call at 5 s — and
 # needs a token. `/` is the same cheap check but gated. See deploy/k8s/30-api.yaml.
 #
 # What is NOT protected by any access-control root. A document under no ACR is readable and

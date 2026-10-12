@@ -217,7 +217,10 @@ def local_llm_chat(
     api_key: str = "",
     disable_thinking: bool = False,
 ) -> ChatFn:
-    """A :data:`ChatFn` that posts to an OpenAI-compatible ``/v1/chat/completions``.
+    """A :data:`ChatFn` that posts to an OpenAI-compatible ``{base_url}/chat/completions``.
+
+    ``base_url`` is used as given, version segment included — the same rule as
+    ``JMFTS_LLM_BASE_URL`` everywhere else (0.6.1).
 
     Which is what llama-server, vLLM and Ollama all serve, so the same function covers
     every local runner this appliance is pointed at.
@@ -252,7 +255,7 @@ def local_llm_chat(
         if disable_thinking:
             payload["chat_template_kwargs"] = {"enable_thinking": False}
         with httpx.Client(timeout=model_timeout) as client:
-            response = client.post(f"{root}/v1/chat/completions", json=payload, headers=headers)
+            response = client.post(f"{root}/chat/completions", json=payload, headers=headers)
             response.raise_for_status()
             data = response.json()
         return extract_llm_text(data["choices"][0])

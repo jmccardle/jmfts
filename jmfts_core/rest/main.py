@@ -303,30 +303,41 @@ def _probe_llm() -> LlmHealthStatus:
             detail="not configured: set JMFTS_LLM_BASE_URL and JMFTS_LLM_MODEL",
         )
 
+    # ONE call, relative to the base URL as configured — the same base the completion
+    # calls use, so this answers for the URL that will actually be dialled. An answer of
+    # any status below 500 means something is listening; only a 200 carrying a `data`
+    # list is OpenAI-compatible.
+    models_url = f"{base}/models"
     try:
-        # Lightweight health probe (ensonet extension, may 404 on other servers)
-        r = httpx.get(f"{base}/health", timeout=5.0)
-        if r.status_code < 500:
-            reachable = True
-            detail = r.text[:200] if r.text else f"HTTP {r.status_code}"
+        r = httpx.get(models_url, timeout=5.0)
     except httpx.RequestError as exc:
-        detail = f"unreachable: {exc}"
         return LlmHealthStatus(
-            url=base, model=model, reachable=False, openai_compatible=False, detail=detail
+            url=base,
+            model=model,
+            reachable=False,
+            openai_compatible=False,
+            detail=f"unreachable: {exc}",
         )
-
-    # Check OpenAI-compatible /v1/models endpoint
-    try:
-        r2 = httpx.get(f"{base}/v1/models", timeout=5.0)
-        if r2.status_code == 200:
-            data = r2.json()
-            if isinstance(data.get("data"), list):
-                openai_compatible = True
-                detail = f"models: {[m.get('id') for m in data['data'][:3]]}"
-        elif r2.status_code == 404:
-            detail = (detail or "") + " | /v1/models → 404 (not OpenAI-compatible)"
-    except Exception:
-        pass
+    reachable = r.status_code < 500
+    data = None
+    if r.status_code == 200:
+        try:
+            data = r.json()
+        except ValueError:
+            data = None
+    if isinstance(data, dict) and isinstance(data.get("data"), list):
+        openai_compatible = True
+        detail = f"models: {[m.get('id') for m in data['data'][:3]]}"
+    elif r.status_code == 404:
+        # The likeliest cause since 0.6.1 is a server-root URL from an older config.
+        # Suggest the fix; do not try it.
+        detail = (
+            f"GET {models_url} → 404 (not OpenAI-compatible at this base URL). "
+            "JMFTS_LLM_BASE_URL is used as given — it should be the base URL the server "
+            f"advertises, usually ending in a version segment, e.g. {base}/v1"
+        )
+    else:
+        detail = f"GET {models_url} → HTTP {r.status_code}: {r.text[:200]}"
 
     return LlmHealthStatus(
         url=base,
@@ -342,7 +353,7 @@ def health_check_liveness():
     """Liveness check: version and database reachability. One query, no network.
 
     THIS IS THE PROBE ENDPOINT, and it is cheap because that is what a probe is for. It
-    used to run ``_probe_llm()``, which makes up to two outbound ``httpx.get`` calls at a
+    used to run ``_probe_llm()``, which then made up to two outbound ``httpx.get`` calls at a
     5 s timeout each — so a Kubernetes ``livenessProbe`` on this path could block for ~10 s
     and report the appliance unhealthy because somebody else's LLM host was slow. It is
     also the one health path in ``PUBLIC_PATHS``, so those outbound calls could be
@@ -359,8 +370,7 @@ def health_check_liveness():
 def health_check_llm():
     """Everything ``/health`` reports, plus an LLM reachability probe.
 
-    SLOW ON PURPOSE and not a liveness probe: two outbound HTTP calls at a 5 s timeout
-    each. ``status`` is ``degraded`` when the LLM is unreachable, which for an install with
+    SLOW ON PURPOSE and not a liveness probe: one outbound HTTP call at a 5 s timeout. ``status`` is ``degraded`` when the LLM is unreachable, which for an install with
     no ``JMFTS_LLM_BASE_URL`` is the ordinary state — see ``_probe_llm``, which says
     "not configured" rather than reporting a protocol error.
     """

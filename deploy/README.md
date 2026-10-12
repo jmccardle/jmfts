@@ -192,7 +192,7 @@ the probe path is the part worth reading before you write your own manifest:
 |---|---|---|---|
 | `/health` | one `SELECT 1` | no | **yes** — liveness, readiness and startup |
 | `/` | one `SELECT 1` | yes | no — kubelet sends no `Authorization` header |
-| `/health/llm` | up to two outbound HTTP calls, 5 s timeout each | yes | never |
+| `/health/llm` | one outbound HTTP call, 5 s timeout | yes | never |
 
 `/health` used to run the LLM probe, so the obvious choice for a `livenessProbe` could
 block for around ten seconds on a host this pod does not own and restart a healthy

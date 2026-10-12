@@ -20,19 +20,19 @@ from tests.llm_stub import llm_stub
 
 
 class TestEndpoint:
-    def test_the_v1_prefix_is_appended_once(self):
-        """``require_llm`` returns a server root; ``/v1/chat/completions`` is built here.
+    def test_the_base_url_is_used_as_given(self):
+        """``require_llm`` returns the base URL as configured; only ``/chat/completions`` is
+        appended, and here is the one construction site.
 
-        The four call sites each used to write the whole path into an f-string. One of
-        them appending ``/v1`` to a base URL that already carried it would have produced
-        ``/v1/v1/chat/completions`` and a 404 — the failure
-        ``test_ensonet_openai_compat`` documents at length. There is one construction site
-        now, and this is it.
+        Until 0.6.1 this test was ``test_the_v1_prefix_is_appended_once`` and asserted the
+        opposite: a server root in, ``/v1`` appended here. That made the advertised ``/v1``
+        URL 404 at ``/v1/v1`` and EnsoNet's ``/v1d`` unreachable. ``test_llm_base_url.py``
+        carries the rest.
         """
         with llm_stub() as stub:
             settings = stub.settings()
             base_url, model = settings.require_llm("test")
-            assert not base_url.endswith("/v1")
+            assert base_url == stub.base_url and base_url.endswith("/v1")
 
             asyncio.run(
                 llm_client.complete(

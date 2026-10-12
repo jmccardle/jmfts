@@ -125,7 +125,8 @@ def llm_stub(
     # will be bound to, so the base URL is filled in once the socket has a port.
     stub = LlmStub(base_url="")
     server = HTTPServer(("127.0.0.1", 0), _make_handler(stub, content, status, reasoning))
-    stub.base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    # With the version segment, because the base URL is used as given (0.6.1).
+    stub.base_url = f"http://127.0.0.1:{server.server_address[1]}/v1"
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

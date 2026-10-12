@@ -6,7 +6,8 @@ via JMFTS settings) correctly implements the OpenAI Chat Completions API.
 Architecture note
 -----------------
 JMFTS consumes LLMs exclusively through the OpenAI REST API contract
-(POST /v1/chat/completions, GET /v1/models).  There are no ensonet-specific
+(POST {base}/chat/completions, GET {base}/models), where {base} is
+``JMFTS_LLM_BASE_URL`` as given — version segment included (0.6.1).  There are no ensonet-specific
 code paths in production code — ensonet is just the default value for
 ``effective_llm_url``.  Any OpenAI-compatible server can substitute.
 
@@ -34,7 +35,7 @@ beyond the standard OpenAI contract include:
 Configuration
 -------------
 Tests read from JMFTS settings:
-  JMFTS_LLM_BASE_URL  — override ensonet URL (default http://localhost:8853)
+  JMFTS_LLM_BASE_URL  — the base URL as advertised, e.g. http://localhost:8853/v1d
   JMFTS_LLM_MODEL     — override model name (default THUDM_GLM4_32b)
   JMFTS_LLM_TIMEOUT   — override timeout (default 180 s)
 
@@ -71,14 +72,13 @@ def _is_server_reachable() -> bool:
     """Return True if the LLM server responds to a basic health probe."""
     url = _server_url()
     try:
-        # Try /health first (ensonet extension), fall back to /v1/models
-        for path in ("/health", "/v1/models"):
-            try:
-                r = httpx.get(f"{url}{path}", timeout=5.0)
-                if r.status_code < 500:
-                    return True
-            except httpx.RequestError:
-                continue
+        # Relative to the base URL as configured, which carries its version segment.
+        try:
+            r = httpx.get(f"{url}/models", timeout=5.0)
+            if r.status_code < 500:
+                return True
+        except httpx.RequestError:
+            pass
     except Exception:
         pass
     return False
@@ -142,12 +142,12 @@ def _chat_payload(model: str, *, stream: bool = False, **kwargs) -> dict:
 class TestModelsEndpoint:
     @skip_if_no_server
     def test_returns_200(self, client: httpx.Client):
-        r = client.get("/v1/models")
+        r = client.get("/models")
         assert r.status_code == 200
 
     @skip_if_no_server
     def test_response_shape(self, client: httpx.Client):
-        r = client.get("/v1/models")
+        r = client.get("/models")
         data = r.json()
         assert data.get("object") == "list"
         assert isinstance(data.get("data"), list)
@@ -155,14 +155,14 @@ class TestModelsEndpoint:
 
     @skip_if_no_server
     def test_each_model_has_required_fields(self, client: httpx.Client):
-        r = client.get("/v1/models")
+        r = client.get("/models")
         for entry in r.json()["data"]:
             assert "id" in entry, f"model entry missing 'id': {entry}"
             assert "object" in entry, f"model entry missing 'object': {entry}"
 
     @skip_if_no_server
     def test_configured_model_present(self, client: httpx.Client, model: str):
-        r = client.get("/v1/models")
+        r = client.get("/models")
         ids = [m["id"] for m in r.json()["data"]]
         assert model in ids, f"Configured model '{model}' not found in /v1/models response: {ids}"
 
@@ -175,12 +175,12 @@ class TestModelsEndpoint:
 class TestChatCompletionsBasic:
     @skip_if_no_server
     def test_returns_200(self, client: httpx.Client, model: str):
-        r = client.post("/v1/chat/completions", json=_chat_payload(model))
+        r = client.post("/chat/completions", json=_chat_payload(model))
         assert r.status_code == 200, r.text
 
     @skip_if_no_server
     def test_response_top_level_shape(self, client: httpx.Client, model: str):
-        r = client.post("/v1/chat/completions", json=_chat_payload(model))
+        r = client.post("/chat/completions", json=_chat_payload(model))
         data = r.json()
         assert data.get("object") == "chat.completion"
         assert isinstance(data.get("choices"), list)
@@ -191,7 +191,7 @@ class TestChatCompletionsBasic:
 
     @skip_if_no_server
     def test_choice_shape(self, client: httpx.Client, model: str):
-        r = client.post("/v1/chat/completions", json=_chat_payload(model))
+        r = client.post("/chat/completions", json=_chat_payload(model))
         choice = r.json()["choices"][0]
         assert choice.get("index") == 0
         assert choice.get("finish_reason") in ("stop", "length", "eos")
@@ -202,7 +202,7 @@ class TestChatCompletionsBasic:
 
     @skip_if_no_server
     def test_usage_fields(self, client: httpx.Client, model: str):
-        r = client.post("/v1/chat/completions", json=_chat_payload(model))
+        r = client.post("/chat/completions", json=_chat_payload(model))
         usage = r.json()["usage"]
         assert isinstance(usage.get("prompt_tokens"), int)
         assert isinstance(usage.get("completion_tokens"), int)
@@ -211,7 +211,7 @@ class TestChatCompletionsBasic:
 
     @skip_if_no_server
     def test_max_tokens_respected(self, client: httpx.Client, model: str):
-        r = client.post("/v1/chat/completions", json=_chat_payload(model, max_tokens=4))
+        r = client.post("/chat/completions", json=_chat_payload(model, max_tokens=4))
         usage = r.json()["usage"]
         assert (
             usage["completion_tokens"] <= 4
@@ -220,8 +220,8 @@ class TestChatCompletionsBasic:
     @skip_if_no_server
     def test_temperature_zero_is_deterministic(self, client: httpx.Client, model: str):
         payload = _chat_payload(model, temperature=0.0)
-        r1 = client.post("/v1/chat/completions", json=payload)
-        r2 = client.post("/v1/chat/completions", json=payload)
+        r1 = client.post("/chat/completions", json=payload)
+        r2 = client.post("/chat/completions", json=payload)
         c1 = r1.json()["choices"][0]["message"]["content"].strip().lower()
         c2 = r2.json()["choices"][0]["message"]["content"].strip().lower()
         assert c1 == c2, f"temperature=0 produced different outputs: {c1!r} vs {c2!r}"
@@ -237,7 +237,7 @@ class TestChatCompletionsStreaming:
     def test_streaming_returns_200(self, base_url: str, model: str, timeout: float):
         with httpx.Client(base_url=base_url, timeout=timeout) as client:
             with client.stream(
-                "POST", "/v1/chat/completions", json=_chat_payload(model, stream=True)
+                "POST", "/chat/completions", json=_chat_payload(model, stream=True)
             ) as r:
                 assert r.status_code == 200
 
@@ -245,7 +245,7 @@ class TestChatCompletionsStreaming:
     def test_streaming_content_type(self, base_url: str, model: str, timeout: float):
         with httpx.Client(base_url=base_url, timeout=timeout) as client:
             with client.stream(
-                "POST", "/v1/chat/completions", json=_chat_payload(model, stream=True)
+                "POST", "/chat/completions", json=_chat_payload(model, stream=True)
             ) as r:
                 ct = r.headers.get("content-type", "")
                 assert "text/event-stream" in ct, f"Expected text/event-stream, got: {ct}"
@@ -258,7 +258,7 @@ class TestChatCompletionsStreaming:
 
         with httpx.Client(base_url=base_url, timeout=timeout) as client:
             with client.stream(
-                "POST", "/v1/chat/completions", json=_chat_payload(model, stream=True)
+                "POST", "/chat/completions", json=_chat_payload(model, stream=True)
             ) as r:
                 for line in r.iter_lines():
                     if not line:
@@ -283,7 +283,7 @@ class TestChatCompletionsStreaming:
 
         with httpx.Client(base_url=base_url, timeout=timeout) as client:
             with client.stream(
-                "POST", "/v1/chat/completions", json=_chat_payload(model, stream=True)
+                "POST", "/chat/completions", json=_chat_payload(model, stream=True)
             ) as r:
                 for line in r.iter_lines():
                     if not line or not line.startswith("data:"):
@@ -307,7 +307,7 @@ class TestChatCompletionsStreaming:
         content_parts = []
         with httpx.Client(base_url=base_url, timeout=timeout) as client:
             with client.stream(
-                "POST", "/v1/chat/completions", json=_chat_payload(model, stream=True)
+                "POST", "/chat/completions", json=_chat_payload(model, stream=True)
             ) as r:
                 for line in r.iter_lines():
                     if not line or not line.startswith("data:"):
@@ -333,23 +333,23 @@ class TestErrorHandling:
     @skip_if_no_server
     def test_invalid_model_returns_4xx(self, client: httpx.Client):
         payload = _chat_payload("nonexistent-model-xyz-12345")
-        r = client.post("/v1/chat/completions", json=payload)
+        r = client.post("/chat/completions", json=payload)
         assert 400 <= r.status_code < 500, f"Expected 4xx for invalid model, got {r.status_code}"
 
     @skip_if_no_server
     def test_missing_messages_returns_4xx(self, client: httpx.Client, model: str):
-        r = client.post("/v1/chat/completions", json={"model": model})
+        r = client.post("/chat/completions", json={"model": model})
         assert 400 <= r.status_code < 500, f"Expected 4xx for missing messages, got {r.status_code}"
 
     @skip_if_no_server
     def test_empty_messages_returns_4xx(self, client: httpx.Client, model: str):
-        r = client.post("/v1/chat/completions", json={"model": model, "messages": []})
+        r = client.post("/chat/completions", json={"model": model, "messages": []})
         assert 400 <= r.status_code < 500, f"Expected 4xx for empty messages, got {r.status_code}"
 
     @skip_if_no_server
     def test_malformed_json_returns_4xx(self, client: httpx.Client):
         r = client.post(
-            "/v1/chat/completions",
+            "/chat/completions",
             content=b"not-json",
             headers={"Content-Type": "application/json"},
         )
@@ -358,7 +358,7 @@ class TestErrorHandling:
     @skip_if_no_server
     def test_error_response_has_error_field(self, client: httpx.Client):
         payload = _chat_payload("nonexistent-model-xyz-12345")
-        r = client.post("/v1/chat/completions", json=payload)
+        r = client.post("/chat/completions", json=payload)
         if 400 <= r.status_code < 500:
             data = r.json()
             # OpenAI error format: {"error": {"message": ..., "type": ..., "code": ...}}
@@ -377,7 +377,7 @@ class TestColdStartAndWarmup:
     ):
         """First request must complete within effective_llm_timeout (may load model)."""
         start = time.monotonic()
-        r = client.post("/v1/chat/completions", json=_chat_payload(model))
+        r = client.post("/chat/completions", json=_chat_payload(model))
         elapsed = time.monotonic() - start
         assert r.status_code == 200, f"Cold-start request failed: {r.text}"
         assert elapsed < timeout, f"Cold-start took {elapsed:.1f}s, exceeding timeout {timeout}s"
@@ -393,12 +393,12 @@ class TestColdStartAndWarmup:
         payload = _chat_payload(model)
 
         t0 = time.monotonic()
-        r_cold = client.post("/v1/chat/completions", json=payload)
+        r_cold = client.post("/chat/completions", json=payload)
         cold_elapsed = time.monotonic() - t0
         assert r_cold.status_code == 200
 
         t1 = time.monotonic()
-        r_warm = client.post("/v1/chat/completions", json=payload)
+        r_warm = client.post("/chat/completions", json=payload)
         warm_elapsed = time.monotonic() - t1
         assert r_warm.status_code == 200
 
@@ -423,7 +423,7 @@ class TestConcurrentRequests:
         async def _run() -> list[int]:
             async def _one_request() -> int:
                 async with httpx.AsyncClient(base_url=base_url, timeout=timeout) as c:
-                    r = await c.post("/v1/chat/completions", json=_chat_payload(model))
+                    r = await c.post("/chat/completions", json=_chat_payload(model))
                     return r.status_code
 
             return await asyncio.gather(_one_request(), _one_request(), _one_request())
@@ -438,7 +438,7 @@ class TestConcurrentRequests:
         async def _run() -> list[str]:
             async def _get_response_id() -> str:
                 async with httpx.AsyncClient(base_url=base_url, timeout=timeout) as c:
-                    r = await c.post("/v1/chat/completions", json=_chat_payload(model))
+                    r = await c.post("/chat/completions", json=_chat_payload(model))
                     return r.json().get("id", "")
 
             return await asyncio.gather(_get_response_id(), _get_response_id(), _get_response_id())
@@ -459,7 +459,7 @@ class TestTimeoutHandling:
         with pytest.raises(httpx.TimeoutException):
             with httpx.Client(base_url=base_url, timeout=0.1) as c:
                 c.post(
-                    "/v1/chat/completions",
+                    "/chat/completions",
                     json=_chat_payload(model, max_tokens=256),
                 )
 
@@ -467,7 +467,7 @@ class TestTimeoutHandling:
     def test_normal_timeout_does_not_fire(self, client: httpx.Client, model: str):
         """A request within configured timeout must complete without error."""
         # If this raises TimeoutException, the server or timeout config is broken.
-        r = client.post("/v1/chat/completions", json=_chat_payload(model))
+        r = client.post("/chat/completions", json=_chat_payload(model))
         assert r.status_code == 200
 
 
@@ -561,40 +561,24 @@ class TestJmftsConfigIntegration:
         assert s.effective_llm_timeout == 60.0
 
     def test_completions_endpoint_pattern(self):
-        """Verify the URL pattern used by production code against effective_llm_url.
+        """The base URL is used as given: JMFTS appends `/chat/completions`, never `/v1`.
 
-        Production callers (fact_extraction.py, summarization.py, synthesis.py) do:
-            base_url = settings.effective_llm_url.rstrip("/")
-            POST {base_url}/v1/chat/completions
-
-        CONVENTION: effective_llm_url must NOT include a /v1 suffix — callers
-        always append /v1/chat/completions themselves.  Setting
-        JMFTS_LLM_BASE_URL=http://host:port/v1 would produce a broken double-/v1
-        URL.  Use JMFTS_LLM_BASE_URL=http://host:port (no trailing /v1).
-
-        NOTE: .env.example currently shows the /v1 form — that is incorrect and
-        would result in http://host:port/v1/v1/chat/completions (404).
+        Before 0.6.1 it appended `/v1` to a "server root", so the advertised `/v1` URL
+        404'd at `/v1/v1` and EnsoNet's `/v1d` could not be configured at all.
         """
         from jmfts_core.config import Settings
+        from jmfts_core.llm_client import build_model
 
-        # Ensonet-style: base URL without /v1 suffix
-        s_ensonet = Settings(
-            llm_base_url="",
-            ensonet_url="http://my-ensonet:8853",
-            ensonet_model="test-model",
-            ensonet_timeout=30.0,
-        )
-        base = s_ensonet.effective_llm_url.rstrip("/")
-        assert f"{base}/v1/chat/completions" == "http://my-ensonet:8853/v1/chat/completions"
-
-        # Generic override: also without /v1 suffix (consistent convention)
-        s_generic = Settings(
-            llm_base_url="http://other-server:11434",
-            llm_model="llama3",
-            llm_timeout=60.0,
-        )
-        base2 = s_generic.effective_llm_url.rstrip("/")
-        assert f"{base2}/v1/chat/completions" == "http://other-server:11434/v1/chat/completions"
+        for given in (
+            "http://gpu-box:8080/v1",
+            "http://gpu-box:8080/v1/",
+            "http://my-ensonet:8853/v1d",
+            "https://api.example.com/openai/v1",
+        ):
+            s = Settings(llm_base_url=given, llm_model="m", llm_timeout=5.0)
+            base, model = s.require_llm("test")
+            built = build_model(base_url=base, model=model, max_tokens=16, settings=s)
+            assert built.base_url == given.rstrip("/")
 
 
 # ---------------------------------------------------------------------------
