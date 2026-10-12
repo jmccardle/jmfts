@@ -77,7 +77,6 @@ SHIPPED = (
     ".githooks/",
     "bump-version.sh",
     "LICENSE",
-    "uv.lock",
     ".gitignore",
     ".dockerignore",
 )

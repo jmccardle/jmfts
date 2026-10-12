@@ -47,3 +47,8 @@ htmlcov/
 *.log
 jmfts-needle/heads/*.pt
 jmfts-needle/experiments/e6_index.npz
+
+# Lock files. There is no uv.lock on purpose: every installer this project runs is pip, and
+# torch comes from an index chosen at install time. See the comment above `dependencies`
+# in pyproject.toml. A lock that nothing installs from or checks only rots (#31).
+uv.lock

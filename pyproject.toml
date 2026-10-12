@@ -29,6 +29,26 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Text Processing :: Indexing",
 ]
+# WHAT A FLOOR MEANS HERE, set by the dependency pass of 2026-10-12 (#31): the lowest
+# version line the suite has actually run against. A floor older than anything tested is
+# a claim nobody checked — the previous floors (transformers 4.40, numpy 1.26, fastapi
+# 0.109, sentence-transformers 2.2) were from the 0.1.0 tree, several majors below what
+# every install here resolved, and one of them (pgvector, below) admitted a version the
+# code cannot import against. "Tested" means two environments on 2026-10-12: the
+# long-lived development venv, and a fresh resolve (fastapi 0.143, sqlalchemy 2.1.4,
+# transformers 5.19, sentence-transformers 6.1, torch 2.14 CPU, ffwf-tau-llm 0.12.0).
+# A floor is raised wherever the tested line crossed a MAJOR (or, for a 0.x package, the
+# minor its API moved at); same-line patch drift is left alone, because churning a floor
+# that nothing contradicts buys nothing.
+#
+# UPPER BOUNDS only where a break is KNOWN, and there is none today — see sqlalchemy.
+# A speculative cap is a resolver conflict waiting for the next consumer that needs the
+# newer version, which is a failure with no defect behind it.
+#
+# There is NO lock file. Every installer this project documents or runs — CI, both
+# Dockerfiles, scripts/check_base_install.sh, the README — is pip, and torch comes from
+# an index chosen at install time (see `embed`), which a single lock cannot express. The
+# uv.lock that used to sit beside this file described 0.1.0 and was checked by nothing.
 dependencies = [
     # The wire contracts, and the HTTP client generated from them. The dependency runs
     # SERVER → CLIENT, which looks inverted and is deliberate: `jmfts_client.contracts` is
@@ -45,7 +65,7 @@ dependencies = [
     # install time. `./bump-version.sh` moves this line and both `__version__` literals
     # together, and tests/test_packaging.py fails if they disagree.
     "jmfts-client==0.6.1",
-    "fastapi>=0.109.0",
+    "fastapi>=0.135.0",
     # Required by the multipart upload route (POST /ingest/file). NOT optional and NOT
     # lazy: FastAPI checks for it while the ROUTE IS BUILT, i.e. at
     # `import jmfts_core.rest.main`, so
@@ -53,9 +73,18 @@ dependencies = [
     # endpoint. It was previously present only as a transitive dependency of `mcp`.
     "python-multipart>=0.0.9",
     "uvicorn[standard]>=0.27.0",
+    # NO UPPER BOUND, and that is decided rather than forgotten. SQLAlchemy 2.1 changed
+    # what a bare `postgresql://` means (psycopg 3, not psycopg2), and that broke a fresh
+    # install once (1178d3b). The fix was to name the driver in the URL
+    # (`Settings.database_url`, held by tests/test_database_url.py), which removes the
+    # dependence on the default; the suite passes under 2.1.4. A `<2.1` cap would have
+    # hidden the defect instead of removing it.
     "sqlalchemy>=2.0.25",
     "psycopg2-binary>=2.9.9",
-    "pgvector>=0.2.4",
+    # `HALFVEC` (jmfts_core/models/token_embedding.py) does not exist before pgvector-python
+    # 0.3.0, so the old floor of 0.2.4 admitted a version that fails at import. Tested on
+    # 0.4.2 and 0.5.1.
+    "pgvector>=0.4.0",
     "pydantic>=2.5.0",
     "pydantic-settings>=2.1.0",
     # The TOKENIZER, not the model. `AutoTokenizer` is what `check_fit`,
@@ -64,9 +93,11 @@ dependencies = [
     # `tokenizers` directly because every token count this system is calibrated against
     # was produced by `AutoTokenizer(...)["input_ids"]`, and a second loader would be free
     # to disagree with it about special tokens.
-    "transformers>=4.40",
-    "numpy>=1.26.0",
-    "httpx>=0.26.0",
+    "transformers>=5.5",
+    "numpy>=2.4",
+    # 0.27, not 0.26: `ffwf-tau-llm` declares `httpx>=0.27`, and a floor below what a
+    # dependency requires is a number that can never be installed.
+    "httpx>=0.27",
     # The LLM transport, behind `jmfts_core/llm_client.py`. BASE rather than an extra,
     # because four existing code paths moved onto it — synthesis, RAPTOR summarization,
     # fact extraction and span summarization — and an extra whose absence breaks shipped
@@ -78,15 +109,20 @@ dependencies = [
     # `>=` and not `==`: this is a first-party package but it is NOT released in lockstep
     # with JMFTS the way `jmfts-client` is — there is no generated artefact on either side
     # to keep in step, only the `complete_simple` entry point, which is the one surface τ
-    # documents as stable. Floor at 0.9.3 because that is where `Model.stream` and
-    # `Model.request_timeout` exist, and llm_client.py sets both.
-    "ffwf-tau-llm>=0.9.3",
+    # documents as stable. `Model.stream` and `Model.request_timeout` arrived in 0.9.3 and
+    # llm_client.py sets both. The floor is 0.12.0 (#10) because that is where
+    # `TokenCount` / `TokenizerCounter` / `Model.tokenizer` land, which the token-type work
+    # builds on. JMFTS does NOT call τ's `counter_for()` today, and must not take its
+    # answer when it does: it falls back to a character-class ESTIMATE (`exact=False`), and
+    # every token count here is a measurement. τ 0.10.0's breaking changes are in the
+    # agent/session layer, not in the five names llm_client.py imports.
+    "ffwf-tau-llm>=0.12.0",
     "ruptures>=1.1.8",
-    "python-igraph>=0.11.0",
-    "leidenalg>=0.10.0",
-    "markdown-it-py>=3.0.0",
+    "python-igraph>=1.0",
+    "leidenalg>=0.11",
+    "markdown-it-py>=4.0",
     "pymupdf>=1.24",
-    "markdownify>=0.11",
+    "markdownify>=1.2",
     # Reads an OLE2 compound file's directory. In BASE rather than in the `office` extra
     # below, and the reason is that `probe` runs on every install and has to schedule
     # from what it finds (INGEST_SPEC.md Part 4).
@@ -155,7 +191,7 @@ jmfts-batch-worker = "jmfts_batch.cli:main"
 # installs the CUDA build anyway. The Dockerfiles do exactly the two steps above.
 embed = [
     "torch>=2.1.0",
-    "sentence-transformers>=2.2.2",
+    "sentence-transformers>=5.3",
 ]
 
 # READING AND WRITING OOXML PACKAGES. docs/OFFICE_SPEC.md Part 1.
@@ -189,7 +225,7 @@ embed = [
 # `olefile`, which is a base dependency for that reason.
 office = [
     "python-docx>=1.1.0",
-    "python-pptx>=0.6.23",
+    "python-pptx>=1.0",
     "openpyxl>=3.1.0",
 ]
 
@@ -246,7 +282,7 @@ rdf = [
 # worksheet should fail by name when something asks it to sketch a column, rather than
 # silently having the capability and never using it.
 sketch = [
-    "datasketch>=1.6",
+    "datasketch>=2.0",
 ]
 
 # DRIVING LIBREOFFICE. docs/OFFICE_SPEC.md Parts 1 and 6.
@@ -317,10 +353,13 @@ dev = [
     "jmfts[office]",
     "jmfts[rdf]",
     "jmfts[sketch]",
-    "pytest>=7.4.0",
-    "pytest-asyncio>=0.23.0",
-    "black>=24.1.0",
-    "ruff>=0.1.0",
+    "pytest>=9.0",
+    "pytest-asyncio>=1.0",
+    # Floors at the gate's year, not pins: black changes its stable style each January, so
+    # a dev install with black 24 or 25 formats the tree differently from the 26.3.1 that
+    # CI's lint job pins, and the pre-commit hook would disagree with CI.
+    "black>=26.1",
+    "ruff>=0.15",
 ]
 
 # The PUBLIC repository only. This tree has a second, internal git remote whose history is
