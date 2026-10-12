@@ -323,6 +323,20 @@ Most fan-out atoms already carry a bounding parameter:
 | `chunk` | `⌊bytes / min_chunk_length⌋` | `min_chunk_length`, already in `STRUCTURE_CHUNK_PARAMS` |
 | `extract:sheet` | `min(rows, max_rows)` | exact in both directions |
 | `structure:sheets` | `sheet_count` | exact in both directions |
+| `structure:conversation` | `line_count + char_count` | probe's two counts; *added 2026-10-12* |
+
+*Added 2026-10-12, `SPRINT_0_6_0.md` step 36 and question 4.11.* The conversation rung
+arrived with 15.4 S7, after this table and after finding 6 below, and wrote children with
+no bound until step 36 — so `EXPLAIN` answered `?` for every transcript. Its row is as
+loose as the `chunk` row and for the same reason: each part holds at least one character,
+and nothing reachable from `(evidence, params)` says how many more. This section rejects
+FLOORS; a loose ceiling is still a ceiling, and 7.1 already says a recursive atom's is
+loose. Two corrections to the `chunk` row, recorded rather than fixed: the shipped
+`_chunk_ceiling` reads `extraction.characters`, not bytes, and it CAN be exceeded: the
+`fits` predicate splits a piece below `min_chunk_length` when the window demands it, and
+`_write_chunks` calls `chunk_text` once per section, so every non-empty section body is at
+least one chunk however short (read from the code, not yet measured). That is open for
+0.7.0, beside the packing change that would tighten both rows.
 
 So `fanout: true` requires a function from `(evidence, params)` to an interval.
 Declaring one is a bind-time check (Part 10), not a convention.
@@ -364,6 +378,9 @@ whichever way it goes.
 which writes exactly one child, the profile node. A constant is a legitimate
 bound and declaring it is what keeps `fanout: false` meaning "writes no nodes"
 rather than "writes few enough not to worry about".
+*(2026-10-12: seven. `structure:conversation`, added by 15.4 S7, wrote children and
+declared neither a bound nor a key until `SPRINT_0_6_0.md` step 36, which also made
+`Atom` refuse an atom whose `write_mode` is `children` and which declares no bound.)*
 
 ### 2.6 Seeing it, rather than asserting it
 

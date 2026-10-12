@@ -167,6 +167,60 @@ class TestMessagesToJsonl:
         assert "café ☕" in messages_to_jsonl(messages)
 
 
+def _conversation_ceiling(data: bytes) -> int:
+    """The declared ceiling, evaluated over what probe measures for ``data``."""
+    import jmfts_core.ingest_tasks  # noqa: F401  (registers the atom)
+    from jmfts_core.atoms import ATOMS
+    from jmfts_core.probe import detect_format, probe_patterns
+
+    patterns, _ = probe_patterns(data, detect_format(data))
+    assert patterns["is_conversation"] is True
+    fanout = ATOMS["structure:conversation"].fanout
+    assert fanout is not None, "structure:conversation declares no fan-out bound"
+    evidence = {f"matched.patterns.{k}": v for k, v in patterns.items()}
+    low, high = fanout.bound(evidence, {})
+    assert low == 0
+    return high
+
+
+class TestTheFanoutCeilingHoldsAtTheWorstCase:
+    """``SPRINT_0_6_0.md`` step 36, question 4.11 option A, without a database.
+
+    The handler's arithmetic is one node per turn plus one per piece ``chunk_to_fit``
+    returns for an over-window turn. This drives the same ``chunk_text`` call with the
+    adversarial shape for each half: a prompt/response line, which is TWO turns from ONE
+    line, and content made of two-character sentences, which the ``sentence`` strategy
+    emits one chunk apiece because it does not pack. Every turn is treated as over the
+    window, which no real one is, so the count here is above anything the handler writes.
+    """
+
+    def test_two_turns_per_line_and_one_part_per_sentence_stay_under_it(self):
+        import json
+
+        from jmfts_core.chunking import ChunkStrategy, chunk_text
+
+        content = "A. " * 300
+        line = json.dumps({"prompt": content, "response": content})
+        data = (line + "\n" + line + "\n").encode("utf-8")
+
+        written = 0
+        for message in parse_adjutant_jsonl(data.decode("utf-8")):
+            written += 1
+            written += len(
+                chunk_text(
+                    message.content,
+                    strategy=ChunkStrategy.sentence,
+                    max_chars=1800,
+                    fits=lambda piece: len(piece) <= 64,
+                )
+            )
+
+        # Four turns from two lines, and 300 parts apiece: the parts are a sentence each,
+        # NOT a window each — the premise 4.11 was written on and corrected in place.
+        assert written == 4 + 4 * 300
+        assert written <= _conversation_ceiling(data)
+
+
 class TestConversationMarkdown:
     def test_it_is_the_readable_concatenation(self):
         messages = [
@@ -411,6 +465,36 @@ class TestOversizeTurns:
         assert parts, "an over-window turn must be split into pieces that fit"
         assert all(evidence(p)["part_index"] == i for i, p in enumerate(parts))
         assert all(p.embed is not None for p in parts)
+
+    def test_the_nodes_written_are_under_the_declared_ceiling(self, db_session, evidence):
+        """``SPRINT_0_6_0.md`` step 36: the run, held against the bound ``EXPLAIN`` prints.
+
+        Two-character sentences, because the ``sentence`` strategy emits one part per
+        sentence — so this is the turn that writes the MOST parts for its length.
+        """
+        response = _ingest(
+            db_session,
+            # ~600 tokens, over the 512-token window, in three hundred sentences.
+            messages=_msgs(("assistant", "Go. " * 300), ("user", "A short reply.")),
+            extract_facts=False,
+        )
+
+        repo = DocumentRepository(db_session)
+        root = repo.get(response.source_document_id)
+        recorded = evidence(root)
+        written = recorded["structure"]["node_count"]
+        turns = repo.get_children(root.id, depth=1, limit=100)
+        parts = sum(len(repo.get_children(t.id, depth=1, limit=1000)) for t in turns)
+        assert written == len(turns) + parts
+        assert parts == 300, "one part per sentence; 4.11's correction, measured"
+
+        from jmfts_core.atoms import ATOMS
+
+        patterns = recorded["matched"]["patterns"]
+        fanout = ATOMS["structure:conversation"].fanout
+        assert fanout is not None, "structure:conversation declares no fan-out bound"
+        low, high = fanout.bound({f"matched.patterns.{k}": v for k, v in patterns.items()}, {})
+        assert low <= written <= high
 
     def test_a_turn_that_fits_gets_no_children(self, db_session, evidence):
         response = _ingest(

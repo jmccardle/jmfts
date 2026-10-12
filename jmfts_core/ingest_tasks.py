@@ -2895,7 +2895,8 @@ def _fold_inputs(patterns: Optional[dict]) -> dict:
 def _not_counted(tasks: tuple[ExplainedTask, ...]) -> tuple[str, ...]:
     """What these totals leave out. DERIVED, per Part 14's rule against a second list.
 
-    Three statements, each from a declaration rather than from a name written down here:
+    Two statements, each from a declaration rather than from a name written down here.
+    There were three:
 
     1. **Twelve task types are not rows of Part 4's table at all.** ``explain_plan`` reads
        ``TASK_ROWS`` and nothing else (``SPRINT_0_6_0.md`` Block C), so the rollup walk's
@@ -2906,9 +2907,12 @@ def _not_counted(tasks: tuple[ExplainedTask, ...]) -> tuple[str, ...]:
        ``SPRINT_0_5_0.md`` 6.1: ``Fact.locus`` has no term for it, so those atoms declare
        ``produces=()`` — which is the derivable signature, and ``extract:facts`` is the one
        of the three that is a row.
-    3. **An atom that writes children and declares no fan-out bound.** 2.4 requires one;
-       ``structure:conversation`` has none, so its ``writes`` is open rather than a number
-       short by every turn in the transcript.
+    3. *Retired 2026-10-12.* **An atom that writes children and declares no fan-out
+       bound.** 2.4 requires one, and ``structure:conversation`` was the one that had none,
+       so its ``writes`` was open rather than a number short by every turn in the
+       transcript. ``SPRINT_0_6_0.md`` step 36 gave it a bound (question 4.11, option A)
+       and made :class:`~jmfts_core.atoms.Atom` refuse the position, so no registered atom
+       can be in it and there is nothing left here to derive the statement from.
     """
     lines: list[str] = []
 
@@ -2930,12 +2934,6 @@ def _not_counted(tasks: tuple[ExplainedTask, ...]) -> tuple[str, ...]:
                 f"{task} writes rows and nodes outside this tree, and the locus vocabulary "
                 "has no term for that (INGEST_SPEC.md 5.3, SPRINT_0_5_0.md 6.1), so it "
                 "declares `produces=()` and `nodes` does not count what it writes"
-            )
-        elif atom.write_mode == WRITE_CHILDREN and atom.fanout is None:
-            lines.append(
-                f"{task} writes children and declares no fan-out bound, which SPRINT_JOBS.md "
-                "2.4 requires of one that does; its `writes` is open rather than zero, and "
-                "`nodes` is open with it"
             )
     return tuple(lines)
 
@@ -2967,11 +2965,11 @@ def _fold_cost(
     #: (producing rule, usetype) -> the nodes of that kind it writes. 4.1's scope is
     #: exactly this pair, so a scope's cardinality is a lookup rather than a query.
     produced: dict[tuple[str, str], Count] = {}
-    #: Rules that write children and declare no bound (2.4). What they wrote is not a
-    #: number and not a usetype, so a scope naming one of them is open however many nodes
-    #: its other producers contributed — otherwise `embed` over a transcript reports zero
-    #: embeddings, which is a number and is wrong.
-    undeclared: set[str] = set()
+    # THERE WAS AN `undeclared` SET HERE, for rules that write children and declare no
+    # bound: what they wrote was not a number and not a usetype, so a scope naming one was
+    # forced open. `structure:conversation` was the only member, and `Atom` refuses the
+    # position since `SPRINT_0_6_0.md` step 36, so every child-writing rule reaches the
+    # `fanout` branch below and contributes to `produced` like any other.
     unmeasured: list[Unmeasured] = []
     seen_unmeasured: set[tuple[str, str]] = set()
 
@@ -2986,8 +2984,6 @@ def _fold_cost(
             for producer in row.scope.produced_by:
                 for usetype in row.scope.usetypes:
                     scope_count = scope_count + produced.get((producer, usetype), ZERO)
-            if any(producer in undeclared for producer in row.scope.produced_by):
-                scope_count = Count(scope_count.low, None)
 
         multiplicity = scope_count * _RUN_FACTOR[task.outcome]
 
@@ -3023,13 +3019,6 @@ def _fold_cost(
             writes = multiplicity * per_instance
             key = (task.task, usetype_written)
             produced[key] = produced.get(key, ZERO) + writes
-        elif atom is not None and atom.write_mode == WRITE_CHILDREN:
-            # 2.4 says a fan-out atom declares a bound and this one does not, so what it
-            # writes is not zero and is not known. `_not_counted` names it; reporting ZERO
-            # here would be a total short by every node the rung creates.
-            writes = multiplicity * Count(0, None)
-            if multiplicity.high != 0:
-                undeclared.add(task.task)
 
         folded.append(
             replace(

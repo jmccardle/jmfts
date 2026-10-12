@@ -49,8 +49,8 @@ from jmfts_core.models.task_queue import WRITE_CHILDREN
 #: `structure:sheets`' bound divides, and `has_sheets` is what schedules it.
 WORKBOOK = {"has_sheets": True, "sheet_count": 3}
 
-#: A transcript as the `text` prober reports one. `line_count` is a measurement no
-#: condition reads and no bound reads either — see the conversation test below.
+#: A transcript as the `text` prober reports one. No condition reads `line_count` or
+#: `char_count`; `structure:conversation`'s bound reads both (`SPRINT_0_6_0.md` step 36).
 TRANSCRIPT = {
     "has_text_layer": True,
     "is_conversation": True,
@@ -207,27 +207,46 @@ class TestWhatItDoesNotCount:
         plan = explain_plan("pdf", {"facts": {"enabled": True}}, patterns)
         assert any(TASK_EXTRACT_FACTS in line for line in plan.cost.not_counted)
 
-    def test_a_rung_that_writes_children_and_declares_no_bound_is_named(self):
-        # `structure:conversation` writes one chunk per turn and declares no `Fanout`,
-        # which 2.4 says a fan-out atom must. Until it does, its node count is open and
-        # the plan says which rung opened it rather than reporting a number short by every
-        # turn in the transcript.
+    def test_the_conversation_rung_is_counted_and_not_named(self):
+        # WAS `test_a_rung_that_writes_children_and_declares_no_bound_is_named`: the rung
+        # declared no `Fanout`, its writes were `[0, ?]` and this list named it. Step 36
+        # (question 4.11, option A) gave it the ceiling probe already measures — one chunk
+        # per turn and at most one per character of an over-window turn — so a
+        # transcript's node count is a number and the rung is no longer in this list.
         plan = explain_plan("text", None, TRANSCRIPT)
         rung = _task(plan, TASK_STRUCTURE_CONVERSATION)
         assert rung.outcome == "enqueued"
-        assert rung.writes == Count(0, None)
-        assert any(TASK_STRUCTURE_CONVERSATION in line for line in plan.cost.not_counted)
+        assert rung.writes == Count(0, 4_040)
+        assert rung.writes_usetype == "chunk"
+        assert not any(TASK_STRUCTURE_CONVERSATION in line for line in plan.cost.not_counted)
 
-    def test_the_undeclared_bound_is_the_only_one_of_its_kind(self):
-        # A guard on the test above: the sentence is derived from a rule — an atom whose
-        # write mode is `children` and which declares no fan-out — and the day a second
-        # atom is in that position this says so instead of the rule quietly widening.
+    def test_the_transcript_counts_decide_the_bound_and_are_not_ignored(self):
+        plan = explain_plan("text", None, TRANSCRIPT)
+        assert "line_count" not in plan.patterns_ignored
+        assert "char_count" not in plan.patterns_ignored
+
+    def test_without_bytes_the_transcript_bound_names_probe(self):
+        # The conditional mode has no patterns, so the ceiling is open and 7.2's `?` line
+        # names the two counts and the atom that measures them, rather than a guess.
+        plan = explain_plan("text")
+        wanted = {
+            u.evidence: u
+            for u in plan.cost.unmeasured
+            if u.needed_by == TASK_STRUCTURE_CONVERSATION
+        }
+        assert set(wanted) == {"matched.patterns.line_count", "matched.patterns.char_count"}
+        assert all(TASK_PROBE in u.written_by for u in wanted.values())
+
+    def test_no_atom_writes_children_without_a_bound(self):
+        # WAS `test_the_undeclared_bound_is_the_only_one_of_its_kind`, which pinned the set
+        # at `{structure:conversation}`. `Atom.__post_init__` refuses that position now, so
+        # the set is empty by construction and this states it where the fold is tested.
         undeclared = {
             name
             for name, atom in ATOMS.items()
             if atom.write_mode == WRITE_CHILDREN and atom.fanout is None
         }
-        assert undeclared == {TASK_STRUCTURE_CONVERSATION}
+        assert undeclared == set()
 
 
 class TestPatternsTheFoldReadsAreNotReportedAsIgnored:

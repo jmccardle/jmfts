@@ -447,7 +447,7 @@ the next two, and they are the two that are unblocked.
 |---|---|---|---|
 | 14 | Phase 5: multiplicity and the cost fold, so `EXPLAIN` says how much rather than only what | `SPRINT_JOBS.md` Part 7 | medium |
 | 15 | Phase 4's leftover: the route and the ancestor walk for per-collection configuration | `SPRINT_JOBS.md` 5.1 | medium |
-| 36 | `structure:conversation` declares the fan-out bound 2.4 requires, and `Atom` refuses one that does not | `SPRINT_JOBS.md` 2.4, 9.1 | medium, and blocked on question 4.11 |
+| 36 | `structure:conversation` declares the fan-out bound 2.4 requires, and `Atom` refuses one that does not | `SPRINT_JOBS.md` 2.4, 9.1 | medium, and blocked on question 4.11 — **DONE 2026-10-12**, 4.11 answered with option A |
 
 **Neither is blocked and both were deferred for the same reason twice.** `docs/SPRINT_0_5_0.md`
 put them in a stretch section that would run only if Block A's step 5 came back cheap; it came
@@ -485,6 +485,18 @@ about two thousand. 2.4's own argument against `⌈N/max_children⌉` rules that
 `conversation_message_lines` is NOT the way out either: `_conversation_turns` stops at
 `CONVERSATION_SCAN_LINES = 64`, so it reads 64 for a transcript of any size above that, and a
 ceiling short by every turn after the sixty-fourth is the one failure a ceiling may not have.
+
+*Unblocked and done 2026-10-12.* Question 4.11 was answered with option A: the bound this
+paragraph calls "true and useless" is the one that shipped, as `line_count + char_count`
+chunk nodes. Its "about two thousand" assumed window-sized parts, which the rung does not
+write, and its "turns are at most `line_count`" misses the prompt/response line that writes
+two — see the corrections marked in 4.11. `structure:conversation` declares it with
+`ChildKey(KEY_POSITION)`, `Atom.__post_init__` now refuses an atom whose `write_mode` is
+`children` and which declares no `Fanout`, and `_fold_cost`'s special case for an
+undeclared bound and `_not_counted`'s third statement are gone with the last atom they
+described. `EXPLAIN` with probed patterns gives a transcript a number; without bytes it
+gives `?` and names `matched.patterns.line_count` and `char_count`, written by `probe`,
+which is 7.2's line rather than a missing declaration.
 
 **One debt step 14 inherits and does not pay.** `Fact.locus` has no term for a write into
 another tree and three shipped tasks write there. It is recorded at `docs/INGEST_SPEC.md` 5.3,
@@ -1178,7 +1190,54 @@ different repository layout. Three candidates.
 specification — stopped being true when the process moved. A runbook nobody following it can
 open is not being held back, it is being lost.
 
-### 4.11 What divides, for `structure:conversation`'s fan-out bound
+### 4.11 What divides, for `structure:conversation`'s fan-out bound — ANSWERED 2026-10-12
+
+**Option A, none of the three below: ship the ceiling the code has today.** Turns plus parts
+is at most `matched.patterns.line_count + matched.patterns.char_count`, both counts probe
+already measures over the whole file; the floor is zero, `counts` is `chunk`, and the basis
+`EXPLAIN` prints is "one per turn, and at most one per character of an over-window turn".
+`_conversation_ceiling` in `jmfts_core/conversation_tasks.py` carries the argument for why
+the run cannot exceed it. It is loose by roughly the ratio of characters to sentences, and
+that is the price of not guessing: the alternatives below each either guessed a divisor or
+changed a fingerprint, and the argument that ruled A out (correction 2) was wrong.
+
+**Two corrections to the text below, found while answering it and marked where they apply
+rather than rewritten:**
+
+1. **Parts are sentences, not windows.** `_split_oversized` calls
+   `EmbeddingService.chunk_to_fit`, which calls `chunk_text(strategy=sentence, …)` with
+   `min_chunk_length` left at 1. The `sentence` strategy emits one chunk per sentence and
+   does not pack, so the window decides WHETHER a turn splits and not how big its parts are.
+   Measured: forty sentences totalling 1,989 characters, `max_chars=1800`, a `fits` that
+   accepts everything — forty chunks (re-run at 2,159 characters, forty again). The "about two thousand" for a 1 MB transcript below
+   assumed window-sized parts and is not what the rung writes; the true count for prose is
+   nearer one per sentence. So option 1 below would have divided by a size the parts do
+   not have.
+2. **2.4 rejects floors, not loose ceilings.** Its first sentence is "A floor is the wrong
+   bound", and its own table's `chunk` row, `⌊bytes / min_chunk_length⌋`, is exactly as
+   loose as this one and shipped as `_chunk_ceiling` (`structure_tasks.py`). "2.4 rejects a
+   ceiling like that in as many words" below is a misreading.
+
+A third, smaller one: "`line_count` bounds turns exactly, since … a turn is a line" is not
+so. `parse_adjutant_jsonl` writes TWO turns from a `{"prompt": …, "response": …}` line. The
+ceiling still holds, because a line spends at least 13 characters on JSON syntax and each
+of its turns is a decoded string no longer than its encoding — the docstring has the sum.
+
+**Option B, recorded as 0.7.0 work that would replace this bound:** pack
+`_split_oversized`'s parts to the window, then bound them by `2·tokens/window + 1` per turn
+with a measured token count as the evidence. That is the same change as packing inside
+`chunk_to_fit`, so it is one change and not two, and it changes what the rung WRITES, which
+is why it is not a declaration made today. It needs the token count to be evidence the bound
+can read, which is the half of option 1 below that survives.
+
+**Found and not fixed, for 0.7.0:** `_chunk_ceiling` can be exceeded. `chunk_text`'s `fits`
+predicate splits a piece below `min_chunk_length` when the window demands it (the docstring
+says `min_chunk_length` "yields to it"), and `_TreeWriter._write_chunks` calls `chunk_text`
+once per section, so every non-empty section body is at least one chunk however short. The
+second was read from the code and has not been measured. Recorded at `SPRINT_JOBS.md` 2.4
+with the same date.
+
+*The question as it was asked, unchanged:*
 
 Step 36 needs a ceiling on the chunk nodes the conversation rung writes, and `Fanout.bound`
 takes exactly two arguments: the declared evidence, and the resolved options. The rung writes
@@ -1188,10 +1247,13 @@ one chunk per turn and one more per part of every turn that exceeds the embeddin
 
 What is reachable is not enough. `matched.patterns.line_count` and `char_count` are measured
 over the whole file and are free, because probe already decodes it; `line_count` bounds turns
-exactly, since the format is JSONL and a turn is a line. Parts are the half with no divisor:
-without the window the only true statement is that each part holds at least one character, so
-the ceiling is `char_count`, which claims a million chunks for a 1 MB transcript where the
-answer is about two thousand. 2.4 rejects a ceiling like that in as many words.
+exactly, since the format is JSONL and a turn is a line. *[2026-10-12: not exactly — a
+prompt/response line is two turns; the third correction above.]* Parts are the half with no
+divisor: without the window the only true statement is that each part holds at least one
+character, so the ceiling is `char_count`, which claims a million chunks for a 1 MB transcript
+where the answer is about two thousand. *[2026-10-12: parts are sentences, not windows, so
+the answer is nearer one per sentence; correction 1 above.]* 2.4 rejects a ceiling like that
+in as many words. *[2026-10-12: it rejects floors; correction 2 above.]*
 
 What the answer changes: whether `EXPLAIN` over a transcript can say how many nodes and how
 many embeddings it will write, instead of `?`. Three candidates.
@@ -1214,4 +1276,5 @@ many embeddings it will write, instead of `?`. Three candidates.
 
 **Absent an answer, none of the three**, and step 36 stays open with the invariant unwritten.
 Guessing a divisor here would put a number into `EXPLAIN` that no measurement supports, which
-is the one thing 7.2 forbids by name.
+is the one thing 7.2 forbids by name. *[2026-10-12: answered with option A, which guesses no
+divisor — it divides by nothing.]*
