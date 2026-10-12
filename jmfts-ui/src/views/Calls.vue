@@ -7,7 +7,7 @@
 // fields — not something a page keeps alongside.
 
 import { calls } from "@/api";
-import { asCurl, asPython } from "@/api/client/copyout.js";
+import { asCurl, asPython } from "@jmfts/client/copyout.js";
 import Panel from "@/components/Panel.vue";
 import Tag from "@/components/Tag.vue";
 import { ref } from "vue";

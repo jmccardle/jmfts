@@ -22,7 +22,7 @@ has forgotten it; a pasted address does not carry it.
 
 | Path | What |
 |---|---|
-| `src/api/client/` | **Generated.** A copy of what `scripts/generate_ts_client.py` renders from the appliance's `/openapi.json` — a typed method and a TypeScript interface for all 115 operations. Replace the directory to update; do not edit it. |
+| `@jmfts/client` | **Generated, and not in this directory.** An alias (in `vite.config.ts` and `tsconfig.json`) for `../jmfts-web/jmfts_web/static/client/`, the one copy `scripts/generate_ts_client.py` writes and `tests/test_ts_client_codegen.py` checks. This console reads it in place; `tests/test_ui_client_single_source.py` fails if a copy appears here. Regenerating the client is the whole update. |
 | `src/api/index.ts` | The one client instance, the base URL, the token, and the call stream. |
 | `src/design/` | The tokens and the element defaults. `tokens.css` states the design language. |
 | `src/components/` | The shared vocabulary: `Tag`, `Fact`, `HandMark`, `NodeLine`, `Panel`, `ScopeTrail`, `Apparatus`, and the renderers. |

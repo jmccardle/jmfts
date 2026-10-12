@@ -1,10 +1,10 @@
 // The one appliance connection, and the call log every page can read.
 //
-// The client itself is GENERATED — `src/api/client/` is a copy of what
-// `scripts/generate_ts_client.py` renders from the appliance's `/openapi.json`, carrying a
-// typed method and a TypeScript interface for all 115 operations. Nothing here re-declares a
-// request or a response shape; when the appliance grows an operation, that directory is
-// replaced and the types arrive with it.
+// The client itself is GENERATED — `@jmfts/client` is `jmfts-web/jmfts_web/static/client/`,
+// read in place (see `vite.config.ts`): what `scripts/generate_ts_client.py` renders from the
+// appliance's `/openapi.json`, a typed method and a TypeScript interface for every operation.
+// Nothing here re-declares a request or a response shape, and there is no copy to replace:
+// when the appliance grows an operation, the regenerated files are what this console builds.
 //
 // WHAT THIS FILE ADDS is the three things a standalone console needs and the bundled one did
 // not: a base URL that is chosen at runtime rather than assumed to be this origin, a token
@@ -12,13 +12,13 @@
 // the call stream so the console can show its own traffic.
 
 import { reactive, ref, shallowRef, watch } from "vue";
-import { JmftsClient } from "./client/index.js";
-import type { CallEvent } from "./client/transport.js";
+import { JmftsClient } from "@jmfts/client/index.js";
+import type { CallEvent } from "@jmfts/client/transport.js";
 
 export type { CallEvent };
 // Every contract shape, as the generator declared it. Types only — the one value this module
 // re-exports is the client instance below, so nothing else can construct a second one.
-export type * from "./client/verbs.js";
+export type * from "@jmfts/client/verbs.js";
 
 /**
  * An appliance address as the transport needs it: empty for this origin, otherwise an absolute

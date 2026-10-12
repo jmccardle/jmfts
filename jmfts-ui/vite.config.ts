@@ -1,5 +1,5 @@
 import { fileURLToPath, URL } from "node:url";
-import { defineConfig, loadEnv } from "vite";
+import { defineConfig, loadEnv, searchForWorkspaceRoot } from "vite";
 import vue from "@vitejs/plugin-vue";
 
 // The appliance this console talks to.
@@ -9,6 +9,15 @@ import vue from "@vitejs/plugin-vue";
 // read at RUNTIME from `window.__JMFTS_BASE__` (see `index.html`), not baked in — one build
 // should be servable next to any appliance, which is the whole point of this being a separate
 // project rather than a bundle inside the wheel.
+// The generated client. ONE copy exists, the one `scripts/generate_ts_client.py` writes and
+// `tests/test_ts_client_codegen.py` holds against the live surface; this console reads it in
+// place through the `@jmfts/client` alias rather than carrying a second copy that nothing
+// checks. `tsconfig.json` maps the same name, so `vue-tsc` reads the generated `.d.ts` files.
+// `tests/test_ts_client_codegen.py` fails if a copy reappears under `jmfts-ui/`.
+const generatedClient = fileURLToPath(
+  new URL("../jmfts-web/jmfts_web/static/client", import.meta.url)
+);
+
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   const appliance = env.JMFTS_URL || "http://127.0.0.1:8110";
@@ -16,10 +25,16 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [vue()],
     resolve: {
-      alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
+      alias: {
+        "@": fileURLToPath(new URL("./src", import.meta.url)),
+        "@jmfts/client": generatedClient,
+      },
     },
     server: {
       port: 5183,
+      // The client lives outside this project's root, and Vite's dev server refuses to serve
+      // a file outside its allow list.
+      fs: { allow: [searchForWorkspaceRoot(process.cwd()), generatedClient] },
       proxy: Object.fromEntries(
         // Every prefix the appliance answers on. Listed rather than globbed, because a
         // catch-all would swallow Vite's own `/@vite` and `/src` paths.
