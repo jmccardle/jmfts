@@ -9,7 +9,7 @@ the wrong number for a 24-query fixture — and **none of them can be told apart
 reading.** They need a distribution. This takes one.
 
     JMFTS_EMBEDDING_DEVICE=cpu python -m scripts.measure_maxsim_margin \\
-        --dsn postgresql://jmfts:jmfts@localhost:5496/postgres --trials 60
+        --dsn postgresql+psycopg2://jmfts:jmfts@localhost:5496/postgres --trials 60
 
 **What varies between trials, and what cannot.** The fixture's text is generated from two
 fixed seeds (`tests/maxsim_corpus.py`, `CORPUS_SEED` and `QUERY_SEED`), so the corpus and

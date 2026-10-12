@@ -19,7 +19,7 @@ table the assertion was chosen against. Both stand on `tests/maxsim_corpus.py`, 
 cannot describe different corpora.
 
     JMFTS_EMBEDDING_DEVICE=cpu python -m scripts.maxsim_probes \\
-        --dsn postgresql://jmfts:jmfts@localhost:5444/postgres --chunks 600
+        --dsn postgresql+psycopg2://jmfts:jmfts@localhost:5444/postgres --chunks 600
 
 **The appliance's schema, not a copy of it.** The target database is dropped, recreated and
 loaded from `jmfts_core/sql/schema.sql`, so `idx_token_embed_256_hnsw` is built exactly as

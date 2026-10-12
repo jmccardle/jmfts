@@ -22,7 +22,7 @@ answering it inside `documents` would mix in five predicates, a partial index an
 settled lifecycle. If this reports truncation, the follow-up is a test in ``tests/``
 driving the real ``vector_search``; if it reports none, there is nothing to write.
 
-    ./scripts/filtered_recall.py --dsn postgresql://jmfts:jmfts@localhost:5434/postgres
+    ./scripts/filtered_recall.py --dsn postgresql+psycopg2://jmfts:jmfts@localhost:5434/postgres
     ./scripts/filtered_recall.py --sizes 1000,20000 --ef 40,100
 
 Two things it reports before any result, because both change what the result means:

@@ -69,7 +69,7 @@ Usage — the DSN must point at an EMPTY database on a throwaway Postgres; the s
 
     docker run -d --name walk-pg -e POSTGRES_PASSWORD=jmfts -e POSTGRES_USER=jmfts \\
         -e POSTGRES_DB=jmfts -p 127.0.0.1:5457:5432 pgvector/pgvector:pg16
-    ./scripts/measure_typed_walk.py --dsn postgresql://jmfts:jmfts@127.0.0.1:5457/jmfts
+    ./scripts/measure_typed_walk.py --dsn postgresql+psycopg2://jmfts:jmfts@127.0.0.1:5457/jmfts
 
 ``sql/schema.sql`` is the authority for this table and is what gets loaded — NOT
 ``Base.metadata.create_all``, which would omit ``idx_links_source`` / ``idx_links_target``

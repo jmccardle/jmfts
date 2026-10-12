@@ -49,7 +49,7 @@ the join to a documents-shaped table, ``readable_sql``'s literal
 index verbatim from ``schema.sql``. The four predicates it drops (usetype, parent path,
 as_of, and a tighter tier) can only make the filter narrower.
 
-    ./scripts/maxsim_recall.py --dsn postgresql://jmfts:jmfts@localhost:5434/postgres
+    ./scripts/maxsim_recall.py --dsn postgresql+psycopg2://jmfts:jmfts@localhost:5434/postgres
     ./scripts/maxsim_recall.py --sizes 500000 --probes 1,10,64 --lists 1024
 
 Two geometries, swept rather than chosen, because they bracket the answer:
