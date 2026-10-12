@@ -11,6 +11,30 @@ Dates are the release commit's date. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses semantic
 versioning with the caveat that it is pre-1.0, so a minor version may break the wire.
 
+## [0.6.1] — 2026-10-12
+
+**The LLM URL is the one your server advertises, and EnsoNet becomes reachable.** One fix,
+found by the first production cutover to 0.6.0.
+
+### Breaking
+
+- **`JMFTS_LLM_BASE_URL` is used as given; JMFTS no longer appends `/v1`.** Set it to the
+  base URL the server advertises, version segment included — `http://gpu-box:8080/v1` for
+  llama-server, vLLM or Ollama, `http://host:8853/v1d` for EnsoNet. JMFTS appends only
+  `/chat/completions` and `/models`, which is the OpenAI SDK's convention. Before, it
+  wanted the server root: pasting the advertised URL 404'd at `/v1/v1`, which
+  `.env.example` had to warn about, and a server that versions under any other segment
+  could not be reached by any value of the setting — EnsoNet serves `/v1d`, so a midlife
+  deployment had no working LLM configuration at all. **A config that gives a server root
+  now 404s**; `GET /health/llm` names the URL it tried and suggests the `/v1` form. The
+  `jmfts_batch` mock provider follows the same rule.
+
+### Changed
+
+- **`GET /health/llm` makes one outbound call, not two.** It asks `{base}/models`. The
+  `{base}/health` call it also made is an EnsoNet extension at the server root, which a base
+  URL carrying its version segment no longer reaches.
+
 ## [0.6.0] — 2026-10-12
 
 **A web front end, and the appliance becomes something you can look at.** Drop a file on a
