@@ -70,7 +70,8 @@ from jmfts_core.ingest_tasks import (
     children_of,
 )
 from jmfts_core.ingest_options import DEFAULT_MAX_ROW_NODES
-from jmfts_core.models.document import USETYPE_SHEET
+from jmfts_core.models.document import USETYPE_CHUNK, USETYPE_SHEET
+from jmfts_core.models.task_queue import WRITE_CHILDREN
 
 # ---------------------------------------------------------------------------
 # The batches — a derived edge orders two tasks on ONE node, so the comparison
@@ -405,6 +406,10 @@ class TestFanout:
         # not a decoration: `null` here means no header and no records at all.
         "sheet.measurements.header_row_number": 1,
         "child_count": 40,
+        # A 4,000-character transcript of forty lines, which is what the text prober
+        # measures for every text file. `structure:conversation`'s ceiling adds them.
+        "matched.patterns.char_count": 4_000,
+        "matched.patterns.line_count": 40,
     }
 
     PARAMS_SAMPLE = {
@@ -416,18 +421,53 @@ class TestFanout:
     def _fanout_atoms(self):
         return {t: a for t, a in ATOMS.items() if a.fanout is not None}
 
-    def test_six_atoms_write_children(self):
+    def test_seven_atoms_write_children(self):
         # A guard on the tests below: if the declarations lost their fan-out fields, every
-        # one of them would pass vacuously. Six of the twelve write nodes — the three
-        # structure rungs, the two per-sheet tasks, and PELT.
+        # one of them would pass vacuously. Seven write nodes — the two prose rungs, the
+        # conversation rung, the three per-sheet tasks, and PELT. WAS six: the conversation
+        # rung wrote children with no bound until `SPRINT_0_6_0.md` step 36.
         assert {t for t, a in ATOMS.items() if a.fanout is not None} == {
             TASK_STRUCTURE_DECLARED,
             TASK_STRUCTURE_INFERRED,
+            TASK_STRUCTURE_CONVERSATION,
             TASK_STRUCTURE_SHEETS,
             TASK_PROFILE_SHEET,
             TASK_EXTRACT_SHEET,
             TASK_STRUCTURE_SEMANTIC,
         }
+
+    def test_every_atom_that_writes_children_declares_a_bound(self):
+        # `SPRINT_0_6_0.md` step 36's own failing test, and the row says it needs no
+        # fixture. It was red at exactly one name, `structure:conversation`. An atom that
+        # writes children and declares neither field looks exactly like one that writes
+        # none, and `write_mode` is the field that tells them apart.
+        missing = sorted(
+            t for t, a in ATOMS.items() if a.write_mode == WRITE_CHILDREN and a.fanout is None
+        )
+        assert missing == []
+
+    def test_an_atom_that_writes_children_with_no_bound_is_refused(self):
+        # Beside the half-declared refusal in `Atom.__post_init__`, and for the same
+        # reason: a declaration error that cannot be survived, because `EXPLAIN` would
+        # report what it writes as open and nothing would say that is a missing line of
+        # code rather than a missing measurement.
+        with pytest.raises(ValueError, match="writes children"):
+            Atom(
+                task_type="test:children-without-a-bound",
+                consumes=(),
+                produces=(),
+                write_mode=WRITE_CHILDREN,
+                cost_class=COST_CPU,
+            )
+
+    def test_the_conversation_ceiling_is_lines_plus_characters(self):
+        # Question 4.11, option A (2026-10-12): the counts probe already measures, and
+        # nothing else. Turns are bounded by lines and the parts of an over-window turn by
+        # its characters, so the sum of the two is a ceiling and the floor is zero.
+        fanout = ATOMS[TASK_STRUCTURE_CONVERSATION].fanout
+        assert fanout.reads == ("matched.patterns.line_count", "matched.patterns.char_count")
+        assert fanout.counts == USETYPE_CHUNK
+        assert fanout.bound(self.EVIDENCE_SAMPLE, self.PARAMS_SAMPLE) == (0, 4_040)
 
     def test_every_bound_returns_a_well_formed_interval(self):
         for task_type, atom in sorted(self._fanout_atoms().items()):

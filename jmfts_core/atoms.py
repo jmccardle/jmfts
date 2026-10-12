@@ -79,7 +79,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from jmfts_core.models.task_queue import WRITE_MODES, WRITE_SELF
+from jmfts_core.models.task_queue import WRITE_CHILDREN, WRITE_MODES, WRITE_SELF
 
 # ---------------------------------------------------------------------------
 # Loci
@@ -479,6 +479,16 @@ class Atom:
                 f"atom {self.task_type!r} declares fanout={self.fanout is not None} and "
                 f"child_key={self.child_key is not None}; an atom that writes children "
                 "needs both (SPRINT_JOBS.md 9.1), and one that writes none needs neither"
+            )
+        # The case the check above cannot see: an atom that declares NEITHER looks exactly
+        # like one that writes no children, and `write_mode` is what tells them apart.
+        # `SPRINT_0_6_0.md` step 36. `structure:conversation` sat in this position from
+        # 15.4 S7 until 2026-10-12, and the cost was `EXPLAIN` answering `?` for every
+        # transcript — a count that was measurable and that nobody had written down.
+        if self.write_mode == WRITE_CHILDREN and self.fanout is None:
+            raise ValueError(
+                f"atom {self.task_type!r} writes children and declares no fan-out bound; "
+                "SPRINT_JOBS.md 2.4 requires a ceiling of every atom that does"
             )
 
 

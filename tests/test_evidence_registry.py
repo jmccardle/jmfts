@@ -204,6 +204,7 @@ class TestShape:
         assert counts == {
             "structure:declared": "chunk",
             "structure:inferred": "chunk",
+            "structure:conversation": "chunk",
             "structure:sheets": "sheet",
             "structure:semantic": "segment",
             "profile:sheet": "profile",

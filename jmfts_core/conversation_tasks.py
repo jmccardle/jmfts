@@ -38,7 +38,16 @@ import logging
 
 from sqlalchemy.orm import Session
 
-from jmfts_core.atoms import COST_CPU, EV_BLOB, EV_MATCHED, EV_STRUCTURE, EV_TEXT
+from jmfts_core.atoms import (
+    COST_CPU,
+    EV_BLOB,
+    EV_MATCHED,
+    EV_STRUCTURE,
+    EV_TEXT,
+    KEY_POSITION,
+    ChildKey,
+    Fanout,
+)
 from jmfts_core.conversation_ingest import ParsedMessage, parse_adjutant_jsonl
 from jmfts_core.embedding import get_embedding_service
 from jmfts_core.ingest_tasks import (
@@ -60,6 +69,53 @@ from jmfts_core.structure_tasks import RUNG_DECLARED, _scope_node
 logger = logging.getLogger(__name__)
 
 
+def _conversation_ceiling(evidence: dict, params: dict) -> tuple[int, int]:
+    """How many CHUNK nodes this rung may write. ``SPRINT_JOBS.md`` 2.4.
+
+    ``SPRINT_0_6_0.md`` question 4.11, option A (answered 2026-10-12): the two counts probe
+    already measures over the whole file, and nothing else. Loose, and true:
+
+    * **Turns.** A turn is a JSON string inside one line, and a line yields at most two —
+      a prompt/response pair writes both. NOT at most one, which is what 4.11 said; the
+      sum below still holds because of the next point.
+    * **Parts.** :func:`_split_oversized` writes one per piece ``chunk_to_fit`` returns,
+      and every piece holds at least one non-whitespace character of the turn that no
+      other piece holds. ``_split_sentences`` drops a piece that strips to nothing;
+      ``_enforce_max_chars`` emits a short text whole and otherwise only non-empty
+      ``str.split()`` words, joins of them, or non-empty slices of one; ``_enforce_fit``
+      recurses through ``_enforce_max_chars`` and nothing else. ``min_chunk_length`` does
+      not enter — this caller leaves it at 1 — and neither does the window: the window
+      decides WHETHER a turn splits, and the ``sentence`` strategy emits one part per
+      sentence without packing them, so a part is a sentence and not a window's worth.
+    * **The sum.** A JSON-decoded string is never longer than its encoding, and every line
+      that yields a turn spends at least 13 characters on syntax (``{"prompt":""}``) and
+      27 on a pair. So a line writes at most ``2 + its content characters``, which is
+      under its own length, and summing over lines gives ``char_count``. ``line_count`` is
+      added on top of a ceiling that already holds; it is in the formula because it is
+      the turns half, stated in the terms a reader checks it in.
+
+    Floor zero: a file whose lines parse to no turns settles with no children (the
+    handler's zero-yield branch), so zero is reachable. Option B in 4.11 is the tighter
+    replacement — pack the parts to the window, then bound them by tokens — and it is
+    0.7.0's, because it changes what the rung writes rather than what it declares.
+    """
+    lines = int(evidence["matched.patterns.line_count"])
+    characters = int(evidence["matched.patterns.char_count"])
+    return (0, lines + characters)
+
+
+#: Position, as for the prose rungs' chunks. A turn has a `turn_index`, but that IS its
+#: position — nothing in a transcript names a turn — and a part has no key of its own.
+_CONVERSATION_FANOUT = Fanout(
+    bound=_conversation_ceiling,
+    reads=("matched.patterns.line_count", "matched.patterns.char_count"),
+    basis="one per turn, and at most one per character of an over-window turn",
+    # Turns and their parts are both `chunk` nodes, written by this rule under one
+    # frontier, so one interval counts both — the same pair 4.1's scope matches on.
+    counts=USETYPE_CHUNK,
+)
+
+
 @register_task_handler(
     TASK_STRUCTURE_CONVERSATION,
     # The bytes, not the text. `extract:text`'s conversation reader wrote the readable
@@ -73,6 +129,8 @@ logger = logging.getLogger(__name__)
     # The tokenizer, not the model: `check_fit` loads no weights. A badge sized on this
     # being `model` would pin a JSON parse to the GPU pool.
     cost_class=COST_CPU,
+    fanout=_CONVERSATION_FANOUT,
+    child_key=ChildKey(KEY_POSITION),
 )
 def run_structure_conversation(session: Session, task: TaskQueue) -> TaskOutcome:
     """One chunk node per turn, in the order the transcript states."""
