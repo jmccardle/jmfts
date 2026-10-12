@@ -21,7 +21,7 @@ a URL, an arXiv id or a local path.
 | `raw` | `content` | Raw text ingestion: sentence chunk, embed, optionally RAPTOR + fact extraction |
 | `transcript` | `content` | Voice transcript ingestion: sentence chunk with transcript metadata, embed, optionally RAPTOR + fact extraction |
 | `wiki:url` | `url` | Fetch a URL, convert HTML→markdown, then run markdown pipeline. |
-| `wiki:arxiv` | `arxiv` | Fetch an arXiv paper (metadata + PDF), convert to markdown. |
+| `wiki:arxiv` | `arxiv` | Fetch an arXiv paper's PDF, convert to markdown. |
 | `wiki:pdf` | `path` | Convert a local PDF (file path) to markdown. |
 
 ## Formats

@@ -1,6 +1,6 @@
 """Ingest an arXiv paper into JMFTS via the wiki:arxiv pipeline.
 
-Server fetches metadata + PDF, extracts markdown, ingests as a markdown root.
+Server fetches the PDF (no paper metadata is kept), extracts markdown, ingests as a markdown root.
 The arxiv_id may be a full URL, an abs/pdf path, or a bare ID — the server
 normalizes.
 

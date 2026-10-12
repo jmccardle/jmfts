@@ -80,16 +80,17 @@ python -m scripts.jmfts_ingest --content-file f.md --usetype markdown \
 
 ## What goes in `structured_content`
 
-The pipeline auto-populates source-shaped metadata:
+Only what you put there. The pipeline writes nothing into `structured_content`.
+What it measures (page count, outline, the source locator, what extraction
+found) is evidence, one row per name, read with
+`GET /documents/{id}/evidence`.
 
-- `wiki:url` — `source_url`, `fetched_content_type`, `section_count`.
-- `wiki:arxiv` — `arxiv_id`, `title`, `abstract`, `authors`, `categories`,
-  `doi`, `published`, `updated`, `url_abs`, `url_pdf`.
-- `wiki:pdf` — `source_path`, `filename`, `title`, `author`, `page_count`,
-  `toc`, `created`, `modified`.
+**`wiki:arxiv` keeps no paper metadata.** Title, authors and abstract are
+not recorded anywhere: the fetch stores the PDF only. If you want them, pass
+them yourself.
 
-Agents can pass additional metadata via `--structured-content '{...}'`
-(raw-doc mode of `jmfts_ingest`) or by editing the doc afterwards.
+Pass metadata via `--structured-content '{...}'` (raw-doc mode of
+`jmfts_ingest`) or by editing the doc afterwards.
 
 ## When NOT to ingest
 

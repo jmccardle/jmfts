@@ -552,7 +552,7 @@ INGEST_USETYPES: dict[str, Usetype] = {
         ),
         Usetype(
             name="wiki:arxiv",
-            description="Fetch an arXiv paper (metadata + PDF), convert to markdown.",
+            description="Fetch an arXiv paper's PDF, convert to markdown.",
             source=SOURCE_ARXIV,
             options=_chunking("paragraph"),
         ),
