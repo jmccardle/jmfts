@@ -44,6 +44,7 @@ from jmfts_client.contracts import (  # noqa: F401
     LintFinding,
     LintRequest,
     LintResponse,
+    LlmFailure,
     PathResponse,
     PathStep,
     PipelineInfo,

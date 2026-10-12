@@ -8,7 +8,6 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import pytest
 
 from jmfts_core.synthesis import _format_context, synthesize, SynthesisResult
@@ -162,8 +161,11 @@ class TestSynthesize:
         that costs ``task_errors.classify_exception``. What has to keep holding, and is
         what this asserts, is that the failure is loud and says which status it was.
         """
+        # No retry budget: the bounded 503 retry (#32) is ``test_synthesis_refusal.py``'s
+        # subject, and here it would only add 3.5 s of waiting.
         with llm_stub(status=503) as stub:
-            with patch("jmfts_core.synthesis.get_settings", return_value=stub.settings()):
+            settings = stub.settings(synthesis_retry_budget=0)
+            with patch("jmfts_core.synthesis.get_settings", return_value=settings):
                 with pytest.raises(Exception, match="503"):
                     _run(
                         synthesize(
@@ -304,6 +306,14 @@ class TestSynthesizeEndpoint:
         assert response.total_latency_ms >= response.search_latency_ms
 
     def test_endpoint_graceful_degradation(self):
+        """An endpoint that does not answer still returns the sources, and says why.
+
+        The side effect is :class:`LlmCallError` with no status — what a refused connection
+        reaches the service as since 0.6.2. It used to be ``httpx.ConnectError``, which τ
+        has not let through since 0.9.3; and since #32 only the two LLM failures are
+        caught, so an arbitrary exception propagates (``test_a_defect_is_not_an_absent_llm``).
+        """
+        from jmfts_core.llm_client import LlmCallError
         from jmfts_core.services.search_service import SearchService
         from jmfts_core.rest.schemas import SynthesizeRequest
 
@@ -326,7 +336,7 @@ class TestSynthesizeEndpoint:
             patch(
                 "jmfts_core.services.search_service.synthesize",
                 new_callable=AsyncMock,
-                side_effect=httpx.ConnectError("LLM down"),
+                side_effect=LlmCallError("LLM down", status=None),
             ),
         ):
             response = _run(
@@ -334,9 +344,39 @@ class TestSynthesizeEndpoint:
             )
 
         assert response.llm_available is False
+        assert response.llm_error.reason == "failed"
+        assert response.llm_error.message == "LLM down"
         assert "unavailable" in response.synthesis.lower()
         assert len(response.sources) == 1
         assert response.sources[0].document_id == 5
+
+    def test_a_defect_is_not_an_absent_llm(self):
+        """Anything that is not an LLM failure propagates rather than reading as one."""
+        from jmfts_core.services.search_service import SearchService
+        from jmfts_core.rest.schemas import SynthesizeRequest
+
+        request = SynthesizeRequest(query="test query", search_method="vector", top_k=2)
+        mock_repo = MagicMock()
+        mock_repo.vector_search_text.return_value = []
+
+        with (
+            patch("jmfts_core.services.search_service.SearchRepository", return_value=mock_repo),
+            patch(
+                "jmfts_core.services.search_service.SearchService._resolve_context",
+                return_value={},
+            ),
+            patch(
+                "jmfts_core.services.search_service.synthesize",
+                new_callable=AsyncMock,
+                side_effect=KeyError("a bug"),
+            ),
+        ):
+            with pytest.raises(KeyError, match="a bug"):
+                _run(
+                    SearchService(session=MagicMock()).synthesize_search(
+                        request=request, context=None
+                    )
+                )
 
     def test_endpoint_auto_routes_query(self):
         from jmfts_core.services.search_service import SearchService

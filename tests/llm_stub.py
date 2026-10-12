@@ -27,7 +27,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 
 @dataclass
@@ -74,7 +74,13 @@ class LlmStub:
         return Settings(**values)
 
 
-def _make_handler(stub: LlmStub, content: str | None, status: int, reasoning: str | None):
+def _make_handler(
+    stub: LlmStub,
+    content: str | None,
+    statuses: Sequence[int],
+    reasoning: str | None,
+    error_message: str,
+):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args: Any) -> None:  # keep pytest output clean
             pass
@@ -88,8 +94,10 @@ def _make_handler(stub: LlmStub, content: str | None, status: int, reasoning: st
                     authorization=self.headers.get("Authorization"),
                 )
             )
+            # The n-th request gets the n-th status; the last one repeats.
+            status = statuses[min(len(stub.requests), len(statuses)) - 1]
             if status != 200:
-                body = json.dumps({"error": {"message": "stub refuses"}}).encode()
+                body = json.dumps({"error": {"message": error_message}}).encode()
             else:
                 message: dict[str, Any] = {"role": "assistant", "content": content}
                 if reasoning is not None:
@@ -118,13 +126,25 @@ def _make_handler(stub: LlmStub, content: str | None, status: int, reasoning: st
 
 @contextmanager
 def llm_stub(
-    *, content: str | None = "stub answer", status: int = 200, reasoning: str | None = None
+    *,
+    content: str | None = "stub answer",
+    status: int | Sequence[int] = 200,
+    reasoning: str | None = None,
+    error_message: str = "stub refuses",
 ) -> Iterator[LlmStub]:
-    """Run a stub ``/v1/chat/completions`` on loopback for the duration of the block."""
+    """Run a stub ``/v1/chat/completions`` on loopback for the duration of the block.
+
+    ``status`` is one status for every request, or a script — ``(503, 200)`` refuses the
+    first request and answers the second — whose last entry repeats. A non-200 carries
+    ``error_message`` in OpenAI's ``{"error": {"message": ...}}`` shape.
+    """
+    statuses = (status,) if isinstance(status, int) else tuple(status)
     # The handler needs the stub to record into, and the stub needs the port the handler
     # will be bound to, so the base URL is filled in once the socket has a port.
     stub = LlmStub(base_url="")
-    server = HTTPServer(("127.0.0.1", 0), _make_handler(stub, content, status, reasoning))
+    server = HTTPServer(
+        ("127.0.0.1", 0), _make_handler(stub, content, statuses, reasoning, error_message)
+    )
     # With the version segment, because the base URL is used as given (0.6.1).
     stub.base_url = f"http://127.0.0.1:{server.server_address[1]}/v1"
     thread = threading.Thread(target=server.serve_forever, daemon=True)

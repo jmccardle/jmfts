@@ -556,7 +556,8 @@ class SynthesizeRequest(BaseModel):
         description=(
             "How many retrieved documents to synthesize from. Every one is sent to the model "
             "whole and none is cut to fit; a set too large for its context window is refused "
-            "by the LLM endpoint, and the response then reports `llm_available: false`."
+            "by the LLM endpoint, and the response then reports `llm_available: false` with "
+            "the refusal — status and the server's message — in `llm_error`."
         ),
     )
     llm_model: Optional[str] = Field(default=None, description="Override the default LLM model")
@@ -575,6 +576,45 @@ class SourceReference(BaseModel):
     method: str
 
 
+class LlmFailure(BaseModel):
+    """Why the LLM did not answer a synthesis request. Forgejo john/jmfts #32.
+
+    Until 0.6.2 every failure read as ``llm_available: false`` and nothing more, so "set
+    ``JMFTS_LLM_BASE_URL``" and "the endpoint said 503, model loading" looked the same.
+    ``reason`` keeps the three apart; ``status`` and ``message`` are what the endpoint said.
+    """
+
+    reason: Literal["not_configured", "refused", "failed"] = Field(
+        description=(
+            "`not_configured`: no LLM endpoint is set, and no request was made. `refused`: "
+            "the endpoint answered with a non-2xx status — see `status` and `message`. "
+            "`failed`: an endpoint is configured and nothing usable came back — a refused "
+            "connection, a timeout, an unreadable response."
+        )
+    )
+    status: Optional[int] = Field(
+        default=None,
+        description=(
+            "The HTTP status of the last attempt. Null unless `reason` is `refused`, and "
+            "never a guess."
+        ),
+    )
+    message: str = Field(
+        description=(
+            "What went wrong, in the endpoint's words where there are any: the model, the "
+            "URL, and the server's own message (`... is loading`, `... exceeds the available "
+            "context size`)."
+        )
+    )
+    attempts: int = Field(
+        description=(
+            "Requests made before giving up. 0 for `not_configured`. More than 1 only when "
+            "the endpoint answered 502, 503 or 504, which is retried inside "
+            "`JMFTS_SYNTHESIS_RETRY_BUDGET` seconds of waiting; no other status is retried."
+        )
+    )
+
+
 class SynthesizeResponse(BaseModel):
     """Synthesis response with generated text and source references"""
 
@@ -583,4 +623,17 @@ class SynthesizeResponse(BaseModel):
     llm_model: str
     search_latency_ms: float
     total_latency_ms: float
-    llm_available: bool = True
+    llm_available: bool = Field(
+        default=True,
+        description=(
+            "Whether `synthesis` is the LLM's answer. False means it is a placeholder "
+            "sentence and `llm_error` says why — which is NOT always that no LLM is "
+            "configured: a configured endpoint that refused or could not be reached reads "
+            "false too, with `llm_error.reason` telling the cases apart. The sources are real "
+            "retrieval results either way."
+        ),
+    )
+    llm_error: Optional[LlmFailure] = Field(
+        default=None,
+        description="Null when the LLM answered; otherwise why it did not.",
+    )

@@ -21,7 +21,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from jmfts_core.config import get_settings
+from jmfts_core.config import LlmNotConfiguredError, get_settings
 from jmfts_client.contracts.search import (
     DEFAULT_HYBRID_METHODS,
     SEARCH_METHODS,
@@ -29,6 +29,7 @@ from jmfts_client.contracts.search import (
     AutoSearchRequest,
     AutoSearchResponse,
     HybridSearchRequest,
+    LlmFailure,
     ProjectedMatch,
     Projection,
     ProjectionApplied,
@@ -60,6 +61,7 @@ from jmfts_core.repositories.search import (
     effective_weights,
 )
 from jmfts_core.repositories.search_context import SearchContextRepository
+from jmfts_core.llm_client import LlmCallError
 from jmfts_core.synthesis import SynthesisResult, synthesize
 
 logger = logging.getLogger(__name__)
@@ -664,7 +666,8 @@ class SearchService:
 
         Performs the chosen search method, collects top-k results, formats them as
         context, and calls an LLM to produce a synthesized answer. If the LLM is
-        unavailable, returns the search results without synthesis.
+        unavailable, returns the search results without synthesis and says why in
+        ``llm_error``; a 502/503/504 is retried first (``synthesis.synthesize``).
         """
         start = time.time()
 
@@ -756,24 +759,42 @@ class SearchService:
             for r in results
         ]
 
-        # Attempt LLM synthesis; degrade gracefully if unavailable
+        # Attempt LLM synthesis. When it does not answer, the sources still go back, with a
+        # placeholder in `synthesis` and `llm_error` saying WHY (#32): "no endpoint
+        # configured" and "the endpoint said 503, model loading" used to be one bare
+        # `llm_available: false`. Only those two kinds of failure are caught; anything else
+        # is a defect and propagates rather than reading as an unavailable LLM.
         settings = get_settings()
         llm_model = request.llm_model or settings.effective_llm_model
 
+        llm_error: Optional[LlmFailure] = None
         try:
             result: SynthesisResult = await synthesize(
                 query=request.query,
                 documents=doc_dicts,
                 llm_model=llm_model,
             )
+        except LlmNotConfiguredError as exc:
+            llm_error = LlmFailure(reason="not_configured", message=str(exc), attempts=0)
+        except LlmCallError as exc:
+            llm_error = LlmFailure(
+                reason="refused" if exc.status is not None else "failed",
+                status=exc.status,
+                message=str(exc),
+                attempts=exc.attempts,
+            )
+
+        if llm_error is None:
             synthesis_text = result.text
-            llm_available = True
-        except Exception as exc:
-            logger.warning("LLM synthesis failed, returning results without synthesis: %s", exc)
+        else:
+            logger.warning(
+                "LLM synthesis did not answer (%s), returning results without synthesis: %s",
+                llm_error.reason,
+                llm_error.message,
+            )
             synthesis_text = (
                 "LLM synthesis unavailable. Search results are provided below as source references."
             )
-            llm_available = False
 
         total_latency_ms = (time.time() - start) * 1000
 
@@ -783,7 +804,8 @@ class SearchService:
             llm_model=llm_model,
             search_latency_ms=round(search_latency_ms, 1),
             total_latency_ms=round(total_latency_ms, 1),
-            llm_available=llm_available,
+            llm_available=llm_error is None,
+            llm_error=llm_error,
         )
 
     @expose(
