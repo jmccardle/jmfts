@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-__version__ = "0.5.2"
+__version__ = "0.6.0"
 
 __all__ = ["static_dir", "index_path", "__version__"]
 
