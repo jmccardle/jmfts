@@ -313,6 +313,12 @@ class Settings(BaseSettings):
 
     # OpenAI-compatible endpoint settings (used by synthesis, RAPTOR, extraction)
     synthesis_max_tokens: int = 65536  # tokens for synthesis endpoint
+    # Seconds `POST /search/synthesize` may spend WAITING between attempts when the endpoint
+    # answers 502/503/504 — a model still loading behind a configured endpoint (#32). The
+    # waits double from 0.5 s, so 4.0 allows 0.5 + 1 + 2 and four attempts in all; 0 turns
+    # the retry off. No other status retries. Queued LLM tasks have their own retry budget
+    # and do not read this.
+    synthesis_retry_budget: float = 4.0  # env JMFTS_SYNTHESIS_RETRY_BUDGET
     raptor_max_summary_tokens: int = 7168  # tokens for RAPTOR summarization
     # Suppress reasoning in summarization calls via chat_template_kwargs
     # (llama.cpp/vLLM). Reasoning models (Qwen3) otherwise spend the token

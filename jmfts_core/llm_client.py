@@ -49,11 +49,21 @@ to say that retry policy is decided by classification and never by a string matc
 message. The fix belongs in τ: preserve the original exception, and raise a typed error
 carrying ``status_code`` for a non-200. One arm in ``classify_exception`` then restores
 every distinction, and this paragraph goes away.
+
+**2026-10-12, 0.6.2 (Forgejo #32).** Half of that has moved. :func:`complete` now raises
+:class:`LlmCallError` carrying ``status``, read out of τ's message text in ONE place
+(``_TAU_HTTP_STATUS``), because τ 0.12.0 still carries the status nowhere else and
+synthesis could not otherwise tell "the endpoint said 503, model loading" from "no LLM".
+That is a string match, made once, pinned by a test, and kept out of retry *policy* for
+queued tasks: ``classify_exception`` does not branch on ``LlmCallError`` yet, so what the
+paragraph above says about the worker is still true. The synthesis request path retries a
+502/503/504 inside a small budget of its own (``synthesis.synthesize``).
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -95,6 +105,43 @@ class LlmCompletion:
     #: provider block is no longer in reach, and re-spelling τ's numbers into OpenAI's
     #: field names would be a translation nobody asked for and nobody could check.
     usage: dict[str, Any]
+
+
+#: τ's wording for a non-200, which is the only place the status survives: τ (through
+#: 0.12.0) reports it as ``"HTTP {status} from model {id!r} at {base_url!r}: {message}"``
+#: on an error event and ``complete_simple`` raises that text as a bare ``Exception``.
+#: Read here and NOWHERE else; ``tests/test_synthesis_refusal.py::TestTheTypedError``
+#: fails if τ's wording moves, so a change there cannot silently turn every refusal into
+#: a status-less failure.
+_TAU_HTTP_STATUS = re.compile(r"^HTTP (\d{3}) from model ")
+
+
+class LlmCallError(Exception):
+    """A configured endpoint did not answer a completion. Forgejo john/jmfts #32.
+
+    ``status`` is the HTTP status the endpoint answered with, or ``None`` when nothing
+    answered at all — a refused connection, a timeout, a response τ could not read. The
+    message is τ's, unchanged: it names the model, the endpoint and the server's own text
+    (``"... is loading"``, ``"... exceeds the available context size"``).
+
+    This is the typed error ``task_errors.classify_exception`` was missing (the module
+    docstring above). The status is read out of τ's message text — once, here — because τ
+    carries it nowhere else; when τ raises a typed error of its own, :func:`_from_tau`
+    reads the attribute instead and the regex goes.
+    """
+
+    def __init__(self, message: str, *, status: int | None, attempts: int = 1):
+        super().__init__(message)
+        self.status = status
+        #: How many requests were made before giving up. ``complete`` makes one; a caller
+        #: that retries (``synthesis.synthesize``) re-raises with its own count.
+        self.attempts = attempts
+
+
+def _from_tau(exc: Exception) -> LlmCallError:
+    message = str(exc)
+    match = _TAU_HTTP_STATUS.match(message)
+    return LlmCallError(message, status=int(match.group(1)) if match else None)
 
 
 def build_model(*, base_url: str, model: str, max_tokens: int, settings: Settings) -> Model:
@@ -181,15 +228,24 @@ async def complete(
 
     ``messages`` are OpenAI-shaped dicts — ``{"role": ..., "content": ...}`` — which is
     what the four callers already build and what τ passes through unchanged.
+
+    Raises :class:`LlmCallError` when the endpoint did not answer — the bare ``Exception``
+    τ raises for an error event, and only that: a typed exception from τ (a ``ValueError``
+    naming a bad model description, say) is a different statement and propagates as it is.
     """
     tau_model = build_model(
         base_url=base_url, model=model, max_tokens=max_tokens, settings=settings
     )
-    message = await complete_simple(
-        tau_model,
-        {"messages": messages},
-        _options(settings=settings, temperature=temperature, extra_body=extra_body),
-    )
+    try:
+        message = await complete_simple(
+            tau_model,
+            {"messages": messages},
+            _options(settings=settings, temperature=temperature, extra_body=extra_body),
+        )
+    except Exception as exc:
+        if type(exc) is not Exception:
+            raise
+        raise _from_tau(exc) from exc
     return LlmCompletion(text=_text_of(message), model=model, usage=message.usage.model_dump())
 
 

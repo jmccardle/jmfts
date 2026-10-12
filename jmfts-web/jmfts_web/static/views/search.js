@@ -177,6 +177,8 @@ export const READS = Object.freeze({
     "search_latency_ms",
     "total_latency_ms",
     "llm_available",
+    "llm_error",
+    "llm_error.message",
   ]),
   "search.SourceReference": Object.freeze(["document_id", "title", "score", "method"]),
 });
@@ -1250,6 +1252,11 @@ export function renderSynthesis(response) {
           "synthesis. The sources under it are real retrieval results."
       )
     );
+    // WHY it did not (#32): "no endpoint configured" and "the endpoint said 503, model
+    // loading" need different fixes, and the server now says which.
+    if (readSynthesis(response, "llm_error") !== null) {
+      panel.append(make("p", "note dim", readSynthesis(response, "llm_error.message")));
+    }
   }
   panel.append(make("p", "search-answer", readSynthesis(response, "synthesis")));
   panel.append(

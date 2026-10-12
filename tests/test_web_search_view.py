@@ -43,6 +43,7 @@ from jmfts_client.contracts.search import (
     SEARCH_METHODS,
     AppliedFilters,
     AutoSearchResponse,
+    LlmFailure,
     RoutingMetadata,
     SearchResponse,
     SearchResultItem,
@@ -1021,6 +1022,12 @@ def test_a_placeholder_answer_is_labelled_as_one(tmp_path):
         search_latency_ms=12.0,
         total_latency_ms=13.0,
         llm_available=False,
+        llm_error=LlmFailure(
+            reason="refused",
+            status=503,
+            message="HTTP 503 from model 'q' at 'http://llm/v1': q is loading",
+            attempts=4,
+        ),
     )
     result = _node(
         tmp_path,
@@ -1036,6 +1043,8 @@ def test_a_placeholder_answer_is_labelled_as_one(tmp_path):
 
     assert "placeholder rather than a synthesis" in result["unavailable"]["text"]
     assert "real retrieval results" in result["unavailable"]["text"]
+    # And WHY (#32): a refusal is not an absence, so the panel names what the endpoint said.
+    assert "q is loading" in result["unavailable"]["text"]
 
 
 @needs_node
