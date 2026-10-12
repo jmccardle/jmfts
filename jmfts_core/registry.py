@@ -32,7 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from jmfts_core.embedding import ModelStackNotInstalled
+from jmfts_core.embedding import ModelStackNotInstalled, TokenizerNotCached
 from jmfts_core.office import OfficeStackNotInstalled
 
 #: What every operation owes a caller when an optional stack is absent.
@@ -61,6 +61,9 @@ from jmfts_core.office import OfficeStackNotInstalled
 DEFAULT_ERRORS: dict[type, int] = {
     ModelStackNotInstalled: 501,
     OfficeStackNotInstalled: 501,
+    # The same kind of fact about the deployment: an offline host whose HF cache lacks the
+    # tokenizer cannot embed, and a bare 500 would tell the caller to retry (#6).
+    TokenizerNotCached: 501,
 }
 
 
