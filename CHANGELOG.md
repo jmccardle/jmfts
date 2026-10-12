@@ -3,12 +3,153 @@
 Every released version, and what changed in it. Entries are written from the commits in
 each release range, not from a plan — a line here is something that shipped.
 
-`jmfts` and `jmfts-client` release in lockstep: one number, two wheels, one tag. A version
-below is both distributions.
+`jmfts`, `jmfts-client` and — from 0.6.0 — `jmfts-web` release in lockstep: one number,
+three wheels, one tag. A version below is every distribution that existed at it; 0.5.2 and
+earlier are two.
 
 Dates are the release commit's date. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses semantic
 versioning with the caveat that it is pre-1.0, so a minor version may break the wire.
+
+## [0.6.0] — 2026-10-12
+
+**A web front end, and the appliance becomes something you can look at.** Drop a file on a
+page, see what the ingest will do before it does it, search it with seven methods side by
+side, click a hit, and see the passage boxed on the page it came from — for a PDF, and now
+for a `.docx`, `.xlsx` or `.pptx` too. `jmfts-web` is a third distribution: built static
+files and no dependencies, mounted at `/app` when it is installed. Everything it does goes
+through the generated client, and the call-log page shows each request as `curl`,
+`RemoteJmftsClient` and `fetch`, so "it thinly wraps the API" is a claim you can read off the
+page.
+
+Behind it: two access gates that did not close now close, a third was found by a standing
+audit and closed, a spreadsheet's rows reach BM25, the job system's `EXPLAIN` says how many
+rather than only which, and the specifications and measurement records the source cites by
+section are published.
+
+Built in parallel worktrees under `docs/SPRINT_0_6_0.md` Part 5's merge gates M0–M6; that
+plan is published and is the long version of everything below.
+
+### Breaking
+
+- **The graph-analytics verbs compute over the caller's graph, not the corpus.**
+  `GET /graph/centrality`, `/graph/subtree-authority`, `/graph/spines` and
+  `/graph/communities` took no principal and returned ids and titles of documents that were
+  404 to the same caller everywhere else. They now build the graph from the documents the
+  caller can read, so **every score a governed caller reads moves** — question 4.2: a
+  centrality score is a property of the graph it was computed on, and filtering the result
+  instead would have reported numbers derived from rows the caller cannot see. Owner,
+  unbound and ungoverned callers get byte-identical answers, held by
+  `test_centrality_is_unchanged_where_nothing_is_governed`.
+- **Writing an edge or a triple takes write access.** `POST /documents/{id}/links` needs
+  write on the source and read on the target; the five `TripleService` write verbs need
+  write on the subject and read on the object. Both succeeded for a read-only principal.
+  An ungoverned node is still open — access control stays opt-in.
+- **`SynthesizeRequest.max_context_tokens` is removed.** It was a budget converted to
+  characters at four per token and used to drop results from the tail, so an answer could
+  cite four of twelve retrieved documents and read as though all twelve were considered.
+  Every `top_k` document is now sent whole; `top_k` is the control. Contracts ignore unknown
+  fields, so an old client that still sends it is accepted and the value does nothing.
+- **`/search/auto` routing signals are renamed** `token_count` → `word_count` and
+  `content_token_count` → `content_word_count`. They were always word counts.
+- **`JMFTS_SUMMARIZATION_CONTEXT` is gone, and a `.env` that still sets it stops startup**
+  (`Settings` forbids unknown keys). Delete the line. Set in the process environment it is
+  ignored.
+- **Fact extraction and RAPTOR send their input whole instead of cutting it.** Input over
+  240,000 characters (fact extraction) or 16,384 (a RAPTOR cluster) used to be truncated
+  silently and the result stored as if it covered everything. An input too large for the
+  model's context now fails: in the queue, after three retries, because the LLM client cannot
+  yet tell a context-length refusal from a transient error; through
+  `POST /documents/{id}/raptor`, as a 500. Synthesis catches the refusal and answers
+  `llm_available: false`, which is indistinguishable from "no LLM configured" — recorded
+  as open, not fixed.
+
+### Added
+
+- **`jmfts-web`**, the browser front end (`pip install jmfts[web]`, or the `jmfts-web`
+  wheel). Views are files registered by their own module, so adding one touches no router:
+  - **Ingest** — drag and drop runs `POST /ingest/analyze` (probe, and nothing else) and
+    shows `EXPLAIN` before the button that ingests exists; afterwards the settling
+    frontier, which never reports a draining queue as done.
+  - **Search** — one query in seven columns, the count read off the route table; contexts;
+    synthesis as a panel. **Presets** saves a search configuration and runs it.
+  - **Tree browser** and **document detail** — every child shape, including the several a
+    sheet emits; the detail view renders the source page and draws the cited rectangle.
+  - **Call log** — every request the page made, newest first.
+  - Renderers for markdown and transcripts render them as documents rather than as source.
+- **Three byte routes**: `GET /documents/{id}/blob` (the original bytes), `/image` (one
+  rendered page) and `/region` (a rectangle, from an anchor or explicit bounds).
+  `ExposeSpec.media_type` lets an exposed operation answer with something that is not JSON.
+- **A generated TypeScript client** in `jmfts-web/jmfts_web/static/client/`, rendered from
+  `/openapi.json` (`python -m scripts.generate_ts_client`), and the call event every view
+  emits.
+- **A search hit carries its anchor.** `source_anchor` and, for office formats,
+  `render_anchor`, each with an `.unresolved` companion; the typed anchor contract is
+  `contracts/anchor.py`. `ViewResponse.can_write` says whether the caller may write.
+- **Office citations.** `render:pdf` and `convert:ooxml` (a legacy `.doc`/`.xls`/`.ppt` to
+  its OOXML package) through LibreOffice, behind `jmfts_core/convert.py` and the `convert`
+  extra (the unoserver client). `Dockerfile.libreoffice` is a LibreOffice-only container and
+  `deploy/k8s/23-worker-convert.yaml` puts a pool of ordinary workers in front of it.
+  Renditions get their own table, `document_renditions` (migration 023), because uploaded
+  bytes are immutable. `anchor:source` writes an exact `ooxml` address (part and XPath) on
+  every office chunk; `anchor:render` recovers a rectangle against the rendition and writes
+  it to a separate row, labelled `of: "rendition"`, so a recovered rectangle is never
+  mistaken for an exact one.
+- **Leaf-to-parent projection.** `SearchRequest` and `HybridSearchRequest` take `project`:
+  match over `match_limit` leaves (default 5 × limit), then return their parents scored by
+  `max`, `sum` or `count`, each carrying `via`, the leaves that put it there.
+  `applied.projection` accounts for every leaf. `/search/auto` and `/search/synthesize` do
+  not take it.
+- **`POST /graph/seeded-rank`** — personalized PageRank restarting at seed documents over
+  their `hops`-neighbourhood, with `relations` filtering by `link_type` and triple
+  predicate. An unknown relation name is a 400, because an empty edge set reads like "not
+  related". Over the same access-gated graph as the analytics verbs.
+- **A collection configures what is ingested under it.** `GET` and
+  `PUT /documents/{id}/ingest-options` on a collection node; the setting reaches every
+  document beneath it, and RBAC's "may write this node" answers who may set it. No new
+  table. `POST /ingest/analyze` takes `parent_id` so the forecast sees those options.
+- **`EXPLAIN` says how many.** The cost fold returns intervals for tasks, child nodes,
+  embeddings and LLM calls, and `PlanCost.unmeasured` names what it could not count and
+  who would measure it, instead of guessing.
+- **A transcript's `EXPLAIN` has a number.** `structure:conversation` declares a ceiling of
+  `line_count + char_count` chunks (one per turn, and at most one per character of an
+  over-window turn), and `Atom` now refuses any atom that writes children without a bound,
+  so "writes `?`" can no longer be declared by omission. The ceiling is loose by design: an
+  over-window turn is currently split one sentence per part, and the tight bound waits on
+  packing those parts to the window.
+- **Spreadsheet header detection** (0.4.0's deferred Block C): the header is found in rows
+  1–8 and carried as a measurement, numeric headers are allowed, a whole sheet is also
+  emitted as one `table` node at the 8192 window, both shapes are written where both match,
+  and a headerless table takes its column labels from a merged banner row.
+- **`propose:links` finds nested columns** by an inclusion-dependency search over the MinHash
+  sketches, verified exactly on the survivors.
+- **Published documentation.** `docs/INGEST_SPEC.md`, `docs/SPRINT_JOBS.md`,
+  `docs/OFFICE_SPEC.md` and seven measurement records, each with a dated review note; 633
+  citations from shipped files now resolve. The sprint plans before 0.6.0 stay unpublished
+  by decision, so 224 citations to them stay dangling — see the README's note.
+- **A standing access audit**: every `@expose`d verb either takes a principal or is listed
+  with the reason it does not. Its first run found the triple-write gap above.
+
+### Fixed
+
+- **A workbook's rows reach BM25.** `index:bm25` is planned at the settling boundary, so a
+  string in a cell is found; before, an ingested spreadsheet returned nothing.
+- **A `PUT /search-contexts/{id}` that omitted `description` set it to null.**
+- **A collection's own ingest options no longer mask the ones set above it.**
+- **The six tests gated on an internal-tree marker ran nowhere**, because the marker file
+  is not in this tree. They are ungated and run.
+- **`docker compose up` serves `/app`.** The dev image did not install `[web]`.
+- **The browser keeps the API token for the browser, not one tab.**
+- Migration 015's evidence key list names `table`.
+- **`scripts/benchmark_multihop.py` chunks the way production does.** It called its own word
+  window, not `chunk_text`, and described 256 words as matching a reference whose 256 is
+  subword tokens. Chunk counts differ from runs recorded before 0.6.0.
+
+### Measured
+
+- **The MaxSim recall threshold has a distribution, and it did not move.** 79 readings: 60
+  HNSW graphs over one corpus and 19 whole-process runs, 216/240 to 224/240, mean 0.9175,
+  sd 1.67 documents, none below 0.90. `docs/MEASURE_MAXSIM_MARGIN.md`.
 
 ## [0.5.2] — 2026-10-03
 
