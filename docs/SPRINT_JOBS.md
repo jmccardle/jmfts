@@ -432,15 +432,15 @@ The registry maps a name to a type: `bool`, `int`, `float`, `str`, `list`,
 `ingest_options._positive_int` currently provides for two groups only.
 
 **Phase 2 built it and it is `jmfts_core/evidence.py`.** It held thirty-six
-entries then and holds **fifty-one** now, a type and a storage location on
+entries then and holds **fifty-two** now, a type and a storage location on
 each, with `evidence.check` as the one place that answers whether a value is
 what its name says. `producers()` is derived from `ATOMS` rather than declared,
 so who-writes-what has one answer and not two.
 
 **Thirty-six of those entries are `document_evidence` rows, and the other
-fifteen are leaves inside them or values stored elsewhere.** Phase 2b moved the
+sixteen are leaves inside them or values stored elsewhere.** Phase 2b moved the
 rows out of `structured_content`; 13.1 measured the store and 13.3 decided the
-contract. The four counts this section quotes — 51 entries, 36 rows, 21 of the
+contract. The four counts this section quotes — 52 entries, 36 rows, 21 of the
 rows `dict`, 15 bare scalars — are pinned by
 `tests/test_evidence_registry.py::TestShape::test_the_counts_the_documents_quote_are_still_true`,
 which fails when the registry moves so that this prose is told rather than left

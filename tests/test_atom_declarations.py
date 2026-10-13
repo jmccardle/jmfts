@@ -59,6 +59,7 @@ from jmfts_core.ingest_tasks import (
     TASK_EXTRACT_FACTS,
     TASK_STRUCTURE_CONVERSATION,
     TASK_EXTRACT_SHEET,
+    TASK_EXTRACT_TABLES,
     TASK_PROFILE_SHEET,
     TASK_ROWS,
     TASK_STRUCTURE_DECLARED,
@@ -85,9 +86,10 @@ def _scoped_batch(scope) -> dict[str, Atom]:
     A batch is one NODE's tasks, which is what makes a derived edge meaningful (2.3), and
     since Phase 3 a row states its own scope — so a batch is a filter over ``TASK_ROWS``
     rather than a list written here. ``ocr`` carries a ``skip_reason`` and never reaches
-    the queue; ``extract:tables`` and ``extract:images`` are
-    :data:`~jmfts_core.ingest_tasks.DEFERRED_REASON` rows whose handlers belong to later
-    phasing steps. A row with no handler has no atom to declare one, and
+    the queue; ``extract:images`` is a
+    :data:`~jmfts_core.ingest_tasks.DEFERRED_REASON` row whose handler belongs to a later
+    phasing step. (``extract:tables`` was one too, until its handler landed; it is in the
+    batch now, ordered after ``extract:text`` by both the table and the derivation.) A row with no handler has no atom to declare one, and
     ``_split_by_handler`` already keeps it out of the batch at runtime.
     """
     return {
@@ -192,7 +194,7 @@ class TestRegistryAndDeclarations:
         # second path would be the one that skips the declaration.
         assert set(TASK_HANDLERS) == set(ATOMS)
 
-    def test_twenty_six_atoms_ship(self):
+    def test_twenty_seven_atoms_ship(self):
         # SPRINT_JOBS.md Part 2 counted twelve, and an earlier draft said "about fifteen".
         # The number is pinned so that adding a handler is a decision about the design
         # rather than a line that slips in — which is what it was: the thirteenth is
@@ -296,7 +298,13 @@ class TestRegistryAndDeclarations:
         # It is therefore not in `_file_node_batch()` and has no `EXPECTED_DIVERGENCE` entry,
         # which is NOT a claim that it does not read `source_span@subtree` — it does, exactly
         # as its two siblings do. It is outside the batch the comparison is made over.
-        assert len(ATOMS) == 26
+        #
+        # THE TWENTY-SEVENTH is `extract:tables` (Part 4, phasing step 5's remainder): the
+        # row was in the table from the start, deferred with no handler, and unreachable
+        # until `extract:text` learned to re-plan the rows gated on what it measures
+        # (`plan_after_measurement`). It slices the tables `extract:text` already rendered
+        # inline into `table` nodes; it renders nothing itself.
+        assert len(ATOMS) == 27
 
     def test_every_evidence_name_is_written_by_something(self):
         # An atom waiting on evidence nothing produces would never be schedulable, and the
@@ -410,6 +418,9 @@ class TestFanout:
         # measures for every text file. `structure:conversation`'s ceiling adds them.
         "matched.patterns.char_count": 4_000,
         "matched.patterns.line_count": 40,
+        # Three tables, which is what `extract:text` records for a short paper.
+        # `extract:tables` writes exactly one node per span, so its bound is (3, 3).
+        "extraction.tables_found": 3,
     }
 
     PARAMS_SAMPLE = {
@@ -421,11 +432,11 @@ class TestFanout:
     def _fanout_atoms(self):
         return {t: a for t, a in ATOMS.items() if a.fanout is not None}
 
-    def test_seven_atoms_write_children(self):
+    def test_eight_atoms_write_children(self):
         # A guard on the tests below: if the declarations lost their fan-out fields, every
-        # one of them would pass vacuously. Seven write nodes — the two prose rungs, the
-        # conversation rung, the three per-sheet tasks, and PELT. WAS six: the conversation
-        # rung wrote children with no bound until `SPRINT_0_6_0.md` step 36.
+        # one of them would pass vacuously. Eight write nodes — the two prose rungs, the
+        # conversation rung, the three per-sheet tasks, PELT, and `extract:tables`. WAS six:
+        # the conversation rung wrote children with no bound until `SPRINT_0_6_0.md` step 36.
         assert {t for t, a in ATOMS.items() if a.fanout is not None} == {
             TASK_STRUCTURE_DECLARED,
             TASK_STRUCTURE_INFERRED,
@@ -434,6 +445,7 @@ class TestFanout:
             TASK_PROFILE_SHEET,
             TASK_EXTRACT_SHEET,
             TASK_STRUCTURE_SEMANTIC,
+            TASK_EXTRACT_TABLES,
         }
 
     def test_every_atom_that_writes_children_declares_a_bound(self):

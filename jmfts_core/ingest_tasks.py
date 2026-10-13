@@ -592,11 +592,23 @@ PATTERNS_NOT_PROBED: dict[str, str] = {
     ),
     PAGES_WITH_TABLES: (
         "written by `extract:text`, not by probe (`structure_tasks._extract_pdf` puts it in "
-        "the extraction RECORD for exactly this reason). Nothing re-plans a node after "
-        "extraction, so `extract:tables` is unreachable in the ingest path today and its "
-        "not-applicable sentence says the honest thing: nobody has looked yet"
+        "the extraction RECORD for exactly this reason). `extract:text` re-plans the rows "
+        "gated on it once it has measured it (`plan_after_measurement`), so `extract:tables` "
+        "is decided after extraction rather than at probe"
     ),
 }
+
+#: Guardable pattern -> the task that measures it, for the names probe does not emit and
+#: some task does. Spec 3.3: "a pattern may arrive after probe ... enqueued by the task that
+#: measures it rather than by probe". This is the machine-readable half of
+#: :data:`PATTERNS_NOT_PROBED`'s prose, and it is what :func:`plan_after_measurement` keys on.
+#:
+#: Two rules follow from it, and ``_check_task_rows`` enforces the first at import: a row
+#: whose guard reads one of these names must run ``after`` the task that measures it, or the
+#: measurement could land after the row was decided. The second is :func:`plan_after_measurement`'s
+#: filter: the measuring task re-plans ONLY the rows that read a name it measures, because
+#: every other row was already decided — and enqueued or not — by probe.
+PATTERN_MEASURED_BY: dict[str, str] = {PAGES_WITH_TABLES: TASK_EXTRACT_TEXT}
 
 
 #: The comparisons a guard term may use. Six, and no ``and``/``or``/``not``: ``requires`` is
@@ -883,11 +895,6 @@ SENTINEL_PATTERNS: dict[str, dict[str, str]] = {
 #: written into the node's attempt log, where it is the answer to "why did nothing happen
 #: to this file after probe".
 DEFERRED_REASON: dict[str, str] = {
-    TASK_EXTRACT_TABLES: (
-        "tables are extracted inline into the markdown by `extract:text`; a task that "
-        "gives each table its own node is INGEST_SPEC.md phasing step 5's remainder and "
-        "has no handler registered"
-    ),
     TASK_EXTRACT_IMAGES: "image handling is INGEST_SPEC.md phasing step 7; no handler registered",
     # THIS ONE IS NOT LIKE THE OTHERS, and the difference is worth reading before treating
     # it as another missing handler. A review task is not claimed by a worker at all
@@ -929,6 +936,12 @@ DEFERRED_REASON: dict[str, str] = {
 # unbuilt and a sheet that needs one gets no records with the reason on the node
 # (`jmfts_core.sheet_records.NO_HEADER_REASON`), which is a per-sheet fact and not a
 # per-task-type one.
+#
+# Nor is there a `TASK_EXTRACT_TABLES` entry, for the same reason. It said "a task that
+# gives each table its own node is phasing step 5's remainder and has no handler
+# registered" — and it never once reached an attempt log, because nothing re-planned a node
+# after `extract:text` measured `pages_with_tables`. `plan_after_measurement` is that
+# re-plan, and `table_tasks.run_extract_tables` is the handler.
 
 
 @dataclass(frozen=True)
@@ -1304,6 +1317,11 @@ TASK_ROWS: tuple[TaskRow, ...] = (
     # predicates on a measurement the rung above produces: the row declares what the task
     # needs, and the task that learns the answer is the one that can act on it.
     #
+    # AND IT DOES ACT ON IT. `PATTERN_MEASURED_BY` names `extract:text` as the measurer, and
+    # `run_extract_text` calls `plan_after_measurement` with its extraction record merged in,
+    # which re-decides this row and nothing else and enqueues it on the file node.
+    # `_check_task_rows` rule 6 is why `after` is exactly `(extract:text,)`.
+    #
     # The row stays here rather than moving out of the table with `structure:semantic`,
     # because this is where a task's requirement is DECLARED, and deleting the row would
     # leave `extract:tables` with its condition written nowhere. Passing a pattern set
@@ -1447,6 +1465,10 @@ TASK_ROWS: tuple[TaskRow, ...] = (
     # the shape. See that function for why the decision belongs to the node and not to the
     # row.
     #
+    # `extract:tables` is the sixth producer, and it writes `table` leaves too: a PDF's
+    # tables, sliced out of the extracted markdown (`table_tasks.run_extract_tables`, which
+    # applies `_write_table`'s `with_tokens` rule through the same helper).
+    #
     # No condition beyond the scope. "Every leaf gets one" is what an empty `requires` says.
     TaskRow(
         TASK_EMBED,
@@ -1457,6 +1479,7 @@ TASK_ROWS: tuple[TaskRow, ...] = (
             TASK_STRUCTURE_CONVERSATION,
             TASK_PROFILE_SHEET,
             TASK_EXTRACT_SHEET,
+            TASK_EXTRACT_TABLES,
             usetypes=(
                 USETYPE_CHUNK,
                 USETYPE_RECORD,
@@ -1508,7 +1531,7 @@ TASK_ROWS: tuple[TaskRow, ...] = (
 def _check_task_rows() -> None:
     """The table is internally consistent. Checked at import, because it decides schedules.
 
-    Five invariants, and each one is a schedule that would come out wrong rather than a
+    Six invariants, and each one is a schedule that would come out wrong rather than a
     tidiness rule. The fifth is :func:`_check_term`, which carries its own reasons:
 
     1. **A task name appears once.** Outcomes are reported per task —
@@ -1523,6 +1546,12 @@ def _check_task_rows() -> None:
     4. **A ``params_key`` names a declared group.** A row naming a group nobody declared
        would be planned with no parameters at all, and the handler would then supply its
        own numbers while the attempt log recorded the empty dict as what was asked for.
+    6. **A row guarded on a :data:`PATTERN_MEASURED_BY` name runs at the file node,
+       ``after`` its measurer and after nothing else.** Probe cannot decide it, so the
+       measuring task re-plans it (:func:`plan_after_measurement`) in a batch of its own.
+       Without the ``after`` the row could be decided before the measurement landed; with any
+       other ordering name the re-plan batch would hold an ``after`` that ``enqueue_batch``
+       cannot resolve, because that predecessor was enqueued by probe in a different batch.
     """
     seen: dict[str, Scope] = {}
     groups = set(TASK_PARAM_DEFAULTS)
@@ -1559,7 +1588,28 @@ def _check_task_rows() -> None:
             )
         for t in row.requires + row.forbids:
             _check_term(row, t)
+        for measurer in _measurers(row):
+            if row.scope != ROOT_SCOPE or row.after + row.after_any != (measurer,):
+                raise ValueError(
+                    f"row {row.task!r} is guarded on a pattern {measurer!r} measures, so "
+                    f"{measurer!r} re-plans it at the file node in a batch of its own; it "
+                    f"must be ROOT-scoped with after=({measurer!r},) and nothing else, and it "
+                    f"is scope {row.scope} with after={row.after} after_any={row.after_any}"
+                )
         seen[row.task] = row.scope
+
+
+def _measurers(row: TaskRow) -> set[str]:
+    """The tasks that measure a pattern ``row``'s guards read. See :data:`PATTERN_MEASURED_BY`.
+
+    Plain pattern names only: an option is the request's, and a sentinel resolves to a
+    pattern probe emits.
+    """
+    return {
+        PATTERN_MEASURED_BY[t.left]
+        for t in map(_as_term, row.requires + row.forbids)
+        if isinstance(t.left, str) and t.left in PATTERN_MEASURED_BY
+    }
 
 
 def _declared_type(row: TaskRow, t: Term) -> str:
@@ -1840,6 +1890,12 @@ def _requires_reason(
     # draws the same line for `probe_failed`: a plan built on a pattern set that could not
     # be measured must say so rather than read as a measurement that came back empty.
     if state is _ABSENT:
+        # A pattern some task measures after probe is not measured YET, and the sentence
+        # says who will measure it, so a probe attempt log does not read as "nothing will
+        # ever happen to this row".
+        measurer = PATTERN_MEASURED_BY.get(t.left) if isinstance(t.left, str) else None
+        if measurer is not None:
+            return f"{label} was not measured; {measurer} measures it and re-plans {row.task}"
         return f"{label} was not measured"
     held = _holds(t, value, resolved)
     if held is None:
@@ -2129,6 +2185,62 @@ def plan_after_probe(
     )
 
 
+def measured_patterns(measured_by: str, record: dict) -> dict:
+    """The :data:`PATTERN_MEASURED_BY` patterns ``measured_by`` wrote into ``record``.
+
+    Only the names that task measures, and only the ones it actually wrote. A format whose
+    reader does not measure a name leaves it absent — 3.3's "an unmeasured pattern is absent,
+    never false" — so the row it guards keeps saying "not measured" rather than "is false".
+    """
+    return {
+        name: record[name]
+        for name, measurer in PATTERN_MEASURED_BY.items()
+        if measurer == measured_by and name in record
+    }
+
+
+def plan_after_measurement(
+    fmt: str,
+    patterns: dict,
+    options: Optional[dict] = None,
+    *,
+    measured_by: str,
+) -> DownstreamPlan:
+    """The file-node rows that ``measured_by`` unlocks, once it has measured their patterns.
+
+    Spec 3.3: "a pattern may arrive after probe ... enqueued by the task that measures it
+    rather than by probe". ``patterns`` is probe's set MERGED with what ``measured_by``
+    wrote (:func:`measured_patterns`); the planner still reads a patterns dict and nothing
+    else, so 4.4's purity holds and ``EXPLAIN`` can ask the same question.
+
+    **Only the rows gated on a pattern ``measured_by`` measures.** Every other row was
+    decided by probe from the same table, and probe already enqueued it or recorded why not;
+    re-emitting it here would enqueue the structure rung a second time.
+
+    **``measured_by`` is stripped from each spec's ``after``.** The caller IS that task, and
+    it enqueues this batch in its own transaction on completion, so the dependency is
+    satisfied by construction — and a rollback removes both. Leaving it would hand
+    ``enqueue_batch`` a name that is not in the batch, which it refuses. ``_check_task_rows``
+    rule 6 is what guarantees nothing else is left in ``after``.
+    """
+    decided = _evaluate(fmt, patterns, options)
+    gated = {
+        row.task for row in TASK_ROWS if row.scope == ROOT_SCOPE and measured_by in _measurers(row)
+    }
+    return DownstreamPlan(
+        eligible=tuple(
+            replace(spec, after=tuple(name for name in spec.after if name != measured_by))
+            for row, spec in decided.eligible
+            if row.task in gated
+        ),
+        skipped=tuple(entry for row, entry in decided.skipped if row.task in gated),
+        not_applicable={
+            task: reason for task, reason in decided.not_applicable.items() if task in gated
+        },
+        scope=ROOT_SCOPE,
+    )
+
+
 # ---------------------------------------------------------------------------
 # The frontier — SPRINT_JOBS.md 6.2 and 6.4
 # ---------------------------------------------------------------------------
@@ -2220,6 +2332,29 @@ def plan_frontier(session: Session, node: Document, *, produced_by: str, usetype
             for row in TASK_ROWS
             if row.scope.matches(produced_by, usetype) and row.task in decided.not_applicable
         },
+    )
+
+
+def without_token_vectors(frontier: Frontier) -> Frontier:
+    """``frontier`` with its ``embed`` asking for the document vector only.
+
+    For a leaf whose text was MEASURED past the token/maxsim window: ``embed_with_tokens``
+    refuses such a text rather than embedding a prefix, so asking for token vectors would
+    turn a retrievable node into a permanently failed task. The decision is a fact about
+    the node's size, written onto its queue row where the attempt log and ``EXPLAIN`` can
+    see it. ``sheet_tasks._write_table`` argues it at length; ``table_tasks`` is the second
+    caller, which is why it lives here.
+    """
+    return replace(
+        frontier,
+        specs=tuple(
+            (
+                replace(spec, params={**spec.params, "with_tokens": False})
+                if spec.task_type == TASK_EMBED
+                else spec
+            )
+            for spec in frontier.specs
+        ),
     )
 
 
@@ -3347,3 +3482,8 @@ from jmfts_core import render_tasks  # noqa: E402,F401  (side effect: registrati
 # module — deliberately, because a task module that imported its sibling would make the order
 # of the two lines above load-bearing.
 from jmfts_core import derive_tasks  # noqa: E402,F401  (side effect: registration)
+
+# INGEST_SPEC.md Part 4's `extract:tables`. AFTER `structure_tasks`, whose `_scope_node` it
+# shares, and it is what makes `_split_by_handler` report the row runnable when
+# `run_extract_text`'s re-plan (`plan_after_measurement`) decides it.
+from jmfts_core import table_tasks  # noqa: E402,F401  (side effect: registration)

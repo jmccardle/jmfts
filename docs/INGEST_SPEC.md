@@ -692,9 +692,34 @@ and `pages_with_tables`, which `extract:text` writes (3.3).
      written by probe, not two. `pages_with_tables` is still `extract:text`'s, and the
      sentence about `extract:tables` below is still accurate — nothing re-plans a node
      after extraction. See `ingest_tasks.py`'s comment on the `extract:tables` row. -->
- Nothing re-plans a
-node after extraction, so `extract:tables` is not reachable in the queued path
-today and its recorded reason says the honest thing: nobody has looked yet.
+<!-- Corrected 2026-10-13: something does re-plan now. See below. -->
+At probe time `extract:tables` is not applicable with the reason
+"patterns.pages_with_tables was not measured; extract:text measures it and
+re-plans extract:tables". `ingest_tasks.PATTERN_MEASURED_BY` names the task that
+measures each non-probe pattern, and that task re-plans the rows gated on it:
+`run_extract_text` merges the `pages_with_tables` it wrote into its extraction
+record with probe's patterns and calls `plan_after_measurement`, which decides
+only the rows reading a pattern it measured and enqueues them on the same node in
+the same transaction. The guard still reads a patterns dict and options and
+nothing else, so the plan stays a pure function and `EXPLAIN` can be asked the
+same question with `pages_with_tables` supplied. A row gated this way must be
+ordered `after` its measurer and nothing else (`_check_task_rows` rule 6), because
+the re-plan is a batch of its own.
+
+#### What shipped: `extract:tables` (2026-10-13)
+
+`jmfts_core/table_tasks.py`. `pdf_to_markdown` records a
+`{page, index, bbox, start, end, rows, cols}` span for every table it renders
+inline, and `extract:text` persists them in the extraction record as `tables`
+(with `tables_found`). The handler slices `content[start:end]` into one
+`usetype=table` child per span, keyed `p{page}.t{index}`, with `source_span` and
+the page and bbox on its `table` evidence, and plans each child's `embed` through
+`plan_frontier` (document vector only when the table is past the token window).
+It renders nothing: a span that is not a table of the recorded row count in
+`content`, a page set that disagrees with `pages_with_tables`, or a count that
+disagrees with `tables_found` raises. The table text stays inline in the file
+node's markdown as well, so the chunk around it holds the same cells; that
+duplicate is accepted for now and is the next measurement (its cost to BM25).
 
 ---
 
@@ -1729,8 +1754,8 @@ neither should be assumed:
 | pdf | 3 | `probe` only — all three `is_scanned`, so `ocr` skips with Part 4's reason |
 | db / ps / gz / zip / html | 23 | `probe` only |
 
-Zero probe failures across 113 PDFs. 60 of them carry tables, all currently
-`deferred`. **156 files — every `.md` and `.txt` in the corpus — get a file node
+Zero probe failures across 113 PDFs. 60 of them carry tables, all then
+`deferred` (they are decided after `extract:text` now; see 4.4). **156 files — every `.md` and `.txt` in the corpus — get a file node
 and nothing under it.** That is the number this section exists to change, and it
 is now a measurement rather than an expectation.
 

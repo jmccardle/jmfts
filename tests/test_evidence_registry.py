@@ -169,7 +169,7 @@ class TestShape:
         ]
         dicts = [e for e in stored if e.type == TYPE_DICT]
         stated = {
-            "registry entries": (len(REGISTRY), 51),
+            "registry entries": (len(REGISTRY), 52),
             "evidence rows": (len(stored), 36),
             "rows that are dicts": (len(dicts), 21),
             "rows that are bare scalars": (len(stored) - len(dicts), 15),
@@ -209,6 +209,7 @@ class TestShape:
             "structure:semantic": "segment",
             "profile:sheet": "profile",
             "extract:sheet": "record",
+            "extract:tables": "table",
         }
 
     def test_a_leaf_inherits_its_blocks_producer(self):

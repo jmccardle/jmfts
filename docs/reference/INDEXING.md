@@ -36,7 +36,7 @@ at the moment they do.
 | `citation` | the file node | `subtree` | `@page_geometry` | — | `structure:declared`, `structure:inferred` |
 | `anchor:source` | the file node | `subtree` | `@source_address` | — | `structure:declared`, `structure:inferred` |
 | `extract:facts` | the file node | `self` | `options.facts.enabled`, `has_text_layer` | `char_count < options.facts.min_characters` | `structure:declared`, `structure:inferred`, `structure:conversation` |
-| `embed` | `children` nodes produced by `structure:declared`, `structure:inferred`, `structure:conversation`, `profile:sheet`, `extract:sheet`, usetype `chunk`, `record`, `profile`, `cell`, `table` | `self` | — | — | — |
+| `embed` | `children` nodes produced by `structure:declared`, `structure:inferred`, `structure:conversation`, `profile:sheet`, `extract:sheet`, `extract:tables`, usetype `chunk`, `record`, `profile`, `cell`, `table` | `self` | — | — | — |
 | `render:pdf` | the file node | `self` | `@rendition_source` | — | — |
 | `convert:ooxml` | the file node | `self` | `is_legacy_binary` | — | — |
 
@@ -56,6 +56,7 @@ of the node above (legal only as a read).
 | `embed` | `text@self` | `embedding@self` | `model` |
 | `extract:facts` | `text@self`, `text@subtree` | — | `llm` |
 | `extract:sheet` | `sheet@self`, `sheet.measurements@self`, `blob@ancestor` | `sheet.shape@self`, `text@subtree`, `record@children`, `cell@subtree`, `table@children` | `cpu` |
+| `extract:tables` | `text@self`, `extraction@self` | `table@children`, `text@children`, `source_span@children` | `cpu` |
 | `extract:text` | `matched@self`, `blob@self` | `text@self`, `extraction@self` | `cpu` |
 | `fetch:arxiv` | `source@self` | `blob@self`, `file@self` | `cpu` |
 | `fetch:path` | `source@self` | `blob@self`, `file@self` | `cpu` |

@@ -260,6 +260,11 @@ class _PageResult:
 
     markdown: str
     blocks: list[dict] = field(default_factory=list)
+    #: ``{"index", "bbox", "start", "end", "rows", "cols"}`` per RENDERED table, in the
+    #: order they were emitted. The same span :attr:`blocks` carries for the table's segment,
+    #: plus which table it was and its shape. It is what lets ``extract:tables`` slice the
+    #: table out of the markdown byte for byte instead of rendering it a second time.
+    tables: list[dict] = field(default_factory=list)
     control_chars_removed: int = 0
     tables_found: int = 0
     table_errors: list[str] = field(default_factory=list)
@@ -406,6 +411,8 @@ def _process_page(
     extra pass is made over the page. See `_PageResult.blocks` for what that buys.
     """
     segments: list[tuple[str, tuple[float, float, float, float]]] = []
+    #: segment position -> (table index, rows, cols), for the segments that are tables.
+    table_segments: dict[int, tuple[int, int, int]] = {}
     result = _PageResult(markdown="")
 
     blocks = page.get_text("dict", flags=pymupdf.TEXTFLAGS_TEXT)["blocks"]
@@ -421,8 +428,10 @@ def _process_page(
     def render(index: int) -> None:
         """Emit table ``index`` once, in the place of the first block it accounts for."""
         emitted[index] = True
-        md = _table_to_markdown(found.rows[index])
+        rows = found.rows[index]
+        md = _table_to_markdown(rows)
         if md:
+            table_segments[len(segments)] = (index, len(rows), len(rows[0]))
             segments.append((md, tuple(found.tables[index].bbox)))
 
     for block in blocks:
@@ -473,18 +482,20 @@ def _process_page(
     # character, so accounting for it as two characters between segments is exact.
     pieces: list[str] = []
     cursor = 0
-    for text, bbox in segments:
+    for position, (text, bbox) in enumerate(segments):
         clean, removed = _CONTROL_CHARS.subn("", text)
         result.control_chars_removed += removed
         if pieces:
             cursor += 2  # the "\n\n" join
-        result.blocks.append(
-            {
-                "bbox": [round(value, 2) for value in bbox],
-                "start": cursor,
-                "end": cursor + len(clean),
-            }
-        )
+        block = {
+            "bbox": [round(value, 2) for value in bbox],
+            "start": cursor,
+            "end": cursor + len(clean),
+        }
+        result.blocks.append(block)
+        if position in table_segments:
+            index, rows, cols = table_segments[position]
+            result.tables.append({"index": index, **block, "rows": rows, "cols": cols})
         pieces.append(clean)
         cursor += len(clean)
 
@@ -526,6 +537,12 @@ def pdf_to_markdown(
       give a node to. ``probe`` used to count raw ``find_tables()`` output and therefore
       reported the attention paper's three figure pages as pages with tables; they are
       figures drawn as ruled grids, and that answer was wrong.
+    * ``tables`` — ``{"page", "index", "bbox", "start", "end", "rows", "cols"}`` per rendered
+      table, in document order. ``markdown_text[start:end]`` is the table's markdown exactly
+      as it was written inline; ``rows`` counts the header row, so the slice has ``rows + 1``
+      lines (the separator). ``index`` is the table's position among the page's accepted
+      candidates. Unlike ``text_blocks`` this IS meant to be persisted: there are a few per
+      document, and ``extract:tables`` reads it to turn each inline table into a node.
     * ``table_failures`` — ``{"page": int, "error": str}`` per page whose tables could not
       be detected or extracted. Empty is the ordinary case, and it is a different fact
       from a document with no tables, which reports ``tables_found == 0`` and no failures.
@@ -574,6 +591,7 @@ def pdf_to_markdown(
         table_failures: list[dict] = []
         tables_rejected: list[dict] = []
         text_blocks: list[dict] = []
+        tables: list[dict] = []
         cursor = 0
         for page_number, page in enumerate(doc):
             # Sanitised per page and per segment, BEFORE the offsets are taken — see
@@ -590,6 +608,15 @@ def pdf_to_markdown(
             for rejection in result.tables_rejected:
                 tables_rejected.append({"page": page_number, **rejection})
             control_chars_removed += result.control_chars_removed
+            for table in result.tables:
+                tables.append(
+                    {
+                        **table,
+                        "page": page_number,
+                        "start": cursor + table["start"],
+                        "end": cursor + table["end"],
+                    }
+                )
             for block in result.blocks:
                 text_blocks.append(
                     {
@@ -608,6 +635,7 @@ def pdf_to_markdown(
             "control_chars_removed": control_chars_removed,
             "tables_found": tables_found,
             "pages_with_tables": pages_with_tables,
+            "tables": tables,
             "table_failures": table_failures,
             "tables_rejected": tables_rejected,
             "page_offsets": page_offsets,

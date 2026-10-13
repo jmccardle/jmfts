@@ -56,7 +56,6 @@ adds is the reader (:mod:`jmfts_core.office.workbook`) — tier 2, behind
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Optional, Sequence
 
 from sqlalchemy import select, text
@@ -111,7 +110,6 @@ from jmfts_core.embedding import get_embedding_service
 from jmfts_core.ingest_options import STRUCTURE_CHUNK_PARAMS
 from jmfts_core.ingest_tasks import (
     DEFERRED_REASON,
-    TASK_EMBED,
     TASK_EXTRACT_SHEET,
     TASK_PROFILE_SHEET,
     TASK_PROPOSE_LINKS,
@@ -122,6 +120,7 @@ from jmfts_core.ingest_tasks import (
     enqueue_frontier,
     plan_frontier,
     register_task_handler,
+    without_token_vectors,
 )
 from jmfts_core.models.document import (
     Document,
@@ -843,17 +842,7 @@ def _write_table(
             "it a vector, which is a retrievable shape that no query can reach"
         )
     if not fits_token_window:
-        frontier = replace(
-            frontier,
-            specs=tuple(
-                (
-                    replace(spec, params={**spec.params, "with_tokens": False})
-                    if spec.task_type == TASK_EMBED
-                    else spec
-                )
-                for spec in frontier.specs
-            ),
-        )
+        frontier = without_token_vectors(frontier)
     child = repo.create(
         # Not "row N": this node IS the sheet, which is the one thing a reader has to be able
         # to tell it from its own siblings.
