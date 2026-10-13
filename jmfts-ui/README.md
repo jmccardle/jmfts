@@ -8,6 +8,7 @@ npm install
 JMFTS_URL=http://127.0.0.1:8110 npm run dev     # http://localhost:5183
 npm run build                                   # dist/, static files
 npm run typecheck
+npm test                                        # vitest, the pure functions in src/lib/
 ```
 
 `JMFTS_URL` only affects the dev server, which proxies the appliance's route prefixes so the
