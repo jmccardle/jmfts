@@ -97,7 +97,7 @@ from jmfts_core.ingest_tasks import (
     collection_option_layers,
     register_task_handler,
 )
-from jmfts_core.llm_client import complete_sync
+from jmfts_core.llm_client import LlmCompletion, complete_sync
 from jmfts_core.models.document import (
     SETTLED_IN_FLIGHT,
     SUMMARIZES_LINK_TYPE,
@@ -963,7 +963,8 @@ def run_summarize_llm(session: Session, task: TaskQueue) -> TaskOutcome:
         )
 
     model = (task.params or {}).get("llm_model") or settings.effective_llm_model
-    summary = summarize_span(text, settings, model)
+    completion = summarize_span(text, settings, model)
+    summary = completion.text
     summary_fit = service.check_fit(summary, with_tokens=False, prefix=EMBED_PREFIX)
     if summary_fit.truncated:
         # The model returned something longer than the window it was called to get under.
@@ -984,7 +985,13 @@ def run_summarize_llm(session: Session, task: TaskQueue) -> TaskOutcome:
         detail={
             "tokens": summary_fit.token_count,
             "window": summary_fit.limit,
-            "input_tokens": fit.token_count,
+            # What the LLM was sent, counted by the LLM (Forgejo john/jmfts #7). This key
+            # used to hold `fit.token_count` — the EMBEDDING tokenizer's count of the same
+            # text, which is a different vocabulary and was never the number the model
+            # billed or saw. That measurement is still here, under its own name, because it
+            # is why the LLM was called at all.
+            "input_tokens": llm_input_tokens(completion),
+            "input_embedding_tokens": fit.token_count,
             "input_characters": len(text),
             "model": model,
         },
@@ -1060,8 +1067,23 @@ def store_effective_content(
     return TaskOutcome(detail={"method": method, "source_children": children, **detail})
 
 
-def summarize_span(text: str, settings: Settings, model: str) -> str:
+def llm_input_tokens(completion: LlmCompletion) -> Optional[int]:
+    """The prompt size the endpoint reported for ``completion``, or ``None`` if it did not.
+
+    τ's ``Usage`` defaults every counter to 0, so a server that sends no ``usage`` block
+    reads as an input of 0 tokens. No request this module makes has an empty prompt — the
+    system prompt alone is tokens — so 0 can only mean "not reported", and recording it
+    would be a measurement nobody made.
+    """
+    count = completion.usage.get("input_tokens") or 0
+    return count if count > 0 else None
+
+
+def summarize_span(text: str, settings: Settings, model: str) -> LlmCompletion:
     """One LLM call over a contiguous span, in document order.
+
+    Returns the whole :class:`~jmfts_core.llm_client.LlmCompletion`, not just its text: the
+    caller records the endpoint's own input-token count, which only the usage carries.
 
     Deliberately not ``summarization._llm_summarize``. That one is written for a RAPTOR
     cluster — its prompt says the passages "belong to the same topic cluster", which is
@@ -1092,7 +1114,7 @@ def summarize_span(text: str, settings: Settings, model: str) -> str:
     if settings.summarization_disable_thinking:
         extra_body["chat_template_kwargs"] = {"enable_thinking": False}
 
-    result = complete_sync(
+    return complete_sync(
         settings=settings,
         base_url=base_url,
         model=model,
@@ -1104,7 +1126,6 @@ def summarize_span(text: str, settings: Settings, model: str) -> str:
         temperature=settings.summarization_temperature,
         extra_body=extra_body,
     )
-    return result.text
 
 
 # ---------------------------------------------------------------------------

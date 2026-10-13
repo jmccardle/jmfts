@@ -121,9 +121,11 @@ class TestSyncCallSite:
     def test_summarize_span_completes_without_an_event_loop(self):
         with llm_stub(content="a span summary") as stub:
             settings = stub.settings()
-            assert rollup_tasks.summarize_span("some span text", settings, "stub-model") == (
-                "a span summary"
-            )
+            completion = rollup_tasks.summarize_span("some span text", settings, "stub-model")
+            assert completion.text == "a span summary"
+            # The endpoint's own count, which `run_summarize_llm` records as `input_tokens`
+            # (Forgejo john/jmfts #7). 11 is what the stub reports.
+            assert rollup_tasks.llm_input_tokens(completion) == 11
 
         request = stub.requests[0]
         assert request.path == "/v1/chat/completions"
@@ -143,9 +145,17 @@ class TestSyncCallSite:
         with llm_stub(content="ok") as stub:
             settings = stub.settings()
             for _ in range(3):
-                assert rollup_tasks.summarize_span("text", settings, "stub-model") == "ok"
+                assert rollup_tasks.summarize_span("text", settings, "stub-model").text == "ok"
 
         assert len(stub.requests) == 3
+
+    def test_an_unreported_input_count_is_recorded_as_none(self):
+        """τ's ``Usage`` reads a missing ``usage`` block as 0 tokens. A summarize prompt is
+        never empty, so that 0 is silence, and recording it would be a measurement nobody
+        made (Forgejo john/jmfts #7)."""
+        silent = llm_client.LlmCompletion(text="s", model="m", usage={"input_tokens": 0})
+        assert rollup_tasks.llm_input_tokens(silent) is None
+        assert rollup_tasks.llm_input_tokens(llm_client.LlmCompletion("s", "m", {})) is None
 
     def test_calling_it_from_a_running_loop_is_refused_by_name(self):
         """Rather than deadlocking or reporting an asyncio internal.
