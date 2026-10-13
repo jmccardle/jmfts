@@ -98,26 +98,6 @@ GAP_INDEX_REBUILD = (
     "disclosure — still nothing consults the principal."
 )
 
-GAP_TEMPLATE_IS_A_DOCUMENT = (
-    "OPEN GAP. A template IS a document (usetype `template`, under a container node), read "
-    "here by `session.get(Document, template_id)` with no can_read. A template container "
-    "under an access-control root is readable by anyone with a token."
-)
-
-GAP_FRONTIER = (
-    "OPEN GAP. Reports settle counts under a document named by id with no can_read, so it "
-    "distinguishes 'a document with work under it' from 'no such document' for a caller "
-    "that may read neither."
-)
-
-GAP_BINDING_SCOPE = (
-    "Mostly VOCABULARY — a binding records which claim is about which documents and "
-    "changes no document. But its scope may be a `parent_id` or an explicit document set "
-    "(services/ontology_service.py:449), which is a document reference written with no "
-    "check. It discloses nothing back (the response echoes the caller's own scope), so it "
-    "is listed here rather than called a leak."
-)
-
 
 #: Every ``@expose``d operation that provably does not consult the current principal, and
 #: why that is so. Keys are ``Service.method`` — the ``name`` on the registry entry.
@@ -138,7 +118,9 @@ NOT_PRINCIPAL_SCOPED: dict[str, str] = {
     "IndexService.refresh_index": GAP_INDEX_REBUILD,
     "IngestService.explain_ingest": NO_DOCUMENT,
     "IngestService.list_registered_pipelines": NO_DOCUMENT,
-    "IngestService.file_frontier": GAP_FRONTIER,
+    # IngestService.file_frontier was here, as an OPEN GAP. It left this list on
+    # 2026-10-13: it takes can_read on the node, so a hidden node is the same 404 as a
+    # missing one. `tests/test_access_file_frontier.py`.
     "MetaService.capabilities": APPLIANCE,
     "OntologyService.import_ontology": VOCABULARY,
     "OntologyService.list_ontologies": VOCABULARY,
@@ -146,14 +128,19 @@ NOT_PRINCIPAL_SCOPED: dict[str, str] = {
     "OntologyService.delete_ontology": VOCABULARY,
     "OntologyService.list_bindings": VOCABULARY,
     "OntologyService.delete_binding": VOCABULARY,
-    "OntologyService.create_binding": GAP_BINDING_SCOPE,
+    # OntologyService.create_binding was here, listed for its document-reference scope. It
+    # left this list on 2026-10-13: a governed caller may name only documents it can read
+    # in a `parent_id` or `document_ids` scope (readable_id_subset), and a hidden id is the
+    # same 404 as a missing one. `tests/test_access_binding_scope.py`.
     "SearchContextService.create_context": CONFIG_OBJECT,
     "SearchContextService.list_contexts": CONFIG_OBJECT,
     "SearchContextService.get_context": CONFIG_OBJECT,
     "SearchContextService.update_context": CONFIG_OBJECT,
     "SearchContextService.delete_context": CONFIG_OBJECT,
-    "TemplateService.get_template": GAP_TEMPLATE_IS_A_DOCUMENT,
-    "TemplateService.render_template": GAP_TEMPLATE_IS_A_DOCUMENT,
+    # TemplateService.get_template and render_template were here, as an OPEN GAP. They
+    # left this list on 2026-10-13: both read the template through can_read, so a template
+    # under a root the caller holds no grant on is "Template not found".
+    # `tests/test_access_template_reads.py`.
     "TripleService.create_predicate": VOCABULARY,
     "TripleService.get_predicate": VOCABULARY,
     "TripleService.list_predicates": VOCABULARY,

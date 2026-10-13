@@ -47,7 +47,13 @@ from jmfts_client.contracts.rdf import (
     ShapeValidationRunResponse,
     TurtleDocument,
 )
-from jmfts_core.access import AccessKey, access_key, acr_ids, require_write
+from jmfts_core.access import (
+    AccessKey,
+    access_key,
+    acr_ids,
+    readable_id_subset,
+    require_write,
+)
 from jmfts_core.config import get_settings
 from jmfts_core.derive_tasks import (
     DERIVATION_BLOCK,
@@ -432,6 +438,28 @@ class OntologyService:
         self.session.commit()
         return {"deleted": name}
 
+    def _require_readable_scope(self, scope_type: str, scope: dict) -> None:
+        """A binding may name only documents the current principal may read.
+
+        A ``subtree`` or ``documents`` scope is a document reference. For a governed caller,
+        every id it names must be a document that caller can read; one that is hidden and
+        one that does not exist are the same LookupError (404), so the refusal discloses
+        nothing. Owner and unbound callers, and a deployment with no access-control roots,
+        name what they like — ``readable_id_subset`` returns the ids unchanged for them,
+        which keeps a binding on a not-yet-ingested id working where it worked before.
+        A ``usetype`` scope names no document and is not checked.
+        """
+        if scope_type == "subtree":
+            ids = [scope["parent_id"]]
+        elif scope_type == "documents":
+            ids = list(scope["document_ids"])
+        else:
+            return
+        readable = readable_id_subset(self.session, ids)
+        for doc_id in ids:
+            if doc_id not in readable:
+                raise LookupError(f"Document {doc_id} not found")
+
     @expose(
         "POST",
         "/ontologies/{name}/bindings",
@@ -468,6 +496,7 @@ class OntologyService:
                 f"{declared}"
             )
         scope_type, scope = _scope_of(request)
+        self._require_readable_scope(scope_type, scope)
         if repo.find_binding(
             ontology_name=name, shape_iri=request.shape_iri, scope_type=scope_type, scope=scope
         ):

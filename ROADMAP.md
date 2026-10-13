@@ -189,16 +189,23 @@ one-off one, which is the difference 0.6.0 step 3 was for.
     green by pretending otherwise. Five are `IndexService` verbs, in a service that reaches
     `jmfts_core.access` nowhere at all; one of those rebuilds BM25 postings for every document
     under an index's roots, and retrieval gates the postings again on the way out, so that one
-    is unauthorised **work** rather than disclosure. `TemplateService.get_template` and
+    is unauthorised **work** rather than disclosure. ~~`TemplateService.get_template` and
     `render_template` read a template by `session.get(Document, template_id)` with no
-    `can_read`, and a template IS a document. ~~`DocumentService.embed_document` reaches
+    `can_read`, and a template IS a document.~~ **CLOSED 2026-10-13:** both read the
+    template through `can_read`, so a template the caller may not read is "Template not
+    found", held by `tests/test_access_template_reads.py`. ~~`DocumentService.embed_document` reaches
     `DocumentRepository.embed_document` rather than `.update`, so it misses the
     `require_write` at `repositories/document.py:401`.~~ **CLOSED 2026-10-12 (0.6.2):**
     `DocumentRepository.embed_document` now takes `require_write` (404 for a hidden
     document, 403 for a read-only one), held by `tests/test_access_embed_write.py`; nine
-    verbs remain. `IngestService.file_frontier`
+    verbs remain. ~~`IngestService.file_frontier`
     distinguishes "a document with work under it" from "no such document" for a caller that
-    may read neither. The eleventh gap the audit found became step 35 and is closed.
+    may read neither.~~ **CLOSED 2026-10-13:** it takes `can_read` on the node, so a hidden
+    node is the same 404 as a missing one, held by `tests/test_access_file_frontier.py`.
+    `OntologyService.create_binding`, listed by the audit for the document reference in a
+    `parent_id` / `document_ids` scope, now refuses a governed caller naming a document it
+    cannot read (404, the same as a missing id; `tests/test_access_binding_scope.py`).
+    The five `IndexService` verbs remain. The eleventh gap the audit found became step 35 and is closed.
     **Each is a candidate 0.7.0 step and none is a 0.6.0 step**: eleven is more than Block A
     can absorb without becoming a different sprint.
 

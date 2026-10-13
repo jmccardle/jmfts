@@ -40,6 +40,7 @@ from jmfts_client.contracts.template import (
     TemplateSearchRequest,
     TemplateUpdate,
 )
+from jmfts_core.access import can_read
 from jmfts_core.models.document import Document
 from jmfts_core.registry import expose, register_service
 from jmfts_core.repositories.document import DocumentRepository
@@ -111,6 +112,19 @@ class TemplateService:
 
     # -- CRUD endpoints -----------------------------------------------------------
 
+    def _readable_template(self, template_id: int) -> Document:
+        """The template ``template_id``, or LookupError — for a missing id, a document that
+        is not a template, and a template the current principal may not read alike.
+
+        A template IS a document, so subtree RBAC applies to it like any other: a template
+        under an access-control root the caller holds no grant on is a 404, the same answer
+        as no such template (existence-hiding). Owner and unbound callers are unaffected.
+        """
+        doc = self.session.get(Document, template_id)
+        if not doc or doc.usetype != TEMPLATE_USETYPE or not can_read(self.session, doc):
+            raise LookupError("Template not found")
+        return doc
+
     @expose(
         "GET",
         "/templates",
@@ -146,9 +160,7 @@ class TemplateService:
     )
     def get_template(self, template_id: int) -> TemplateResponse:
         """Get a single template by ID."""
-        doc = self.session.get(Document, template_id)
-        if not doc or doc.usetype != TEMPLATE_USETYPE:
-            raise LookupError("Template not found")
+        doc = self._readable_template(template_id)
         return TemplateResponse.from_document(doc)
 
     @expose(
@@ -239,9 +251,9 @@ class TemplateService:
         self, template_id: int, request: TemplateRenderRequest
     ) -> TemplateRenderResponse:
         """Render a template by substituting {{variable}} placeholders."""
-        doc = self.session.get(Document, template_id)
-        if not doc or doc.usetype != TEMPLATE_USETYPE:
-            raise LookupError("Template not found")
+        # Read, not write: rendering returns the body. The usage_count bump below is
+        # bookkeeping on the template, not an edit a read-only holder is being refused.
+        doc = self._readable_template(template_id)
 
         template_body = doc.content or ""
         sc = doc.structured_content or {}
