@@ -257,7 +257,17 @@ class TestShape:
         # package, a document reaches exactly one of them, and both write this row when they
         # cannot. One name, two routes to it, which is what `producers` returning a SET is
         # for.
-        assert producers("source_anchor.unresolved") == {"citation", "anchor:source"}
+        #
+        # AND TWO MORE SINCE ISSUE #29, which are the same shape again: a spreadsheet node's
+        # source is a rectangle of cells and it is known when the node is made, so the two
+        # per-sheet tasks write the anchor themselves rather than a third task recovering it.
+        # They write the unresolved row for exactly one case, a sheet holding no cells.
+        assert producers("source_anchor.unresolved") == {
+            "citation",
+            "anchor:source",
+            "profile:sheet",
+            "extract:sheet",
+        }
 
 
 # ---------------------------------------------------------------------------

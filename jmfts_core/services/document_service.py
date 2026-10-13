@@ -788,10 +788,11 @@ class DocumentService:
            ``{"kind": "cells", "sheet": ..., "ref": "B4:H120"}``, which is the address the
            node's region was produced from.
         2. **The sheet's used range**, otherwise: ``A1`` to the last row and column
-           ``profile:sheet`` MEASURED a value in. Note that **nothing in this tree writes a
-           ``cells`` anchor yet** — Part 5 specifies where one lives and every writer of one
-           is still unbuilt — so case 2 is what every request takes today. It is a default
-           and not a placeholder: the used range is a measured fact about the sheet, it is
+           ``profile:sheet`` MEASURED a value in. The ``cells`` anchors this tree writes are
+           on the sheet's CHILDREN — the ``table``, each ``record`` and the ``profile``
+           (``sheet_tasks._cells_anchor``) — and a caller holding one passes its ``ref``
+           here; the sheet node itself carries none, so case 2 is what a bare request takes.
+           It is a default and not a placeholder: the used range is a measured fact about the sheet, it is
            the region a caller asking for "this sheet" means, and ``ref_source`` says which
            of the three the answer came from so nothing downstream has to assume.
 
