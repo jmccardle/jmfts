@@ -208,6 +208,22 @@ class TestParseBbox:
         with pytest.raises(BadRenderRequest, match="not four numbers"):
             parse_bbox("a,b,c,d")
 
+    @pytest.mark.parametrize("raw", ["nan,0,100,100", "0,inf,100,100", "0,0,-Infinity,100"])
+    def test_non_finite_values_are_refused_rather_than_rendered(self, raw):
+        """`float()` reads "nan" and "inf" as numbers, and neither is a coordinate."""
+        with pytest.raises(BadRenderRequest, match="non-finite"):
+            parse_bbox(raw)
+
+
+class TestRenderOpenApi:
+    """The statuses the render verbs really answer with are in the document, not just 200."""
+
+    @pytest.mark.parametrize("verb", ["image", "region"])
+    def test_the_refusals_are_declared(self, verb):
+        operation = app.openapi()["paths"][f"/documents/{{document_id}}/{verb}"]["get"]
+        assert {"200", "400", "404", "409", "413"} <= set(operation["responses"])
+        assert "RenderTooLarge" in operation["responses"]["413"]["description"]
+
 
 class TestRenderBounds:
     def test_a_page_renders_at_the_density_asked_for(self, pdf_bytes):
