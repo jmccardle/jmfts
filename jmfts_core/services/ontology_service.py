@@ -319,12 +319,14 @@ class OntologyService:
         Nothing is bound to anything: a shape constrains no document until
         ``POST /ontologies/{name}/bindings`` says which.
 
-        **The SHACL subset is a ceiling** (5.1): ``sh:NodeShape``, ``sh:targetClass``,
-        ``sh:property``, ``sh:path``, ``sh:minCount``, ``sh:maxCount``, ``sh:datatype``,
-        ``sh:in``, ``sh:class``. Anything else in the document is stored verbatim and
-        reported in ``unsupported_terms`` — it is NOT read and NOT enforced. A validator
-        that is right about eight constraints and silent about the ninth is worse than
-        none, because the silence looks like a pass.
+        **The parsed digest reads a SHACL subset** (5.1): ``sh:NodeShape``,
+        ``sh:targetClass``, ``sh:property``, ``sh:path``, ``sh:minCount``, ``sh:maxCount``,
+        ``sh:datatype``, ``sh:in``, ``sh:class``. Anything else in the document is stored
+        verbatim and named in ``unsupported_terms``, which means NOT SUMMARIZED in the
+        digest — not "not enforced". Validation runs ``pyshacl`` over the stored Turtle, so
+        a SHACL Core term such as ``sh:pattern`` is enforced on a bound shape, and
+        ``/derive`` runs ``sh:rule`` (``sh:SPARQLRule``, ``sh:construct``). OWL axioms are
+        stored and not acted on: there is no reasoner.
 
         Answers 501 where this install has no ``rdflib``: holding triples without being able
         to read a vocabulary is a supported deployment (``jmfts_core/rdf/__init__.py``).
