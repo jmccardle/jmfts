@@ -109,7 +109,7 @@ def _plan(*, known: bool = True, source: str = "probed") -> ExplainIngestRespons
         patterns_ignored=["has_text_lyer"],
         patterns_known=known,
         patterns_source=source,
-        options={"structure": {"max_tokens": 120}},
+        options={"structure": {"max_words": 120}},
         tasks=[
             _row(
                 task="probe",
@@ -126,7 +126,7 @@ def _plan(*, known: bool = True, source: str = "probed") -> ExplainIngestRespons
                 after=["probe"],
                 requires=["has_sheets"],
                 forbids=[],
-                params={"max_tokens": 120},
+                params={"max_words": 120},
                 write_mode="children",
                 writes=CountResponse(low=3, high=3),
                 writes_usetype="sheet",
@@ -527,7 +527,7 @@ FLOW_HARNESS = """
     const created = [];
     const build = globalThis.document.createElement;
     globalThis.document.createElement = (tag) => { created.push(tag); return build(tag); };
-    mounted.actions.setOptions('{"structure": {"max_tokens": 60}}');
+    mounted.actions.setOptions('{"structure": {"max_words": 60}}');
     const madeWhileTyping = [...created];
     snap("invalidated");
 
@@ -537,7 +537,7 @@ FLOW_HARNESS = """
     const refusedAnalyse = calls.length;
     snap("refused");
 
-    mounted.actions.setOptions('{"structure": {"max_tokens": 60}}');
+    mounted.actions.setOptions('{"structure": {"max_words": 60}}');
     await mounted.actions.analyze(FILE);
     await mounted.actions.ingest();
     snap("accepted");

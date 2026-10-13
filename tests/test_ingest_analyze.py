@@ -368,11 +368,11 @@ class TestOptions:
             pdf_bytes,
             "annual.pdf",
             "application/pdf",
-            options={"structure": {"max_tokens": 60}},
+            options={"structure": {"max_words": 60}},
         )
         by_task = {t.task: t for t in response.plan.tasks}
-        assert by_task[TASK_STRUCTURE_DECLARED].params["max_tokens"] == 60
-        assert response.plan.options["structure"]["max_tokens"] == 60
+        assert by_task[TASK_STRUCTURE_DECLARED].params["max_words"] == 60
+        assert response.plan.options["structure"]["max_words"] == 60
 
     def test_the_defaults_are_the_shipped_ones(self, db_session, pdf_bytes):
         response = _analyze(db_session, pdf_bytes, "annual.pdf", "application/pdf")
@@ -482,10 +482,10 @@ class TestAlreadyStored:
         """An upload whose options differ from the stored node's is a 400 (spec 6.1)."""
         IngestService(db_session).upload_file(
             UploadedFile(data=pdf_bytes, filename="annual.pdf", content_type="application/pdf"),
-            options={"structure": {"max_tokens": 60}},
+            options={"structure": {"max_words": 60}},
         )
         response = _analyze(db_session, pdf_bytes, "again.pdf", "application/pdf")
-        assert response.already_stored.options["structure"]["max_tokens"] == 60
+        assert response.already_stored.options["structure"]["max_words"] == 60
 
 
 # ---------------------------------------------------------------------------
@@ -526,11 +526,11 @@ class TestOverHttp:
         response = client_with_db.post(
             "/ingest/analyze",
             files={"file": ("annual.pdf", pdf_bytes, "application/pdf")},
-            data={"options": '{"structure": {"max_tokens": 60}}'},
+            data={"options": '{"structure": {"max_words": 60}}'},
         )
 
         assert response.status_code == 200, response.text
-        assert response.json()["plan"]["options"]["structure"]["max_tokens"] == 60
+        assert response.json()["plan"]["options"]["structure"]["max_words"] == 60
 
     def test_an_unknown_option_is_a_400(self, client_with_db, pdf_bytes):
         response = client_with_db.post(

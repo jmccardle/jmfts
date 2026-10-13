@@ -20,6 +20,8 @@ class ChunkStrategy(str, Enum):
     paragraph_packed = "paragraph_packed"
     paragraph = "paragraph"
     token_count = "token_count"
+    #: Whole sentences packed while the MEASURED window still holds them. Needs ``fits``.
+    sentence_window = "sentence_window"
 
 
 @dataclass
@@ -70,8 +72,8 @@ def _split_sentences(text: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
-def _split_sentences_packed(text: str, max_tokens: int = 120) -> list[str]:
-    """Fill consecutive sentences up to ``max_tokens`` words. Never splits a sentence.
+def _split_sentences_packed(text: str, max_words: int = 120) -> list[str]:
+    """Fill consecutive sentences up to ``max_words`` words. Never splits a sentence.
 
     The `sentence` strategy emits one chunk per sentence, so a 12-word sentence and a
     90-word sentence become equally weighted siblings, and roughly a fifth of the nodes
@@ -89,7 +91,7 @@ def _split_sentences_packed(text: str, max_tokens: int = 120) -> list[str]:
     words = 0
     for sentence in _split_sentences(text):
         length = len(sentence.split())
-        if current and words + length > max_tokens:
+        if current and words + length > max_words:
             packed.append(" ".join(current))
             current, words = [], 0
         current.append(sentence)
@@ -99,7 +101,7 @@ def _split_sentences_packed(text: str, max_tokens: int = 120) -> list[str]:
     return packed
 
 
-def _split_paragraphs_packed(text: str, max_tokens: int = 120) -> list[str]:
+def _split_paragraphs_packed(text: str, max_words: int = 120) -> list[str]:
     """Pack sentences to a word budget, but NEVER across a paragraph boundary.
 
     `sentence_packed` fills its budget from the section body as one stream, so a blank
@@ -123,7 +125,44 @@ def _split_paragraphs_packed(text: str, max_tokens: int = 120) -> list[str]:
     """
     packed: list[str] = []
     for paragraph in _split_paragraphs(text):
-        packed.extend(_split_sentences_packed(paragraph, max_tokens=max_tokens))
+        packed.extend(_split_sentences_packed(paragraph, max_words=max_words))
+    return packed
+
+
+def _split_sentences_to_fit(text: str, max_chars: int, fits) -> list[str]:
+    """Pack whole sentences while the packed piece still ``fits``. Issue #2.
+
+    ``sentence`` emits every sentence as its own chunk, so a 40-sentence message that is
+    over the token/maxsim window came back as 40 MaxSim chunks of about 50 characters each
+    — siblings too short to carry a passage, scored one sentence at a time.
+    ``sentence_packed`` packs to a WORD budget, which is a proxy for the window with the
+    exchange rate problem of every proxy (``KNOWN-DEFECTS`` D7). This packs to the window
+    itself: the budget is whatever ``fits`` says it is, measured on the candidate piece.
+
+    Greedy, and that is sound because ``fits`` is monotone in what is appended: if a piece
+    does not fit, no longer piece that starts with it does. Each sentence costs one ``fits``
+    call on a candidate no longer than the window plus one sentence, so the measuring is
+    linear in the text rather than quadratic in it.
+
+    ``max_chars`` is held too, because :func:`chunk_text`'s guarantee is stated in
+    characters and a merge of fitting sentences must not be what breaks it. A single
+    sentence that does not fit on its own is emitted alone and left to :func:`_enforce_fit`,
+    exactly as ``sentence`` leaves it; packing never makes one.
+    """
+    packed: list[str] = []
+    current = ""
+    for sentence in _split_sentences(text):
+        if not current:
+            current = sentence
+            continue
+        candidate = current + " " + sentence
+        if len(candidate) <= max_chars and fits(candidate):
+            current = candidate
+        else:
+            packed.append(current)
+            current = sentence
+    if current:
+        packed.append(current)
     return packed
 
 
@@ -133,8 +172,8 @@ def _split_paragraphs(text: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
-def _split_token_count(text: str, max_tokens: int = 200, overlap: int = 0) -> list[str]:
-    """Split text into windows of approximately max_tokens words.
+def _split_token_count(text: str, max_words: int = 200, overlap: int = 0) -> list[str]:
+    """Split text into windows of approximately max_words words.
 
     Uses whitespace tokenisation (word count) as a fast proxy for
     subword token count.
@@ -143,11 +182,11 @@ def _split_token_count(text: str, max_tokens: int = 200, overlap: int = 0) -> li
     if not words:
         return []
 
-    step = max(1, max_tokens - overlap)
+    step = max(1, max_words - overlap)
     chunks = []
     start = 0
     while start < len(words):
-        end = min(start + max_tokens, len(words))
+        end = min(start + max_words, len(words))
         chunks.append(" ".join(words[start:end]))
         if end >= len(words):
             break
@@ -238,8 +277,10 @@ def _enforce_fit(text: str, max_chars: int, fits) -> list[str]:
     return pieces
 
 
-def chunk_count_ceiling(characters: int, min_chunk_length: int, max_chars: int) -> int:
-    """The most chunks one ``chunk_text`` call can return for ``characters`` characters.
+def chunk_count_ceiling(
+    characters: int, min_chunk_length: int, max_chars: int, calls: int = 1
+) -> int:
+    """The most chunks ``calls`` ``chunk_text`` calls can return over ``characters`` in all.
 
     Sound for every strategy with ``overlap == 0``, with or without ``fits``. It is an
     upper bound, not an estimate, and it is deliberately loose, because two things
@@ -258,19 +299,26 @@ def chunk_count_ceiling(characters: int, min_chunk_length: int, max_chars: int) 
       pieces from a piece of ``length``.
 
     Each chunk holds at least one character, so ``characters`` caps the result.
+
+    ``calls`` is for a caller that chunks a text in PIECES — the structure rungs call
+    ``chunk_text`` once per section (issue #5). Both terms above end in ``+ 1``, a
+    per-call constant, and those are the only part that does not shrink with the text: a
+    one-character piece is still one chunk. Summed over calls whose lengths total
+    ``characters``, the two divisions sum to at most the same divisions of the total (a sum
+    of floors never exceeds the floor of the sum), and the constants sum to ``2 * calls``.
     """
-    if characters <= 0:
+    if characters <= 0 or calls <= 0:
         return 0
     effective = max(1, min(min_chunk_length, max_chars))
-    merged = 2 * characters // effective + 1
-    fit_split = 3 * characters // _MIN_FIT_CHARS + 1
-    return min(characters, merged + fit_split)
+    merged = 2 * characters // effective
+    fit_split = 3 * characters // _MIN_FIT_CHARS
+    return min(characters, merged + fit_split + 2 * calls)
 
 
 def chunk_text(
     text: str,
     strategy: ChunkStrategy = ChunkStrategy.sentence,
-    max_tokens: int = 200,
+    max_words: int = 200,
     overlap: int = 0,
     min_chunk_length: int = 1,
     max_chars: int | None = None,
@@ -292,8 +340,10 @@ def chunk_text(
 
     Args:
         text: The text to chunk.
-        strategy: Chunking strategy (sentence, sentence_packed, paragraph, token_count).
-        max_tokens: Target word count per chunk (token_count and sentence_packed only).
+        strategy: Chunking strategy (sentence, sentence_packed, paragraph, paragraph_packed,
+            token_count, sentence_window). ``sentence_window`` packs to ``fits`` and so
+            requires it.
+        max_words: Target word count per chunk (token_count and sentence_packed only).
         overlap: Word overlap between consecutive chunks (token_count only).
         min_chunk_length: Minimum character length for a chunk.  Shorter
             chunks are merged with the previous chunk, never past `max_chars`.
@@ -309,8 +359,9 @@ def chunk_text(
         List of Chunk objects with text and position metadata.
 
     Raises:
-        ValueError: If text is empty, strategy is unknown, max_chars < 1, or `fits`
-            rejects a piece that can no longer be halved.
+        ValueError: If text is empty, strategy is unknown, max_chars < 1, `fits` rejects a
+            piece that can no longer be halved, or ``sentence_window`` is asked for without
+            `fits` — it has no budget to pack to, and a default would be a guess at one.
     """
     if not text or not text.strip():
         raise ValueError("Cannot chunk empty text")
@@ -323,17 +374,25 @@ def chunk_text(
     if strategy == ChunkStrategy.sentence:
         raw_chunks = _split_sentences(text)
     elif strategy == ChunkStrategy.sentence_packed:
-        raw_chunks = _split_sentences_packed(text, max_tokens=max_tokens)
+        raw_chunks = _split_sentences_packed(text, max_words=max_words)
     elif strategy == ChunkStrategy.paragraph_packed:
-        raw_chunks = _split_paragraphs_packed(text, max_tokens=max_tokens)
+        raw_chunks = _split_paragraphs_packed(text, max_words=max_words)
     elif strategy == ChunkStrategy.paragraph:
         raw_chunks = _split_paragraphs(text)
     elif strategy == ChunkStrategy.token_count:
-        raw_chunks = _split_token_count(text, max_tokens=max_tokens, overlap=overlap)
+        raw_chunks = _split_token_count(text, max_words=max_words, overlap=overlap)
+    elif strategy == ChunkStrategy.sentence_window:
+        if fits is None:
+            raise ValueError(
+                "sentence_window packs sentences to the token window, so it needs `fits`, "
+                "the predicate that measures it; without one use sentence_packed, whose "
+                "budget is max_words"
+            )
+        raw_chunks = _split_sentences_to_fit(text, max_chars, fits)
     else:
         raise ValueError(f"Unknown strategy: {strategy}")
 
-    # Bound every chunk, regardless of strategy.  `max_tokens` was honoured by
+    # Bound every chunk, regardless of strategy.  `max_words` (then `max_tokens`) was honoured by
     # token_count only — its own docstring admitted as much — so sentence and
     # paragraph had no size bound whatsoever (D2a), and no word-based strategy
     # could bound text with no word boundaries (D4).

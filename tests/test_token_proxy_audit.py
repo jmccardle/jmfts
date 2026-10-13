@@ -15,9 +15,9 @@ tokenizer, no network):
 2. ``len(...)`` and anything named for chars, words or tokens is not multiplied or divided
    by a conversion constant (3, 4, 0.75, 1.3, 1.33, 1.5). There are none today; this is the
    standing guard.
-3. Every definition of ``max_tokens`` is classified: a word count (``WORD_COUNT_MAX_TOKENS``)
-   or a real completion budget handed to a model API (``COMPLETION_BUDGETS``). A new one
-   has to pick, which is the point.
+3. Every definition of ``max_tokens`` is a real completion budget handed to a model API
+   (``COMPLETION_BUDGETS``). The word-count one was renamed ``max_words`` (issue #1), so a
+   new word budget named ``max_tokens`` fails here rather than repeating it.
 4. Every definition of a ``max_chars``-style cap (``max_chars``, ``chunk_max_chars``,
    ``_MIN_FIT_CHARS``, ``..._MAX_CHARS_...``) is a deliberate character budget named as one,
    listed in ``CHARACTER_CAPS``.
@@ -57,20 +57,11 @@ LEXICAL_TERMS = {
     "jmfts_core.repositories.search:SearchRepository._tokenize:tokens",
 }
 
-#: ``max_tokens`` that is a WORD count. The name is wrong and the rename is issue #1,
-#: deferred to 0.7.0. When it lands these entries stop matching and the stale-entry check
-#: makes the author delete them.
-WORD_COUNT_MAX_TOKENS = {
-    "jmfts_core.chunking:_split_sentences_packed:max_tokens",
-    "jmfts_core.chunking:_split_paragraphs_packed:max_tokens",
-    "jmfts_core.chunking:_split_token_count:max_tokens",
-    "jmfts_core.chunking:chunk_text:max_tokens",
-    "jmfts_core.ingest_options:<module>:max_tokens",
-    "jmfts_core.structure_tasks:_build_tree:max_tokens",
-    "jmfts_core.structure_tasks:_TreeWriter.__init__:max_tokens",
-    "jmfts_client.contracts.document:ChunkRequest:max_tokens",
-}
-
+#: There is no longer a word-count ``max_tokens``. The chunking budget was one, under eight
+#: definitions, and issue #1 renamed it ``max_words`` in 0.7.0; this audit's stale-entry
+#: check is what retired the allowlist that excused it. A new ``max_tokens`` has to be a
+#: completion budget below, or be named for what it counts.
+#:
 #: ``max_tokens`` that is a real token budget, forwarded to an LLM endpoint as the
 #: completion limit. The endpoint's tokenizer counts it, not us.
 COMPLETION_BUDGETS = {
@@ -94,6 +85,9 @@ CHARACTER_CAPS = {
     "jmfts_core.config:Settings:chunk_max_chars",
     "jmfts_core.chunking:_enforce_max_chars:max_chars",
     "jmfts_core.chunking:_enforce_fit:max_chars",
+    # Packing to the window (#2) holds chunk_text's character guarantee too; the window
+    # itself is the `fits` measurement beside it, not this.
+    "jmfts_core.chunking:_split_sentences_to_fit:max_chars",
     "jmfts_core.chunking:chunk_text:max_chars",
     # The ceiling EXPLAIN declares for a chunking run is a function of the same cap (#5).
     "jmfts_core.chunking:chunk_count_ceiling:max_chars",
@@ -277,7 +271,7 @@ def test_no_chars_to_tokens_conversion_constant():
 
 
 def test_every_max_tokens_is_classified():
-    _check(_union("max_tokens"), WORD_COUNT_MAX_TOKENS | COMPLETION_BUDGETS, "max_tokens")
+    _check(_union("max_tokens"), COMPLETION_BUDGETS, "max_tokens")
 
 
 def test_character_caps_are_the_deliberate_ones():
@@ -286,7 +280,7 @@ def test_character_caps_are_the_deliberate_ones():
 
 def test_allowlists_do_not_overlap():
     seen: set[str] = set()
-    for s in (MEASURED_TOKEN_COUNTS, LEXICAL_TERMS, WORD_COUNT_MAX_TOKENS, COMPLETION_BUDGETS):
+    for s in (MEASURED_TOKEN_COUNTS, LEXICAL_TERMS, COMPLETION_BUDGETS):
         assert not (seen & s)
         seen |= s
 

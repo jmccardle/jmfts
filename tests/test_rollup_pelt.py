@@ -510,7 +510,7 @@ TWO_TOPIC_TEXT = (
 )
 
 INGEST_OPTIONS = {
-    "structure": {"max_tokens": 20, "min_chunk_length": 5},
+    "structure": {"max_words": 20, "min_chunk_length": 5},
     "rollup": {"max_children": 4, "min_segment": 2, "penalty": 0.5},
 }
 

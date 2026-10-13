@@ -393,16 +393,22 @@ export interface ChunkItem {
 
 /**
  * Request to chunk a document into container + children
+ *
+ * ``extra="forbid"`` because this request's word budget was called ``max_tokens`` until
+ * 0.7.0 (issue #1). Pydantic ignores an unknown field by default, so a caller still
+ * sending the old name would have had it dropped and been chunked at the default instead
+ * — a 200 for a request that was not carried out. A field this model does not declare is
+ * a 422 that names it.
  */
 export interface ChunkRequest {
   /**
-   * Chunking strategy: sentence, paragraph, or token_count
+   * Chunking strategy: sentence, sentence_packed, paragraph, paragraph_packed, token_count, or sentence_window (needs auto_embed: it packs to the measured token window)
    */
   strategy?: string;
   /**
-   * Max words per chunk (token_count strategy only)
+   * Target WORDS per chunk (token_count, sentence_packed and paragraph_packed). A whitespace word count, not a tokenizer count; named max_tokens before 0.7.0
    */
-  max_tokens?: number;
+  max_words?: number;
   /**
    * Word overlap between chunks (token_count strategy only)
    */
@@ -412,7 +418,7 @@ export interface ChunkRequest {
    */
   min_chunk_length?: number;
   /**
-   * Hard upper bound on chunk size, enforced for every strategy after splitting and after merging. Defaults to settings.chunk_max_chars. Chunks exist to be embedded, so this is what keeps them inside the embedder's window; max_tokens is a target, this is the guarantee.
+   * Hard upper bound on chunk size, enforced for every strategy after splitting and after merging. Defaults to settings.chunk_max_chars. Chunks exist to be embedded, so this is what keeps them inside the embedder's window; max_words is a target, this is the guarantee.
    */
   max_chars?: number | null;
   /**
@@ -448,7 +454,7 @@ export interface ChunkResponse {
  *
  * **This is a PARTIAL set, unlike the one an upload records.** A file node's `options`
  * row is the complete resolved set the run used; this is a declaration of what to
- * deviate, so a folder can name `structure.max_tokens` and leave everything else to the
+ * deviate, so a folder can name `structure.max_words` and leave everything else to the
  * layer below. That is what lets a nested collection refine its parent without restating
  * it. An empty object is a real answer — this collection deviates in nothing — and it is
  * also how a declaration is cleared, because there is nothing a separate verb would say.
@@ -460,7 +466,7 @@ export interface ChunkResponse {
  */
 export interface CollectionOptionsRequest {
   /**
-   * Option overrides in the shape `POST /ingest/file` takes them — `{"structure": {"max_tokens": 60}}`. Validated exactly as a request's are, so an option that does not exist is a 400 here for the same reason it is a 400 there.
+   * Option overrides in the shape `POST /ingest/file` takes them — `{"structure": {"max_words": 60}}`. Validated exactly as a request's are, so an option that does not exist is a 400 here for the same reason it is a 400 there.
    */
   options: Record<string, unknown>;
 }
@@ -815,7 +821,7 @@ export interface ExplainIngestRequest {
    */
   format: string;
   /**
-   * Ingest option overrides, in the shape `POST /ingest/file` takes them — `{"structure": {"max_tokens": 60}}`. Resolved against the task defaults and the format's profile exactly as an upload resolves them, so an option that does not exist is a 400 here for the same reason it is a 400 there.
+   * Ingest option overrides, in the shape `POST /ingest/file` takes them — `{"structure": {"max_words": 60}}`. Resolved against the task defaults and the format's profile exactly as an upload resolves them, so an option that does not exist is a 400 here for the same reason it is a 400 there.
    */
   options?: Record<string, unknown> | null;
   /**
@@ -1248,7 +1254,7 @@ export interface IngestRequest {
    */
   parent_id?: number | null;
   /**
-   * Ingest option overrides: option group -> parameters, e.g. {'structure': {'max_tokens': 300}}. Same shape as the `options` field of POST /ingest/file. An unknown group, an unknown option or a value of the wrong type is a 400.
+   * Ingest option overrides: option group -> parameters, e.g. {'structure': {'max_words': 300}}. Same shape as the `options` field of POST /ingest/file. An unknown group, an unknown option or a value of the wrong type is a 400.
    */
   options?: Record<string, Record<string, unknown>> | null;
   /**

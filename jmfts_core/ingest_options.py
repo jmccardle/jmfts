@@ -94,7 +94,7 @@ from jmfts_core.chunking import ChunkStrategy
 #: count is still falling.
 STRUCTURE_CHUNK_PARAMS: dict = {
     "chunk_strategy": "sentence_packed",
-    "max_tokens": 120,
+    "max_words": 120,
     "min_chunk_length": 20,
 }
 
@@ -224,7 +224,7 @@ SHEET_RECORDS_PARAMS: dict = {
 def _positive_int(value: Any) -> Optional[str]:
     """A whole number of tokens or characters. ``bool`` is rejected on purpose.
 
-    ``isinstance(True, int)`` is true in Python, so a caller who sent ``max_tokens: true``
+    ``isinstance(True, int)`` is true in Python, so a caller who sent ``max_words: true``
     through JSON would otherwise get a chunker packing to one token. Zero and negatives
     are refused for the same reason a misspelled key is: ``chunk_text`` would return
     something, and what it returned would not be what anybody asked for.
@@ -327,6 +327,17 @@ def _chunk_strategy(value: Any) -> Optional[str]:
     return None
 
 
+#: ``(group, old name) -> new name`` for an option that was RENAMED. Not an alias: the old
+#: name is refused exactly like any other undeclared one, and this table only lets the
+#: refusal say what the caller meant. Accepting both would give one option two spellings
+#: that are free to disagree inside a single layer, and two fingerprints for one request.
+#: Stored option sets were rewritten by ``migrations/024_max_words.sql``.
+RENAMED_OPTIONS: dict[tuple[str, str], str] = {
+    # Issue #1: the budget was always a whitespace word count, never a tokenizer count.
+    ("structure", "max_tokens"): "max_words",
+}
+
+
 #: What a legal value is, per group, per option. This table is where an option is
 #: DECLARED: a name absent from here is not an option, at any of the three layers. Each
 #: check returns ``None`` for a value it accepts and a phrase describing the problem for
@@ -335,7 +346,7 @@ def _chunk_strategy(value: Any) -> Optional[str]:
 OPTION_CHECKS: dict[str, dict[str, Callable[[Any], Optional[str]]]] = {
     "structure": {
         "chunk_strategy": _chunk_strategy,
-        "max_tokens": _positive_int,
+        "max_words": _positive_int,
         "min_chunk_length": _positive_int,
     },
     "rollup": {
@@ -463,7 +474,7 @@ class Usetype:
 #: change in the resulting tree impossible to attribute. Whether a usetype should override
 #: chunking AT ALL once path A is gone is a question for after S9, and the answer may well
 #: be that these three overrides delete themselves.
-_PATH_A_CHUNKING = {"max_tokens": 200, "min_chunk_length": 20}
+_PATH_A_CHUNKING = {"max_words": 200, "min_chunk_length": 20}
 
 
 def _chunking(strategy: str) -> dict[str, dict]:
@@ -645,13 +656,15 @@ def _apply(resolved: dict[str, dict], overrides: dict, *, fmt: str, source: str)
         checks = OPTION_CHECKS[group]
         for name, value in values.items():
             # The source is NAMED in both refusals, and 5.1's ancestor walk is why it had
-            # to be. With several layers, a caller told "unknown option structure.max_tokn"
+            # to be. With several layers, a caller told "unknown option structure.max_wrds"
             # about a set they did not write goes looking for a bug in their own request —
             # so the message says which layer, the way the two refusals above already did.
             if name not in resolved[group]:
+                renamed = RENAMED_OPTIONS.get((group, name))
+                hint = f"; it was renamed {group}.{renamed}" if renamed else ""
                 raise ValueError(
-                    f"unknown option {group}.{name} in {source}; options in {group!r} are "
-                    f"{sorted(resolved[group])}"
+                    f"unknown option {group}.{name} in {source}{hint}; options in {group!r} "
+                    f"are {sorted(resolved[group])}"
                 )
             problem = checks[name](value)
             if problem is not None:
@@ -663,7 +676,7 @@ def merge_option_layers(*layers: Optional[dict]) -> dict[str, dict]:
     """Combine partial override sets into one, later layers winning per OPTION.
 
     Per option and not per group, which is the whole of ``SPRINT_JOBS.md`` 5.1 point 1: a
-    collection that sets ``structure.max_tokens`` and a child collection that sets
+    collection that sets ``structure.max_words`` and a child collection that sets
     ``structure.chunk_strategy`` must both survive, and a group-level replacement would
     silently drop the first.
 
@@ -699,7 +712,7 @@ def resolve_options(
 
     **``inherited`` MAKES THE LAYER COUNT N, AND ``SPRINT_JOBS.md`` 5.1 IS WHY.** A
     collection is a subtree, so a setting on a node reaches the documents beneath it — and
-    a caller who puts ``structure.max_tokens`` on ``/papers`` and ``facts.enabled`` on
+    a caller who puts ``structure.max_words`` on ``/papers`` and ``facts.enabled`` on
     ``/papers/2026`` must get both. Nearest-wins would give them only the second, which
     means a collection could not refine its parent without restating it, and a restatement
     is the copy-drift ``DECLARED_STRUCTURE`` and ``INGEST_OWNED_KEYS`` are both on the

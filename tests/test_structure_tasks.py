@@ -136,6 +136,56 @@ def _attempt(session, node: Document, task: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
+class TestTheChunkCeilingCountsSections:
+    """Issue #5's remainder, run end to end: `_write_chunks` calls `chunk_text` once per
+    section, so the ceiling EXPLAIN declares has to know how many sections there can be.
+
+    A markdown file of many one-line sections is the case 0.6.2's length-only bound
+    under-reported: every section is its own chunk however short."""
+
+    # Six characters a section. The length-only bound grows by 2/20 + 3/64 of a chunk per
+    # character at the default min_chunk_length of 20, so it falls behind one chunk per
+    # section below about 6.8 characters each — this is just under.
+    TEXT = ("# H\nx\n" * 80).encode("utf-8")
+
+    def _ingest_markdown(self, session) -> Document:
+        response = IngestService(session).upload_file(
+            UploadedFile(data=self.TEXT, filename="many.md", content_type="text/markdown")
+        )
+        # One `embed` per chunk, plus the rollup above them: past the default bound of 100.
+        drain_ingest_queue(session, max_tasks=500)
+        return DocumentRepository(session).get(response.document_id)
+
+    def test_extract_records_the_section_ceiling(self, db_session, evidence):
+        node = self._ingest_markdown(db_session)
+        assert evidence(node)["extraction"]["section_ceiling"] == 81  # 80 headings + preamble
+
+    def test_what_the_rung_wrote_is_inside_the_declared_interval(self, db_session, evidence):
+        from jmfts_core.chunking import chunk_count_ceiling
+        from jmfts_core.config import get_settings
+        from jmfts_core.structure_tasks import _chunk_ceiling
+
+        node = self._ingest_markdown(db_session)
+        extraction = evidence(node)["extraction"]
+        attempt = _attempt(db_session, node, TASK_STRUCTURE_DECLARED)
+        written = attempt["detail"]["chunk_nodes"]
+        minimum = attempt["detail"]["params"]["min_chunk_length"]
+
+        _, ceiling = _chunk_ceiling(
+            {
+                "extraction.characters": extraction["characters"],
+                "extraction.section_ceiling": extraction["section_ceiling"],
+            },
+            {"min_chunk_length": minimum},
+        )
+        single_call = chunk_count_ceiling(
+            extraction["characters"], minimum, get_settings().chunk_max_chars
+        )
+        assert written == 80
+        assert written <= ceiling
+        assert single_call < written, "the length-only bound this replaced under-reports here"
+
+
 class TestExtractText:
     def test_the_file_node_holds_the_whole_extracted_text(self, db_session, outlined_pdf):
         node = _ingest(db_session, outlined_pdf)
@@ -297,7 +347,7 @@ class TestDeclaredRungRecordsWhatItCovered:
 
         assert attempt["rung"] == RUNG_DECLARED
         assert attempt["detail"]["params"]["chunk_strategy"] == "sentence_packed"
-        assert attempt["detail"]["params"]["max_tokens"] == 120
+        assert attempt["detail"]["params"]["max_words"] == 120
         assert attempt["param_fingerprint"]
 
     def test_produced_child_ids_are_the_undo_record(self, db_session, outlined_pdf):

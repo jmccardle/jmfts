@@ -399,6 +399,9 @@ class TestFanout:
     #: every one of them is registered.
     EVIDENCE_SAMPLE = {
         "extraction.characters": 40_000,
+        # Eleven headings and a preamble: the structure rungs call `chunk_text` once per
+        # section, and their ceiling counts those calls (issue #5).
+        "extraction.section_ceiling": 12,
         "matched.patterns.sheet_count": 6,
         "sheet.measurements.rows": 1_284,
         # A header at row 1, which is where 8.3 said it always was. `extract:sheet`'s

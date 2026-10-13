@@ -68,26 +68,26 @@ class TestResolveOptions:
     def test_an_override_replaces_one_key_and_leaves_the_group_complete(self):
         """A group is merged, not substituted: the two options nobody mentioned keep the
         measured defaults, so a handler always receives a full set."""
-        resolved = resolve_options("pdf", {"structure": {"max_tokens": 30}})
+        resolved = resolve_options("pdf", {"structure": {"max_words": 30}})
 
         assert resolved["structure"] == {
             "chunk_strategy": STRUCTURE_CHUNK_PARAMS["chunk_strategy"],
-            "max_tokens": 30,
+            "max_words": 30,
             "min_chunk_length": STRUCTURE_CHUNK_PARAMS["min_chunk_length"],
         }
 
     def test_the_defaults_are_not_mutated_by_a_resolve(self):
         """The tables are module state and the result goes onto a queue row. One caller
-        raising max_tokens must not raise it for the next upload of the day."""
-        resolve_options("pdf", {"structure": {"max_tokens": 30}})
+        raising max_words must not raise it for the next upload of the day."""
+        resolve_options("pdf", {"structure": {"max_words": 30}})
 
-        assert STRUCTURE_CHUNK_PARAMS["max_tokens"] == 120
-        assert TASK_PARAM_DEFAULTS["structure"]["max_tokens"] == 120
+        assert STRUCTURE_CHUNK_PARAMS["max_words"] == 120
+        assert TASK_PARAM_DEFAULTS["structure"]["max_words"] == 120
 
     def test_resolving_a_resolved_set_is_the_identity(self):
         """What makes it safe to call twice — the upload resolves, records, and `probe`
         resolves the record again to rebuild the same plan."""
-        once = resolve_options("pdf", {"structure": {"max_tokens": 30}})
+        once = resolve_options("pdf", {"structure": {"max_words": 30}})
 
         assert resolve_options("pdf", once) == once
 
@@ -106,30 +106,30 @@ class TestResolveOptions:
     def test_an_override_applies_to_a_format_with_no_profile(self):
         """A caller can tune a format nobody has written a profile for, because what is
         being tuned is the task."""
-        resolved = resolve_options("docx", {"structure": {"max_tokens": 30}})
+        resolved = resolve_options("docx", {"structure": {"max_words": 30}})
 
-        assert resolved["structure"]["max_tokens"] == 30
+        assert resolved["structure"]["max_words"] == 30
 
     def test_a_format_profile_is_a_deviation_and_the_rest_is_inherited(self, monkeypatch):
         """The middle layer, exercised through a profile the registry does not yet have.
         Naming one option leaves the other two at the task's defaults."""
-        monkeypatch.setitem(INGEST_PROFILES, "pptx", {"structure": {"max_tokens": 40}})
+        monkeypatch.setitem(INGEST_PROFILES, "pptx", {"structure": {"max_words": 40}})
 
         assert resolve_options("pptx")["structure"] == {
             "chunk_strategy": STRUCTURE_CHUNK_PARAMS["chunk_strategy"],
-            "max_tokens": 40,
+            "max_words": 40,
             "min_chunk_length": STRUCTURE_CHUNK_PARAMS["min_chunk_length"],
         }
         # And only for that format.
-        assert resolve_options("pdf")["structure"]["max_tokens"] == 120
+        assert resolve_options("pdf")["structure"]["max_words"] == 120
 
     def test_a_caller_override_beats_a_format_profile(self, monkeypatch):
         """The order of the three layers: the request is the last word."""
-        monkeypatch.setitem(INGEST_PROFILES, "pptx", {"structure": {"max_tokens": 40}})
+        monkeypatch.setitem(INGEST_PROFILES, "pptx", {"structure": {"max_words": 40}})
 
-        resolved = resolve_options("pptx", {"structure": {"max_tokens": 30}})
+        resolved = resolve_options("pptx", {"structure": {"max_words": 30}})
 
-        assert resolved["structure"]["max_tokens"] == 30
+        assert resolved["structure"]["max_words"] == 30
 
     def test_a_profile_naming_an_option_that_does_not_exist_raises(self, monkeypatch):
         """A registry entry is held to the same standard a request is — the same merge
@@ -141,11 +141,11 @@ class TestResolveOptions:
 
     def test_an_unknown_group_raises_and_names_the_format(self):
         with pytest.raises(ValueError, match="unknown option group 'chunk'"):
-            resolve_options("pdf", {"chunk": {"max_tokens": 30}})
+            resolve_options("pdf", {"chunk": {"max_words": 30}})
 
     def test_an_unknown_group_raises_for_a_format_with_no_profile_too(self):
         with pytest.raises(ValueError, match="unknown option group 'chunk'"):
-            resolve_options("png", {"chunk": {"max_tokens": 30}})
+            resolve_options("png", {"chunk": {"max_words": 30}})
 
     def test_an_unknown_key_raises_rather_than_being_ignored(self):
         """The near-miss the deprecated `_resolve_stages` would swallow: a caller who
@@ -153,19 +153,25 @@ class TestResolveOptions:
         with pytest.raises(ValueError, match="unknown option structure.max_token"):
             resolve_options("pdf", {"structure": {"max_token": 30}})
 
+    def test_the_old_name_is_refused_and_the_refusal_names_the_new_one(self):
+        """Issue #1: `max_tokens` was a WORD count and is now `max_words`. Not an alias —
+        accepting both would give one option two spellings — but the 400 says which."""
+        with pytest.raises(ValueError, match="it was renamed structure.max_words"):
+            resolve_options("pdf", {"structure": {"max_tokens": 30}})
+
     def test_a_wrong_type_raises_and_says_what_it_wanted(self):
-        with pytest.raises(ValueError, match="option structure.max_tokens: expected an integer"):
-            resolve_options("pdf", {"structure": {"max_tokens": "thirty"}})
+        with pytest.raises(ValueError, match="option structure.max_words: expected an integer"):
+            resolve_options("pdf", {"structure": {"max_words": "thirty"}})
 
     def test_a_bool_is_not_an_integer_here(self):
-        """`isinstance(True, int)` is true in Python; a chunker packing to one token is
-        not what `max_tokens: true` was asking for."""
+        """`isinstance(True, int)` is true in Python; a chunker packing to one word is
+        not what `max_words: true` was asking for."""
         with pytest.raises(ValueError, match="got bool"):
-            resolve_options("pdf", {"structure": {"max_tokens": True}})
+            resolve_options("pdf", {"structure": {"max_words": True}})
 
     def test_a_nonsense_count_raises(self):
         with pytest.raises(ValueError, match="expected a positive integer"):
-            resolve_options("pdf", {"structure": {"max_tokens": 0}})
+            resolve_options("pdf", {"structure": {"max_words": 0}})
 
     def test_an_unknown_chunk_strategy_raises_and_lists_the_real_ones(self):
         with pytest.raises(ValueError, match="option structure.chunk_strategy: expected one of"):
@@ -185,10 +191,10 @@ class TestPlanCarriesTheOptions:
     """The seam: the resolved group named by a row's ``params_key`` becomes its params."""
 
     def test_an_override_reaches_the_task_spec(self):
-        plan = plan_after_probe("pdf", {"has_text_layer": True}, {"structure": {"max_tokens": 30}})
+        plan = plan_after_probe("pdf", {"has_text_layer": True}, {"structure": {"max_words": 30}})
 
         params = {spec.task_type: spec.params for spec in plan.eligible}
-        assert params[TASK_STRUCTURE_INFERRED]["max_tokens"] == 30
+        assert params[TASK_STRUCTURE_INFERRED]["max_words"] == 30
         assert params[TASK_STRUCTURE_INFERRED]["chunk_strategy"] == "sentence_packed"
 
     def test_omitting_options_is_the_task_defaults(self):
@@ -200,7 +206,7 @@ class TestPlanCarriesTheOptions:
     def test_a_task_that_takes_no_parameters_still_gets_an_empty_dict(self):
         """`extract:text` has no `params_key`, so nothing about it can be tuned into
         needing a second run — which is what the constant fingerprint states."""
-        plan = plan_after_probe("pdf", {"has_text_layer": True}, {"structure": {"max_tokens": 30}})
+        plan = plan_after_probe("pdf", {"has_text_layer": True}, {"structure": {"max_words": 30}})
 
         assert {s.task_type: s.params for s in plan.eligible}["extract:text"] == {}
 
@@ -223,11 +229,11 @@ class TestPlanCarriesTheOptions:
         plan = plan_after_probe(
             "docx",
             {"has_text_layer": True, "has_heading_styles": True},
-            {"structure": {"max_tokens": 30}},
+            {"structure": {"max_words": 30}},
         )
 
         params = {spec.task_type: spec.params for spec in plan.eligible}
-        assert params[TASK_STRUCTURE_DECLARED]["max_tokens"] == 30
+        assert params[TASK_STRUCTURE_DECLARED]["max_words"] == 30
 
 
 class TestTheTablesAgree:
@@ -314,12 +320,12 @@ class TestTheUsetypeTable:
         )
         assert resolved["structure"]["chunk_strategy"] == "paragraph"
         # And the options the usetype set that the caller did not name still apply.
-        assert resolved["structure"]["max_tokens"] == 200
+        assert resolved["structure"]["max_words"] == 200
 
     def test_the_usetype_layer_sits_over_the_task_defaults(self):
         assert resolve_usetype_options("raw", "")["structure"] == {
             "chunk_strategy": "sentence",
-            "max_tokens": 200,
+            "max_words": 200,
             "min_chunk_length": 20,
         }
 
@@ -345,7 +351,7 @@ def _prose_pdf() -> bytes:
 
     No outline and no headings, so `probe` picks the inferred rung and the whole document
     is one untitled region whose chunks attach to the file node. That is the shape that
-    makes the chunk count a direct readout of `max_tokens` — every other structural
+    makes the chunk count a direct readout of `max_words` — every other structural
     decision is held constant, so the only thing that can move it is the option.
     """
     sentence = (
@@ -416,14 +422,14 @@ class TestOptionsSurviveTheUpload:
     def test_the_resolved_options_are_written_onto_the_node(self, db_session, evidence, prose_pdf):
         """Resolved, not the overrides: the node answers "what was this ingested with?"
         without anyone having to know which profile was in effect at the time."""
-        response = _upload(db_session, prose_pdf, options={"structure": {"max_tokens": 30}})
+        response = _upload(db_session, prose_pdf, options={"structure": {"max_words": 30}})
 
         node = DocumentRepository(db_session).get(response.document_id)
         stored = evidence(node)[OPTIONS_KEY]
-        assert stored == resolve_options("pdf", {"structure": {"max_tokens": 30}})
+        assert stored == resolve_options("pdf", {"structure": {"max_words": 30}})
         assert stored["structure"] == {
             "chunk_strategy": "sentence_packed",
-            "max_tokens": 30,
+            "max_words": 30,
             "min_chunk_length": 20,
         }
         # Every group, including the three that only a node BELOW this one will read. The
@@ -488,7 +494,7 @@ class TestOptionsReachTheChunker:
         drain_ingest_queue(db_session)
         default_chunks = _chunk_count(db_session, default.document_id)
 
-        smaller = _upload(db_session, prose_pdf_twin, options={"structure": {"max_tokens": 30}})
+        smaller = _upload(db_session, prose_pdf_twin, options={"structure": {"max_words": 30}})
         drain_ingest_queue(db_session)
         smaller_chunks = _chunk_count(db_session, smaller.document_id)
 
@@ -502,14 +508,14 @@ class TestOptionsReachTheChunker:
         """Spec 6.1: the same bytes resolve to the same node, and a parameter change is a
         re-ingest — an attempt diff that enqueues only the tasks whose fingerprint moved.
         That is the next step and is not built, so this upload can either do the work or
-        say it was not done. Returning the node with the caller's `max_tokens` silently
+        say it was not done. Returning the node with the caller's `max_words` silently
         dropped is the option this refuses to take.
         """
         first = _upload(db_session, prose_pdf)
         drain_ingest_queue(db_session)
 
         with pytest.raises(ValueError, match="6.1 re-ingest"):
-            _upload(db_session, prose_pdf, options={"structure": {"max_tokens": 30}})
+            _upload(db_session, prose_pdf, options={"structure": {"max_words": 30}})
 
         # And the same options twice is not a change: it deduplicates like any other repeat.
         again = _upload(db_session, prose_pdf)
@@ -519,7 +525,7 @@ class TestOptionsReachTheChunker:
     def test_the_attempt_log_records_the_parameters_that_ran(self, db_session, evidence, prose_pdf):
         """3.4. The plan and the run have to agree, and the log is where a later reader
         checks that they did."""
-        response = _upload(db_session, prose_pdf, options={"structure": {"max_tokens": 30}})
+        response = _upload(db_session, prose_pdf, options={"structure": {"max_words": 30}})
         drain_ingest_queue(db_session)
 
         node = DocumentRepository(db_session).get(response.document_id)
@@ -528,8 +534,8 @@ class TestOptionsReachTheChunker:
             for entry in evidence(node)["attempts"]
             if entry["task"] == TASK_STRUCTURE_INFERRED
         )
-        assert attempt["params"]["max_tokens"] == 30
-        assert attempt["detail"]["params"]["max_tokens"] == 30
+        assert attempt["params"]["max_words"] == 30
+        assert attempt["detail"]["params"]["max_words"] == 30
 
 
 class TestTheHttpSurface:
@@ -546,12 +552,12 @@ class TestTheHttpSurface:
         response = client_with_db.post(
             "/ingest/file",
             files={"file": ("paper.pdf", prose_pdf, "application/pdf")},
-            data={"options": json.dumps({"structure": {"max_tokens": 30}})},
+            data={"options": json.dumps({"structure": {"max_words": 30}})},
         )
 
         assert response.status_code == 201, response.text
         node = DocumentRepository(db_session).get(response.json()["document_id"])
-        assert evidence(node)[OPTIONS_KEY]["structure"]["max_tokens"] == 30
+        assert evidence(node)[OPTIONS_KEY]["structure"]["max_words"] == 30
 
     def test_an_upload_with_no_options_field_is_still_accepted(self, client_with_db, prose_pdf):
         """The field is optional on a multipart request, not merely nullable in the schema."""

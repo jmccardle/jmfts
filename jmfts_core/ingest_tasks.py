@@ -2261,7 +2261,7 @@ def collection_option_layers(session: Session, parent_id: Optional[int]) -> tupl
 
     **EVERY LAYER, NOT THE NEAREST.** ``_options_owner`` returns one owner and uses its set
     wholesale, which is correct while there is only ever one. Under a tree a caller puts
-    ``structure.max_tokens`` on ``/papers`` and ``facts.enabled`` on ``/papers/2026``, and
+    ``structure.max_words`` on ``/papers`` and ``facts.enabled`` on ``/papers/2026``, and
     nearest-wins gives them only the second — so a collection could not refine its parent
     without restating it. 5.1 point 1.
 

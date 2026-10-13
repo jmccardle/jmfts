@@ -978,13 +978,14 @@ class DocumentService:
             strategy = ChunkStrategy(request.strategy)
         except ValueError:
             raise ValueError(
-                f"Unknown strategy '{request.strategy}'. Use: sentence, paragraph, token_count"
+                f"Unknown strategy '{request.strategy}'. Use: "
+                + ", ".join(s.value for s in ChunkStrategy)
             )
 
         chunks = chunk_text(
             parent.content,
             strategy=strategy,
-            max_tokens=request.max_tokens,
+            max_words=request.max_words,
             overlap=request.overlap,
             min_chunk_length=request.min_chunk_length,
             max_chars=request.max_chars,
