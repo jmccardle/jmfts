@@ -269,8 +269,20 @@ class IngestRollupPlanner:
         # Offered SECOND, ahead of the two rungs that need a model or an LLM, for the reason
         # `index:bm25` is offered first: it needs neither, and ordering it behind `summarize`
         # would make a citation wait on an endpoint that has nothing to do with it.
+        #
+        # Gated on the format as well as on the rendition, because `run_anchor_render`
+        # recovers a rectangle by aligning an OOXML package's own blocks and refuses every
+        # other source. An xlsx has a rendition (`RENDITION_SOURCE_PATTERN` paginates it) and
+        # no reader in `OOXML_READERS`, so offering it here was a guaranteed failed task.
+        # Imported here: `citation_tasks` reaches this module through `ingest_tasks`'s
+        # registration imports, so a module-level import of it is circular.
+        from jmfts_core.citation_tasks import OOXML_READERS
+
         rendition = RenditionRepository(session).get(node.id, KIND_PDF)
-        if rendition is not None:
+        if (
+            rendition is not None
+            and evidence_value(session, node.id, "extraction.source") in OOXML_READERS
+        ):
             spec = _anchor_render_spec(rendition.content_hash, len(children))
             if (TASK_ANCHOR_RENDER, param_fingerprint(spec.params)) not in attempted:
                 return (spec,)

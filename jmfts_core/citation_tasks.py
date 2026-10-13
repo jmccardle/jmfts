@@ -73,6 +73,7 @@ from typing import Callable, Optional, Sequence
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from jmfts_core import evidence as ev
 from jmfts_core.atoms import (
     COST_CPU,
     EV_BLOB,
@@ -288,7 +289,11 @@ def run_citation(session: Session, task: TaskQueue) -> TaskOutcome:
             f"citation is scoped to document {task.scope_document_id}, which does not exist"
         )
 
-    extraction = EvidenceRepository(session).read(doc.id, "extraction") or {}
+    # `read` answers the truthy `ev.ABSENT` sentinel for a missing row, so an `or {}` here
+    # never fires and `.get` lands on the sentinel. Compare against it by identity.
+    extraction = EvidenceRepository(session).read(doc.id, "extraction")
+    if extraction is ev.ABSENT:
+        extraction = {}
     source = extraction.get("source")
     if source != EXTRACTION_PDF_TEXT_LAYER:
         raise ValueError(
@@ -520,7 +525,11 @@ def run_anchor_source(session: Session, task: TaskQueue) -> TaskOutcome:
             f"anchor:source is scoped to document {task.scope_document_id}, which does not exist"
         )
 
-    extraction = EvidenceRepository(session).read(doc.id, "extraction") or {}
+    # `read` answers the truthy `ev.ABSENT` sentinel for a missing row, so an `or {}` here
+    # never fires and `.get` lands on the sentinel. Compare against it by identity.
+    extraction = EvidenceRepository(session).read(doc.id, "extraction")
+    if extraction is ev.ABSENT:
+        extraction = {}
     source = extraction.get("source")
     reader = OOXML_READERS.get(source)
     if reader is None:
@@ -899,7 +908,10 @@ def run_anchor_render(session: Session, task: TaskQueue) -> TaskOutcome:
         )
 
     evidence = EvidenceRepository(session)
-    extraction = evidence.read(doc.id, "extraction") or {}
+    # The sentinel by identity, not `or {}`, for :func:`run_citation`'s reason.
+    extraction = evidence.read(doc.id, "extraction")
+    if extraction is ev.ABSENT:
+        extraction = {}
     source_name = extraction.get("source")
     reader = OOXML_READERS.get(source_name)
     if reader is None:

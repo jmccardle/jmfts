@@ -88,8 +88,10 @@ from jmfts_core.models.document import (  # noqa: E402
 )
 from jmfts_core.models.task_queue import (  # noqa: E402
     ADVISORY_TASK_TYPES,
+    TASK_FAILED,
     WRITE_SELF,
     WRITE_SUBTREE,
+    TaskQueue,
 )
 from jmfts_core.probe import detect_format, probe_patterns  # noqa: E402
 from jmfts_core.render_tasks import run_render_pdf  # noqa: E402
@@ -728,6 +730,56 @@ class TestTheSettlingBoundaryOffersIt:
         assert node.settled == SETTLED_SETTLED
         assert node.content
         assert _chunks(db_session, node.id)
+
+
+class TestAWorkbookIsNotOfferedARectangle:
+    """Forgejo #37. ``RENDITION_SOURCE_PATTERN`` paginates an ``.xlsx``, so a workbook gets a
+    rendition — and ``run_anchor_render`` refuses every source outside ``OOXML_READERS``. The
+    planner offered the task on the rendition alone, so every workbook on an appliance with
+    a converter ended its ingest with a failed ``anchor:render``."""
+
+    def test_an_xlsx_through_the_real_planner_fails_nothing(
+        self, db_session, rendition_pdf, monkeypatch
+    ):
+        openpyxl = pytest.importorskip("openpyxl", reason="the office extra is not installed")
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.title = "Deals"
+        sheet.append(["Deal ID", "Account", "Value"])
+        sheet.append(["D-4471", "Northwind Freight", 128000])
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+
+        # The real `render:pdf` with the converter stubbed, as `_install_rendition` does, so
+        # the workbook reaches the settling boundary holding a real rendition row.
+        monkeypatch.setattr(
+            "jmfts_core.render_tasks.convert_bytes", lambda data, *, to: rendition_pdf
+        )
+        response = IngestService(db_session).upload_file(
+            UploadedFile(
+                data=buffer.getvalue(),
+                filename="pipeline.xlsx",
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        )
+        drain_ingest_queue(db_session, planner=IngestRollupPlanner(), max_tasks=400)
+        node = DocumentRepository(db_session).get(response.document_id)
+
+        # Without the rendition the planner would never have reached the offer at all.
+        assert RenditionRepository(db_session).get(node.id, KIND_PDF) is not None
+
+        subtree = [doc.id for doc in DocumentRepository(db_session).get_subtree(node.id)]
+        rows = (
+            db_session.execute(select(TaskQueue).where(TaskQueue.scope_document_id.in_(subtree)))
+            .scalars()
+            .all()
+        )
+        failed = [
+            (row.task_type, row.scope_document_id) for row in rows if row.status == TASK_FAILED
+        ]
+        assert failed == []
+        assert TASK_ANCHOR_RENDER not in {row.task_type for row in rows}
+        assert node.settled == SETTLED_SETTLED
 
 
 # ---------------------------------------------------------------------------
