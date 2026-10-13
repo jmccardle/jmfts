@@ -480,6 +480,14 @@ def _process_page(
     # (see the constant), so an offset taken before the removal is wrong by however many
     # were removed above it. The "\n\n" the segments are joined with carries no control
     # character, so accounting for it as two characters between segments is exact.
+    #
+    # EVERY RECTANGLE IS STORED IN THE ROTATED PAGE'S SPACE. `get_text` and `find_tables`
+    # measure on the UNROTATED page, while `page.rect`, `rendering.page_geometry` and the
+    # clip `get_pixmap` takes are all the page as displayed. On a `/Rotate 90` page the two
+    # spaces barely overlap, so an anchor measured in one and cropped in the other renders
+    # a blank PNG (#38). `rotation_matrix` is the identity on an unrotated page, so this is
+    # a no-op everywhere else.
+    rotation = page.rotation_matrix
     pieces: list[str] = []
     cursor = 0
     for position, (text, bbox) in enumerate(segments):
@@ -487,8 +495,9 @@ def _process_page(
         result.control_chars_removed += removed
         if pieces:
             cursor += 2  # the "\n\n" join
+        displayed = pymupdf.Rect(bbox) * rotation
         block = {
-            "bbox": [round(value, 2) for value in bbox],
+            "bbox": [round(value, 2) for value in displayed],
             "start": cursor,
             "end": cursor + len(clean),
         }

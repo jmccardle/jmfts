@@ -52,6 +52,7 @@ from jmfts_core.citation_tasks import UNRESOLVED_NO_SPAN, UNRESOLVED_REASON
 from jmfts_core.database import get_db
 from jmfts_core.models.document import Document, USETYPE_CHUNK
 from jmfts_core.models.principal import AccessGrant, Principal as PrincipalModel
+from jmfts_core.pdf_extraction import pdf_to_markdown
 from jmfts_core.principal_context import CurrentPrincipal, reset_principal, set_principal
 from jmfts_core.rendering import (
     DPI_MAX,
@@ -312,6 +313,64 @@ class TestRenderBounds:
         locked = doc.tobytes(encryption=pymupdf.PDF_ENCRYPT_AES_256, user_pw="secret")
         with pytest.raises(UnreadablePdf, match="encrypted"):
             render_page(locked, page=0, dpi=72)
+
+    def test_a_crop_of_blank_paper_is_refused_rather_than_answered_with_a_blank_png(
+        self, pdf_bytes
+    ):
+        """The bottom margin of the fixture holds nothing. A 200 with an all-white PNG is
+        indistinguishable, to a caller, from a rectangle that hit the passage."""
+        with pytest.raises(BadRenderRequest, match="single colour"):
+            render_page(pdf_bytes, page=0, dpi=72, clip=(50, 700, 300, 780))
+
+    def test_a_whole_blank_page_still_renders(self):
+        """Only a CROP is refused for being blank. A page is the document's to leave empty."""
+        doc = pymupdf.open()
+        doc.new_page(width=LETTER_PT[0], height=LETTER_PT[1])
+        assert _png_size(render_page(doc.tobytes(), page=0, dpi=72)) == (612, 792)
+
+
+# ---------------------------------------------------------------------------
+# Rotated pages (#38) — the rectangle written at ingest is the one the crop reads
+# ---------------------------------------------------------------------------
+
+
+def _rotated_pdf(rotation: int) -> bytes:
+    """One Letter page with a passage on it, carrying ``/Rotate rotation``.
+
+    The text is written before the rotation is set, so its content-stream coordinates are
+    the unrotated page's, as a scanner or a landscape export writes them.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=LETTER_PT[0], height=LETTER_PT[1])
+    page.insert_text((72, 100), "A passage on a turned page.", fontsize=20)
+    page.set_rotation(rotation)
+    return doc.tobytes()
+
+
+class TestRotatedPages:
+    @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+    def test_the_extracted_rectangle_crops_to_the_passage(self, rotation):
+        """Extraction and rendering agree on the coordinate space at every rotation: the
+        rectangle ``pdf_to_markdown`` emits is on the displayed page and renders the words,
+        not blank paper."""
+        data = _rotated_pdf(rotation)
+        _, meta = pdf_to_markdown(data)
+        (block,) = meta["text_blocks"]
+        doc = pymupdf.open(stream=data, filetype="pdf")
+        page = doc[0]
+        box = pymupdf.Rect(block["bbox"])
+        assert box in page.rect + (-1, -1, 1, 1)
+        assert render_page(data, page=0, dpi=72, clip=tuple(block["bbox"]))
+        # Back through the inverse, the rectangle is still the passage's own.
+        assert "turned page" in page.get_textbox(box * page.derotation_matrix)
+
+    def test_an_unrotated_space_rectangle_on_a_rotated_page_is_refused_by_name(self):
+        """What an anchor written before #38 holds: the passage's rectangle on the page as
+        stored, which on a 90-degree page is blank paper on the page as displayed."""
+        data = _rotated_pdf(90)
+        stale = (72.0, 78.5, 360.0, 106.0)
+        with pytest.raises(BadRenderRequest, match="rotated 90 degrees"):
+            render_page(data, page=0, dpi=72, clip=stale)
 
 
 # ---------------------------------------------------------------------------

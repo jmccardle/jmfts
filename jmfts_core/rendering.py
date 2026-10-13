@@ -263,6 +263,22 @@ def render_page(
         # `alpha=False`: 3 bytes a pixel, which is what PIXELS_MAX is priced in, and a page
         # has nothing to be transparent against.
         pixmap = target.get_pixmap(dpi=dpi, clip=area, alpha=False)
+        if clip is not None and pixmap.is_unicolor:
+            # A crop is asked for because something is there. One colour edge to edge is
+            # a rectangle that missed it, and a 200 with a blank PNG is the silent wrong
+            # answer #38 was about; a whole page is allowed to be blank, a crop is not.
+            hint = ""
+            if target.rotation:
+                hint = (
+                    f" Page {page} is rotated {target.rotation} degrees and bboxes are in the "
+                    f"rotated page's space; an anchor measured on the unrotated page (one "
+                    f"written before #38) lands elsewhere — re-derive it by re-running the "
+                    f"citation task"
+                )
+            raise BadRenderRequest(
+                f"bbox {clip} on page {page} renders as a single colour, so there is no "
+                f"content of the page inside it.{hint}"
+            )
         return pixmap.tobytes("png")
     finally:
         doc.close()
