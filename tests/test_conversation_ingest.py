@@ -255,6 +255,36 @@ def _ingest(session, messages=None, jsonl=None, **kwargs):
     )
 
 
+def _ingest_with_options(session, messages, overrides):
+    """A transcript stored with caller ``overrides`` and drained, as the service does.
+
+    ``ConversationIngestRequest`` has no field for the ``structure`` group, so this takes
+    the generic route every other caller does — options on the stored file — which is
+    the route issue #4 is about.
+    """
+    from uuid import uuid4
+
+    from jmfts_core.conversation_ingest import messages_to_jsonl, parse_message_array
+    from jmfts_core.ingest_options import resolve_usetype_options
+    from jmfts_core.ingest_worker import IngestWorker, borrowed_session
+    from jmfts_core.rollup_tasks import IngestRollupPlanner
+    from jmfts_core.services.ingest_service import IngestService
+
+    overrides = {"facts": {"enabled": False}, **overrides}
+    stored = IngestService(session).store_text_as_file(
+        messages_to_jsonl(parse_message_array(messages)),
+        filename=f"conversation-{uuid4().hex[:8]}",
+        options=resolve_usetype_options("conversation", "", overrides),
+    )
+    IngestWorker(
+        worker_id=f"test-conversation-{uuid4().hex[:12]}",
+        session_factory=lambda: borrowed_session(session),
+        planner=IngestRollupPlanner(),
+    ).drain_document(stored.document_id, timeout_seconds=300)
+    session.expire_all()
+    return stored.document_id
+
+
 def _msgs(*pairs):
     return [{"role": role, "content": content} for role, content in pairs]
 
@@ -469,26 +499,27 @@ class TestOversizeTurns:
     def test_the_nodes_written_are_under_the_declared_ceiling(self, db_session, evidence):
         """``SPRINT_0_6_0.md`` step 36: the run, held against the bound ``EXPLAIN`` prints.
 
-        Two-character sentences, because the ``sentence`` strategy emitted one part per
-        sentence — so this WAS the turn that writes the most parts for its length: 300.
-        Since issue #2 ``chunk_to_fit`` packs whole sentences to the window, so the same
-        ~600 tokens are two parts; the ceiling below did not move, and still holds.
+        Two-character sentences under ``structure.chunk_strategy=sentence``, which emits one
+        part per sentence — so this is the turn that writes the MOST parts for its length.
+        Asked for through the option since issue #4; it was the hard-coded strategy before.
         """
-        response = _ingest(
+        doc_id = _ingest_with_options(
             db_session,
             # ~600 tokens, over the 512-token window, in three hundred sentences.
-            messages=_msgs(("assistant", "Go. " * 300), ("user", "A short reply.")),
-            extract_facts=False,
+            _msgs(("assistant", "Go. " * 300), ("user", "A short reply.")),
+            # `min_chunk_length` 1, or the group's default of 20 merges the 3-character
+            # sentences back together and this is no longer the worst case.
+            {"structure": {"chunk_strategy": "sentence", "min_chunk_length": 1}},
         )
 
         repo = DocumentRepository(db_session)
-        root = repo.get(response.source_document_id)
+        root = repo.get(doc_id)
         recorded = evidence(root)
         written = recorded["structure"]["node_count"]
         turns = repo.get_children(root.id, depth=1, limit=100)
         parts = sum(len(repo.get_children(t.id, depth=1, limit=1000)) for t in turns)
         assert written == len(turns) + parts
-        assert parts == 2, "300 sentences packed to the 512-token window (#2), measured"
+        assert parts == 300, "one part per sentence; 4.11's correction, measured"
 
         from jmfts_core.atoms import ATOMS
 
@@ -497,6 +528,39 @@ class TestOversizeTurns:
         assert fanout is not None, "structure:conversation declares no fan-out bound"
         low, high = fanout.bound({f"matched.patterns.{k}": v for k, v in patterns.items()}, {})
         assert low <= written <= high
+
+    def test_the_default_structure_options_pack_the_parts(self, db_session, evidence):
+        """Issue #4: the default ``structure`` group reaches the rung and packs sentences.
+
+        The same three hundred one-word sentences as above, with nothing asked for. The
+        group's default is ``sentence_packed`` at 120 words, so the parts are 120, 120 and
+        60 words — three passages, where the hard-coded ``sentence`` strategy wrote 300.
+        """
+        response = _ingest(
+            db_session,
+            messages=_msgs(("assistant", "Go. " * 300), ("user", "A short reply.")),
+            extract_facts=False,
+        )
+
+        repo = DocumentRepository(db_session)
+        turns = repo.get_children(response.source_document_id, depth=1, limit=100)
+        big = next(t for t in turns if evidence(t)["over_token_window"])
+        parts = repo.get_children(big.id, depth=1, limit=1000)
+        assert [len(p.content.split()) for p in parts] == [120, 120, 60]
+
+    def test_a_caller_structure_option_reaches_the_rung(self, db_session, evidence):
+        """Issue #4: ``structure.max_words`` set by the caller changes how a turn is cut."""
+        doc_id = _ingest_with_options(
+            db_session,
+            _msgs(("assistant", "Go. " * 300)),
+            {"structure": {"chunk_strategy": "sentence_packed", "max_words": 50}},
+        )
+
+        repo = DocumentRepository(db_session)
+        turn = repo.get_children(doc_id, depth=1, limit=100)[0]
+        assert evidence(turn)["over_token_window"] is True
+        parts = repo.get_children(turn.id, depth=1, limit=1000)
+        assert [len(p.content.split()) for p in parts] == [50] * 6
 
     def test_a_turn_that_fits_gets_no_children(self, db_session, evidence):
         response = _ingest(

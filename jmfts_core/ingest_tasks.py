@@ -1222,13 +1222,17 @@ TASK_ROWS: tuple[TaskRow, ...] = (
     # children before the parent had any content at all. The two parse the same bytes with
     # the same parser and take different halves of the answer: the text, and the turns.
     #
-    # No `params_key`. The turn boundaries are what the file says; there is nothing here
-    # for 6.1 to re-run differently, which is the same claim `structure:sheets` makes.
+    # `params_key="structure"` since 0.7.0 (issue #4). The turn boundaries are what the file
+    # says and no option moves them; but an over-window turn is split into parts, and HOW
+    # it is split is exactly the decision the `structure` group makes for the prose rungs.
+    # Without the key the parts were cut by a hard-coded strategy no caller could reach,
+    # and the queue row's fingerprint could not notice a change to one.
     TaskRow(
         TASK_STRUCTURE_CONVERSATION,
         write_mode=WRITE_CHILDREN,
         after=(TASK_EXTRACT_TEXT,),
         requires=(HAS_TEXT_LAYER, CONVERSATION),
+        params_key="structure",
     ),
     # `INGEST_SPEC.md` 8.1. The third structural row, and the only one with no `after`:
     # its evidence is the workbook part, which is in the uploaded bytes, so it waits for
