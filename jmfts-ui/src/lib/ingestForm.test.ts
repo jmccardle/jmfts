@@ -4,6 +4,7 @@ import {
   editsFromJson,
   extensionOf,
   fieldKind,
+  mergeOptions,
   optionFields,
   parseOptions,
   parseParentId,
@@ -35,20 +36,20 @@ describe("option fields", () => {
 });
 
 describe("parseOptions", () => {
-  it("sends only what differs from the resolved value", () => {
+  it("sends every edited field, typed", () => {
     const parsed = parseOptions(
       { "structure.max_words": "60", "structure.min_chunk_length": "20", "facts.enabled": "true" },
       RESOLVED
     );
     expect(parsed.problems).toEqual([]);
-    expect(parsed.options).toEqual({ structure: { max_words: 60 }, facts: { enabled: true } });
+    expect(parsed.options).toEqual({
+      structure: { max_words: 60, min_chunk_length: 20 },
+      facts: { enabled: true },
+    });
   });
 
-  it("sends nothing when nothing differs", () => {
-    expect(parseOptions({ "structure.max_words": "120" }, RESOLVED)).toEqual({
-      options: null,
-      problems: [],
-    });
+  it("sends nothing when nothing was edited", () => {
+    expect(parseOptions({}, RESOLVED)).toEqual({ options: null, problems: [] });
   });
 
   it("refuses a value of the wrong type rather than coercing it", () => {
@@ -148,5 +149,15 @@ describe("checkName", () => {
   it("does not compare when nothing measured the bytes", () => {
     expect(checkName("a.weird", "weird", null, detectable).verdict).toBe("unmeasured");
     expect(checkName("README", "text", "content_sniff", detectable).verdict).toBe("no_extension");
+  });
+});
+
+describe("mergeOptions", () => {
+  it("layers overrides option by option and leaves the base alone", () => {
+    const merged = mergeOptions(RESOLVED, { structure: { max_words: 60 }, embed: { batch: 8 } });
+    expect(merged.structure).toEqual({ ...RESOLVED.structure, max_words: 60 });
+    expect(merged.embed).toEqual({ batch: 8 });
+    expect(RESOLVED.structure.max_words).toBe(120);
+    expect(mergeOptions(RESOLVED, null)).toEqual(RESOLVED);
   });
 });

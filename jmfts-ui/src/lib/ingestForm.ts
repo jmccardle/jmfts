@@ -128,7 +128,7 @@ export function parseField(kind: FieldKind, text: string): unknown {
 }
 
 export interface ParsedOptions {
-  /** The overrides to send, or null when there are none. Only values that differ. */
+  /** The overrides to send, or null when there are none. */
   options: OptionGroups | null;
   /** One sentence per problem. A non-empty list means the form must not submit. */
   problems: string[];
@@ -137,8 +137,11 @@ export interface ParsedOptions {
 /**
  * Turn the fields that were edited into the `options` a request carries.
  *
- * An edit equal to the resolved value is dropped rather than sent, so a form that was touched
- * and put back sends what an untouched one sends.
+ * Every edit is sent, including one equal to the value shown beside it. The resolved values a
+ * form is checked against may themselves be the product of these overrides (an analysis run
+ * under them reports them back as resolved), so "equal to resolved" cannot mean "the default"
+ * and dropping it would quietly send the default instead. Sending a value the appliance would
+ * have chosen anyway resolves to the same options; a reset control is what removes an edit.
  */
 export function parseOptions(edits: OptionEdits, resolved: OptionGroups): ParsedOptions {
   const options: OptionGroups = {};
@@ -157,7 +160,6 @@ export function parseOptions(edits: OptionEdits, resolved: OptionGroups): Parsed
       problems.push(`${key} ${(failure as Error).message}.`);
       continue;
     }
-    if (JSON.stringify(value) === JSON.stringify(current)) continue;
     (options[group] ??= {})[option] = value;
   }
   return { options: Object.keys(options).length ? options : null, problems };
@@ -310,4 +312,17 @@ export function checkName(
           `The name says .${extension} but the bytes measured as ${format} (by ${detectedBy}). ` +
           `The appliance plans from the bytes, so this will be ingested as ${format}.`,
       };
+}
+
+/**
+ * `over` layered onto `base`, option by option within each group — the merge the appliance's
+ * own layers use, so an override of one structure option keeps the group's others.
+ */
+export function mergeOptions(base: OptionGroups, over: OptionGroups | null): OptionGroups {
+  const merged: OptionGroups = {};
+  for (const [group, options] of Object.entries(base)) merged[group] = { ...options };
+  for (const [group, options] of Object.entries(over ?? {})) {
+    merged[group] = { ...(merged[group] ?? {}), ...options };
+  }
+  return merged;
 }
