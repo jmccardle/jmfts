@@ -216,6 +216,19 @@ def _check_bounds(width_pt: float, height_pt: float, dpi: int) -> None:
         )
 
 
+def _is_one_colour(pixmap: pymupdf.Pixmap) -> bool:
+    """Whether every pixel of ``pixmap`` is the same colour as its first.
+
+    NOT ``Pixmap.is_unicolor``, which is a pure-Python loop over every sample: on a blank
+    8.4 Mpx crop (Letter at 300 dpi) it took 40 seconds and turned a 0.13 s refusal into an
+    8.4 s one through REST. One ``bytes`` comparison is a ``memcmp``, and the repeated first
+    pixel it compares against is the same allocation :data:`PIXELS_MAX` already prices.
+    """
+    samples = pixmap.samples
+    width = pixmap.n
+    return samples == samples[:width] * (len(samples) // width)
+
+
 def render_page(
     pdf: bytes,
     *,
@@ -263,7 +276,7 @@ def render_page(
         # `alpha=False`: 3 bytes a pixel, which is what PIXELS_MAX is priced in, and a page
         # has nothing to be transparent against.
         pixmap = target.get_pixmap(dpi=dpi, clip=area, alpha=False)
-        if clip is not None and pixmap.is_unicolor:
+        if clip is not None and _is_one_colour(pixmap):
             # A crop is asked for because something is there. One colour edge to edge is
             # a rectangle that missed it, and a 200 with a blank PNG is the silent wrong
             # answer #38 was about; a whole page is allowed to be blank, a crop is not.

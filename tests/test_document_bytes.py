@@ -322,6 +322,22 @@ class TestRenderBounds:
         with pytest.raises(BadRenderRequest, match="single colour"):
             render_page(pdf_bytes, page=0, dpi=72, clip=(50, 700, 300, 780))
 
+    def test_a_large_blank_crop_is_refused_in_bounded_time(self):
+        """The single-colour check is one ``bytes`` comparison, not a loop per sample.
+
+        Letter at 300 dpi is 8.4 Mpx. ``Pixmap.is_unicolor`` walks it in Python and took 40
+        seconds off-line; rendering it takes a fraction of a second. Five seconds is
+        generous for the render and an order of magnitude short of the loop.
+        """
+        import time
+
+        doc = pymupdf.open()
+        doc.new_page(width=LETTER_PT[0], height=LETTER_PT[1])
+        started = time.monotonic()
+        with pytest.raises(BadRenderRequest):
+            render_page(doc.tobytes(), page=0, dpi=300, clip=(0, 0, *LETTER_PT))
+        assert time.monotonic() - started < 5
+
     def test_a_whole_blank_page_still_renders(self):
         """Only a CROP is refused for being blank. A page is the document's to leave empty."""
         doc = pymupdf.open()
