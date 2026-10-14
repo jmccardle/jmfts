@@ -483,3 +483,25 @@ class TestATaskQueuedBeforeTheRename:
         assert "max_tokens" in task.error and "max_words" in task.error
         # Refused, not run at the default budget: nothing was written under the node.
         assert len(_children(db_session, node.id)) == before
+
+
+class TestAStaleStructureRowIsRefused:
+    """The prose rungs read the group through the same ``structure_chunk_params`` as the
+    conversation rung, so a row missing part of it is refused here too rather than read
+    at the defaults (issue #4's review)."""
+
+    def test_the_declared_rung_refuses_a_row_without_the_group(self, db_session, outlined_pdf):
+        from types import SimpleNamespace
+
+        from jmfts_core.structure_tasks import run_structure_declared
+        from jmfts_core.task_errors import ErrorType, classify_exception
+
+        node = _ingest(db_session, outlined_pdf)
+        stale = SimpleNamespace(
+            scope_document_id=node.id, task_type=TASK_STRUCTURE_DECLARED, params={}
+        )
+
+        with pytest.raises(ValueError, match="Re-ingest the document") as raised:
+            run_structure_declared(db_session, stale)
+        assert "chunk_strategy, max_words, min_chunk_length" in str(raised.value)
+        assert classify_exception(raised.value) == ErrorType.PERMANENT

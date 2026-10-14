@@ -832,6 +832,43 @@ def run_structure_inferred(session: Session, task: TaskQueue) -> TaskOutcome:
     return _run_rung(session, task, TASK_STRUCTURE_INFERRED, INFERRED_SPLITTERS, RUNG_INFERRED)
 
 
+def structure_chunk_params(task: TaskQueue) -> tuple[ChunkStrategy, int, int]:
+    """The ``structure`` group off a queue row: ``(chunk_strategy, max_words, min_chunk_length)``.
+
+    One reading for every rung that chunks with the group — the two prose rungs and
+    ``structure:conversation``'s over-window turns (issue #4) — so a caller's
+    ``structure.*`` option means the same thing whichever of them the probe chose, and a
+    stale row is refused the same way whichever of them claims it.
+    """
+    params = dict(task.params or {})
+    if "max_tokens" in params:
+        # Queued before 0.7.0 renamed the option (issue #1), and deliberately not rewritten
+        # by `migrations/024_max_words.sql` — see its header. Reading the default here
+        # instead would chunk at a budget the caller did not ask for and settle as success.
+        raise ValueError(
+            f"{task.task_type} for document {task.scope_document_id} was queued with "
+            "max_tokens, which 0.7.0 renamed max_words; re-ingest the document to queue it "
+            "under the new name"
+        )
+    # Every row carries the COMPLETE group (`ingest_options.py`, "a group here is
+    # complete"), so a missing key is a row the planner did not write this way — in
+    # practice `structure:conversation` queued before issue #4 gave it `params_key`, with
+    # `{}`. Reading the defaults instead would chunk at options nobody resolved for this
+    # document and settle as success.
+    missing = [key for key in STRUCTURE_CHUNK_PARAMS if key not in params]
+    if missing:
+        raise ValueError(
+            f"{task.task_type} for document {task.scope_document_id} was queued without "
+            f"structure option(s) {', '.join(missing)}; the row predates the change that "
+            "puts the whole `structure` group on it. Re-ingest the document (or re-queue "
+            "the task) so it is planned with the group"
+        )
+    strategy = ChunkStrategy(params["chunk_strategy"])
+    max_words = int(params["max_words"])
+    min_chunk_length = int(params["min_chunk_length"])
+    return strategy, max_words, min_chunk_length
+
+
 def _build_tree(
     session: Session,
     task: TaskQueue,
@@ -856,20 +893,7 @@ def _build_tree(
     resolvable over the chunks below. Both rungs write ``declared``-or-``inferred`` nodes;
     only the second column says which of the two rules did it.
     """
-    params = dict(task.params or {})
-    if "max_tokens" in params:
-        # Queued before 0.7.0 renamed the option (issue #1), and deliberately not rewritten
-        # by `migrations/024_max_words.sql` — see its header. Reading the default here
-        # instead would chunk at a budget the caller did not ask for and settle as success.
-        raise ValueError(
-            f"{rung_task} for document {doc.id} was queued with max_tokens, which "
-            "0.7.0 renamed max_words; re-ingest the document to queue it under the new name"
-        )
-    strategy = ChunkStrategy(params.get("chunk_strategy", STRUCTURE_CHUNK_PARAMS["chunk_strategy"]))
-    max_words = int(params.get("max_words", STRUCTURE_CHUNK_PARAMS["max_words"]))
-    min_chunk_length = int(
-        params.get("min_chunk_length", STRUCTURE_CHUNK_PARAMS["min_chunk_length"])
-    )
+    strategy, max_words, min_chunk_length = structure_chunk_params(task)
 
     text = doc.content or ""
     writer = _TreeWriter(

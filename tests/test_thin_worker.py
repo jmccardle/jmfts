@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 
 import jmfts_core.rest.main as main
 import jmfts_core.rest.routers.runner as runner_router
+from jmfts_core.chunking import chunk_text
 from jmfts_core.config import get_settings
 from jmfts_core.embedder import (
     EmbedderMismatchError,
@@ -164,7 +165,7 @@ class TestARemoteEmbedderSubstitutesForTheLocalOne:
 class TestTheLocalHalfIsStillLocal:
     def test_check_fit_is_answered_without_a_request(self, remote):
         """`chunk_text` calls this per candidate piece. One HTTP round trip each would be
-        most of a document's wall clock, which is why these four are delegated and not
+        most of a document's wall clock, which is why these three are delegated and not
         forwarded."""
         remote._client.close()  # any request from here on would raise
 
@@ -172,7 +173,7 @@ class TestTheLocalHalfIsStillLocal:
         assert (
             remote.check_fit(TEXT, with_tokens=True).limit == get_settings().embedding_token_window
         )
-        assert len(remote.chunk_to_fit(TEXT)) >= 1
+        assert len(chunk_text(TEXT, fits=remote.fits_token_window)) >= 1
 
     def test_truncate_embedding_is_numpy_and_stays_here(self, remote):
         remote._client.close()
@@ -481,6 +482,7 @@ def test_a_worker_process_does_not_import_torch_to_start():
 #: `scripts/check_base_install.sh` is the version with no simulation in it at all — it
 #: builds a clean venv, installs base, and runs the same assertions.
 MISSING_STACK_PROBE = """
+from jmfts_core.chunking import chunk_text
 from jmfts_core.embedding import EmbeddingService, ModelStackNotInstalled
 from jmfts_core.task_errors import ErrorType, classify_exception
 
@@ -493,7 +495,7 @@ sys.modules["sentence_transformers"] = None
 
 # The tokenizer half keeps working. This is the whole reason the split is possible.
 assert service.fits_token_window("still measurable") is True
-assert len(service.chunk_to_fit("A sentence. " * 40)) >= 1
+assert len(chunk_text("A sentence. " * 40, fits=service.fits_token_window)) >= 1
 
 for call in (
     lambda: service.model,
