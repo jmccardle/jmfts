@@ -317,8 +317,9 @@ register(
     "table",
     type=TYPE_DICT,
     store=Store(STORE_EVIDENCE, row="table"),
-    doc="one worksheet rendered whole as a markdown table, on the `table` node "
-    "`extract:sheet` writes for spec 8.4's `small_table`.",
+    doc="one table as a markdown node: a worksheet rendered whole, which `extract:sheet` "
+    "writes for spec 8.4's `small_table`, or a PDF table sliced out of the extracted "
+    "markdown, which `extract:tables` writes with its page, bbox and span.",
 )
 register(
     "column_links",
@@ -463,6 +464,16 @@ register(
     store=Store(STORE_EVIDENCE, "section_ceiling", row="extraction"),
     within="extraction",
     doc="the most sections either structure rung can cut the text into. Its ceiling's calls.",
+)
+register(
+    "extraction.tables_found",
+    type=TYPE_INT,
+    store=Store(STORE_EVIDENCE, "tables_found", row="extraction"),
+    within="extraction",
+    nullable=True,
+    doc="how many tables a PDF's text layer rendered inline; `extraction.tables` holds a "
+    "`{page, index, bbox, start, end, rows, cols}` span for each. Absent for every other "
+    "reader. `extract:tables`' ceiling, exactly.",
 )
 register(
     "structure.coverage",

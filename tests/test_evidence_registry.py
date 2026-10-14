@@ -170,13 +170,18 @@ class TestShape:
         ``chunk_text`` once per section, and the ceiling has to count the calls). 51 → 52,
         and the rows, dicts and bare scalars all unmoved, because it lives inside the
         ``extraction`` row.
+
+        AN EIGHTH TIME, 2026-10-13, and it is one LEAF: ``extraction.tables_found``, the count
+        of tables a PDF's text layer rendered inline, which ``extract:tables``' fan-out bound
+        reads (one node per span). 52 → 53, and the rows, dicts and bare scalars all unmoved,
+        because it lives inside the ``extraction`` row.
         """
         stored = [
             e for e in REGISTRY.values() if e.store.kind == STORE_EVIDENCE and not e.store.path
         ]
         dicts = [e for e in stored if e.type == TYPE_DICT]
         stated = {
-            "registry entries": (len(REGISTRY), 52),
+            "registry entries": (len(REGISTRY), 53),
             "evidence rows": (len(stored), 36),
             "rows that are dicts": (len(dicts), 21),
             "rows that are bare scalars": (len(stored) - len(dicts), 15),
@@ -216,6 +221,7 @@ class TestShape:
             "structure:semantic": "segment",
             "profile:sheet": "profile",
             "extract:sheet": "record",
+            "extract:tables": "table",
         }
 
     def test_a_leaf_inherits_its_blocks_producer(self):

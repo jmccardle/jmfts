@@ -49,7 +49,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
+
+from jmfts_client.contracts.attempt import param_fingerprint
 
 from jmfts_core.atoms import (
     COST_CPU,
@@ -74,10 +77,16 @@ from jmfts_core.ingest_tasks import (
     TASK_STRUCTURE_INFERRED,
     Frontier,
     TaskOutcome,
+    _plan_inputs,
+    _skipped_record,
+    _split_by_handler,
     enqueue_frontier,
+    measured_patterns,
+    plan_after_measurement,
     plan_frontier,
     register_task_handler,
 )
+from jmfts_core.settling import enqueue_batch
 from jmfts_core.models.document import (
     Document,
     SETTLED_IN_FLIGHT,
@@ -250,6 +259,10 @@ def _extract_pdf(data: bytes) -> Extracted:
     ``probe`` does not measure it (``jmfts_core.probe._probe_pdf``). A pattern that lived
     only in the attempt log would be a measurement nothing could plan from.
 
+    ``tables`` is in the record beside it: the span of each table the markdown holds, which
+    ``extract:tables`` slices into nodes. A few entries per document, so the argument
+    ``pdf_to_markdown`` makes against persisting ``text_blocks`` does not apply to it.
+
     ``table_failures`` and ``tables_rejected`` go to the DETAIL, because they are the
     attempt's own account of what it could not do — 3.4's business, not a later task's
     input. Without them the reporting `pdf_to_markdown` performs would stop at this
@@ -265,6 +278,8 @@ def _extract_pdf(data: bytes) -> Extracted:
             "page_offsets": meta["page_offsets"],
             "control_chars_removed": meta["control_chars_removed"],
             "pages_with_tables": meta["pages_with_tables"],
+            "tables_found": meta["tables_found"],
+            "tables": meta["tables"],
             "toc": meta["toc"],
         },
         detail={
@@ -566,7 +581,66 @@ def run_extract_text(session: Session, task: TaskQueue) -> TaskOutcome:
     if probed_chars is not None:
         detail["characters_probed"] = probed_chars
 
+    detail.update(_replan_after_extraction(session, doc, extraction))
     return TaskOutcome(detail=detail)
+
+
+def _replan_after_extraction(session: Session, doc: Document, extraction: dict) -> dict:
+    """Decide and enqueue the rows gated on a pattern this task just measured. Spec 3.3.
+
+    Probe could not decide them — ``pages_with_tables`` is not probe's — so probe recorded
+    them as "not measured" and moved on. This is the other half of that sentence: the
+    patterns probe measured, MERGED with what the extraction record now holds, through the
+    same table, keeping only the rows :data:`~jmfts_core.ingest_tasks.PATTERN_MEASURED_BY`
+    says this task unlocks. ``matched`` is not touched: it is probe's evidence, and the
+    extraction record is where 3.3 puts a pattern measured after probe.
+
+    Enqueued in THIS transaction, on the node this task is running on. The node is in
+    flight until this task finishes and the new rows are unfinished tasks on it, so
+    ``structuring_complete`` cannot settle it in between; a rollback removes both.
+
+    Returns the same four keys ``run_probe`` writes, for the attempt detail, and
+    ``already_attempted``: the eligible rows the attempt diff found already queued or run.
+    """
+    fmt, patterns, options = _plan_inputs(session, doc)
+    if fmt is None:
+        raise ValueError(
+            f"extract:text ran on document {doc.id}, which carries no `matched` block; it "
+            "was enqueued by probe, which writes one"
+        )
+    plan = plan_after_measurement(
+        fmt,
+        {**patterns, **measured_patterns(TASK_EXTRACT_TEXT, extraction)},
+        options,
+        measured_by=TASK_EXTRACT_TEXT,
+    )
+    runnable, deferred = _split_by_handler(plan.eligible)
+    # SPEC 6.1'S DIFF, as `AttemptDiffPlanner` applies it at the rollup boundary: a row whose
+    # `(task, param_fingerprint)` the node's attempt log already records is not enqueued
+    # again. `enqueue` writes the pending record in the same transaction as the row, so a
+    # second commit of this task — a worker that finished after its lease was reaped, or
+    # the retry it was reaped into — finds the first one's rows here. The node's row lock
+    # orders the two: the second waits until the first has committed, then reads its log.
+    session.execute(select(Document.id).where(Document.id == doc.id).with_for_update()).one()
+    tasks = TaskQueueRepository(session)
+    attempted = tasks.attempted_fingerprints(doc.id)
+    already = {
+        spec.task_type
+        for spec in runnable
+        if (spec.task_type, param_fingerprint(spec.params)) in attempted
+    }
+    runnable = [spec for spec in runnable if spec.task_type not in already]
+    enqueued = enqueue_batch(tasks, doc.id, runnable) if runnable else ()
+    docs = DocumentRepository(session)
+    for entry in plan.skipped:
+        docs.upsert_attempt(doc, _skipped_record(doc, entry, docs.attempt_counts(doc)))
+    return {
+        "enqueued": {spec.task_type: task_id for spec, task_id in zip(runnable, enqueued)},
+        "deferred": deferred,
+        "skipped": {entry.task_type: entry.reason for entry in plan.skipped},
+        "not_applicable": plan.not_applicable,
+        "already_attempted": sorted(already),
+    }
 
 
 # ---------------------------------------------------------------------------
