@@ -64,6 +64,11 @@ services:
     volumes:
       # Live-reload: edits to these on the host reload the running server.
       - ./jmfts_core:/app/jmfts_core
+      # The contracts jmfts_core imports. The image installs jmfts-client editable from a COPY
+      # made at build time, so without this mount a bind-mounted jmfts_core that is newer than
+      # the image fails at import (ImportError: cannot import name 'LlmFailure') while the
+      # contracts beside it stay frozen at the build.
+      - ./jmfts-client/jmfts_client:/app/jmfts-client/jmfts_client
       # The front end, for the same reason and by a different mechanism. There is no build
       # step — the bundle is ES modules the browser runs as they stand — so these need no
       # reload at all: StaticFiles resolves the directory once at mount and reads each file
