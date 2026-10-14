@@ -102,7 +102,7 @@ def test_the_multipart_verb_sends_a_file_and_its_options(jmfts):
             filename="note.md",
             content_type="text/markdown",
         ),
-        options={"structure": {"chunk_strategy": "paragraph_packed", "max_tokens": 100}},
+        options={"structure": {"chunk_strategy": "paragraph_packed", "max_words": 100}},
     )
     assert uploaded.document_id > 0
     assert uploaded.filename == "note.md"

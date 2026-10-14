@@ -584,7 +584,7 @@ export function mountUpload(context, options = {}) {
     }
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error(
-        'options is an object of option groups, e.g. {"structure": {"max_tokens": 60}}'
+        'options is an object of option groups, e.g. {"structure": {"max_words": 60}}'
       );
     }
     return parsed;
@@ -795,7 +795,7 @@ export function mountUpload(context, options = {}) {
     const options = make("textarea", "upload-options");
     options.value = state.optionsText;
     options.setAttribute("aria-label", "ingest options");
-    options.setAttribute("placeholder", '{"structure": {"max_tokens": 60}}');
+    options.setAttribute("placeholder", '{"structure": {"max_words": 60}}');
     options.addEventListener("input", () => actions.setOptions(options.value));
     const optionsLabel = make("label", "upload-field");
     optionsLabel.append(make("span", "dim", "options"), options);

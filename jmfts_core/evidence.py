@@ -458,6 +458,13 @@ register(
     doc="how much text came out. The numerator of both chunking rungs' ceiling.",
 )
 register(
+    "extraction.section_ceiling",
+    type=TYPE_INT,
+    store=Store(STORE_EVIDENCE, "section_ceiling", row="extraction"),
+    within="extraction",
+    doc="the most sections either structure rung can cut the text into. Its ceiling's calls.",
+)
+register(
     "structure.coverage",
     type=TYPE_FLOAT,
     store=Store(STORE_EVIDENCE, "coverage", row="structure"),

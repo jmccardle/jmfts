@@ -85,13 +85,13 @@ class TestParamFingerprint:
         assert param_fingerprint(a) == param_fingerprint(b)
 
     def test_insensitive_to_nested_dict_ordering(self):
-        a = {"chunk": {"strategy": "paragraph", "max_tokens": 200}}
-        b = {"chunk": {"max_tokens": 200, "strategy": "paragraph"}}
+        a = {"chunk": {"strategy": "paragraph", "max_words": 200}}
+        b = {"chunk": {"max_words": 200, "strategy": "paragraph"}}
         assert param_fingerprint(a) == param_fingerprint(b)
 
     def test_changes_when_a_value_changes(self):
-        base = {"strategy": "paragraph", "max_tokens": 200}
-        assert param_fingerprint(base) != param_fingerprint({**base, "max_tokens": 500})
+        base = {"strategy": "paragraph", "max_words": 200}
+        assert param_fingerprint(base) != param_fingerprint({**base, "max_words": 500})
 
     def test_changes_when_a_key_is_added(self):
         base = {"strategy": "paragraph"}

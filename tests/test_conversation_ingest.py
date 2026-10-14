@@ -469,8 +469,10 @@ class TestOversizeTurns:
     def test_the_nodes_written_are_under_the_declared_ceiling(self, db_session, evidence):
         """``SPRINT_0_6_0.md`` step 36: the run, held against the bound ``EXPLAIN`` prints.
 
-        Two-character sentences, because the ``sentence`` strategy emits one part per
-        sentence — so this is the turn that writes the MOST parts for its length.
+        Two-character sentences, because the ``sentence`` strategy emitted one part per
+        sentence — so this WAS the turn that writes the most parts for its length: 300.
+        Since issue #2 ``chunk_to_fit`` packs whole sentences to the window, so the same
+        ~600 tokens are two parts; the ceiling below did not move, and still holds.
         """
         response = _ingest(
             db_session,
@@ -486,7 +488,7 @@ class TestOversizeTurns:
         turns = repo.get_children(root.id, depth=1, limit=100)
         parts = sum(len(repo.get_children(t.id, depth=1, limit=1000)) for t in turns)
         assert written == len(turns) + parts
-        assert parts == 300, "one part per sentence; 4.11's correction, measured"
+        assert parts == 2, "300 sentences packed to the 512-token window (#2), measured"
 
         from jmfts_core.atoms import ATOMS
 

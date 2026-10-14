@@ -112,7 +112,7 @@ class TestD2ChunkerDoesNotBoundSize:
             ), f"chunk {c.index} is {len(c.text)} chars, over the {max_chars} cap"
 
     def test_sentence_strategy_bounds_a_long_paragraph(self):
-        """`max_tokens` was honoured by token_count only; sentence/paragraph ignored it.
+        """`max_words` (then named `max_tokens`) was honoured by token_count only; sentence/paragraph ignored it.
 
         A single long paragraph — most assistant messages — came back as one chunk
         that still blew the embedder's window.
@@ -146,7 +146,7 @@ class TestD2ChunkerDoesNotBoundSize:
         chunks = chunk_text(
             MANY_SHORT_SENTENCES,
             strategy=ChunkStrategy.token_count,
-            max_tokens=50,
+            max_words=50,
             min_chunk_length=400,
             max_chars=max_chars,
         )

@@ -85,8 +85,11 @@ def _conversation_ceiling(evidence: dict, params: dict) -> tuple[int, int]:
       ``str.split()`` words, joins of them, or non-empty slices of one; ``_enforce_fit``
       recurses through ``_enforce_max_chars`` and nothing else. ``min_chunk_length`` does
       not enter — this caller leaves it at 1 — and neither does the window: the window
-      decides WHETHER a turn splits, and the ``sentence`` strategy emits one part per
-      sentence without packing them, so a part is a sentence and not a window's worth.
+      decides WHETHER a turn splits, and since 0.7.0 how many whole sentences a part
+      packs (``sentence_window``, issue #2). ``_split_sentences_to_fit`` only joins
+      sentences that each hold their own characters, so packing can merge parts and never
+      invent one; the bound below was written for one part per sentence and is looser now,
+      not wrong.
     * **The sum.** A JSON-decoded string is never longer than its encoding, and every line
       that yields a turn spends at least 13 characters on syntax (``{"prompt":""}``) and
       27 on a pair. So a line writes at most ``2 + its content characters``, which is
@@ -96,8 +99,9 @@ def _conversation_ceiling(evidence: dict, params: dict) -> tuple[int, int]:
 
     Floor zero: a file whose lines parse to no turns settles with no children (the
     handler's zero-yield branch), so zero is reachable. Option B in 4.11 is the tighter
-    replacement — pack the parts to the window, then bound them by tokens — and it is
-    0.7.0's, because it changes what the rung writes rather than what it declares.
+    replacement — pack the parts to the window, then bound them by tokens. Its first half
+    landed in 0.7.0 (issue #2); bounding by tokens needs a token count as evidence, which
+    probe does not measure, so the declared ceiling is still option A's.
     """
     lines = int(evidence["matched.patterns.line_count"])
     characters = int(evidence["matched.patterns.char_count"])

@@ -163,13 +163,20 @@ class TestShape:
         than more writers of it: a ``.docx`` carries both at once, an exact ``ooxml`` address
         and a recovered rectangle, and both tasks are ``subtree``-scoped over the same chunks
         — so one name would not blur the two, it would have the second overwrite the first.
+
+        A SEVENTH TIME, 2026-10-12, and it is one LEAF: ``extraction.section_ceiling``,
+        registered under the same rule ``sheet.measurements.header_row_number`` was — the
+        structure rungs' fan-out bound reads it (issue #5: ``_write_chunks`` calls
+        ``chunk_text`` once per section, and the ceiling has to count the calls). 51 → 52,
+        and the rows, dicts and bare scalars all unmoved, because it lives inside the
+        ``extraction`` row.
         """
         stored = [
             e for e in REGISTRY.values() if e.store.kind == STORE_EVIDENCE and not e.store.path
         ]
         dicts = [e for e in stored if e.type == TYPE_DICT]
         stated = {
-            "registry entries": (len(REGISTRY), 51),
+            "registry entries": (len(REGISTRY), 52),
             "evidence rows": (len(stored), 36),
             "rows that are dicts": (len(dicts), 21),
             "rows that are bare scalars": (len(stored) - len(dicts), 15),

@@ -60,6 +60,21 @@ def find_headings(text: str) -> list[tuple[int, str]]:
     return [(len(match.group(1)), match.group(2).strip()) for match in _HEADING_RE.finditer(text)]
 
 
+def section_ceiling(text: str, toc: Sequence[Sequence] = ()) -> int:
+    """The most sections either structure rung can cut ``text`` into. Issue #5.
+
+    :func:`split_on_headings` makes one section per ATX heading plus a preamble, and
+    :func:`split_on_outline` one per LOCATED outline entry plus a preamble — at most one per
+    entry. The declared and inferred rungs pick between those two by extraction source, and
+    which one runs is not known when the text is extracted, so this is the larger of the
+    two. Both are pure counts over what ``extract:text`` already holds, so recording it there
+    costs one regex pass and no second split.
+    """
+    if not text or not text.strip():
+        return 0
+    return max(len(find_headings(text)), len(toc)) + 1
+
+
 def split_on_headings(text: str) -> list[Section]:
     """Split markdown text into sections on ATX heading boundaries.
 

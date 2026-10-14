@@ -941,7 +941,8 @@ INSERT INTO schema_migrations (name, applied_at, source) VALUES
     ('020_container_lookup.sql', NOW(), 'schema'),
     ('021_profile_usetype.sql', NOW(), 'schema'),
     ('022_token_embed_256_hnsw.sql', NOW(), 'schema'),
-    ('023_document_renditions.sql', NOW(), 'schema');
+    ('023_document_renditions.sql', NOW(), 'schema'),
+    ('024_max_words.sql', NOW(), 'schema');
 -- END MIGRATION LEDGER
 
 -- ============================================================================

@@ -672,7 +672,9 @@ def chunk_prose(text: str) -> list:
     """A cell's prose, in pieces that each fit — with the parameters prose is chunked by.
 
     NOT ``EmbeddingService.chunk_to_fit``, which is the same call with the library's bare
-    defaults: ``ChunkStrategy.sentence``, unpacked. That is the strategy
+    defaults: ``ChunkStrategy.sentence``, unpacked — as it was when this was measured;
+    since 0.7.0 (issue #2) its default is ``sentence_window``, which packs to the window
+    and has not been measured against this corpus. ``sentence`` is the strategy
     :data:`~jmfts_core.ingest_options.STRUCTURE_CHUNK_PARAMS` was measured against and
     beat — over 25 extracted papers the share of leaves too short to carry a retrievable
     idea is 9.7% for ``sentence`` and 0.1% at 120 words packed. `ran` against the reference
@@ -696,7 +698,7 @@ def chunk_prose(text: str) -> list:
         for chunk in chunk_text(
             text,
             strategy=ChunkStrategy(STRUCTURE_CHUNK_PARAMS["chunk_strategy"]),
-            max_tokens=int(STRUCTURE_CHUNK_PARAMS["max_tokens"]),
+            max_words=int(STRUCTURE_CHUNK_PARAMS["max_words"]),
             min_chunk_length=int(STRUCTURE_CHUNK_PARAMS["min_chunk_length"]),
             max_chars=get_settings().chunk_max_chars,
             fits=service.fits_token_window,

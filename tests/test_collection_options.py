@@ -10,7 +10,7 @@ Three things 5.1 decides, and each has its tests here:
 
 1. **Layered merge, not nearest-wins.** ``rollup_tasks._options_owner`` returns ONE owner
    and uses its set wholesale, which is correct while a file node always has a complete
-   row. Under a tree a caller puts ``structure.max_tokens`` on ``/papers`` and
+   row. Under a tree a caller puts ``structure.max_words`` on ``/papers`` and
    ``facts.enabled`` on ``/papers/2026``, and nearest-wins gives them only the second.
 2. **The walk runs at upload, not at plan time.** ``plan_after_probe(fmt, patterns,
    options)`` never learns that ancestors exist, so ``EXPLAIN`` and the run stay provably
@@ -38,7 +38,7 @@ from jmfts_core.rest.main import app
 from jmfts_core.rollup_tasks import rollup_options
 from jmfts_core.services.ingest_service import IngestService
 
-PAPERS = {"structure": {"max_tokens": 120}}
+PAPERS = {"structure": {"max_words": 120}}
 YEAR = {"facts": {"enabled": False}}
 
 
@@ -72,27 +72,27 @@ class TestResolveOptionsTakesLayers:
     request``. 5.1 point 1 makes the layer count N; ``resolve_options`` already merged."""
 
     def test_an_inherited_layer_lands_under_the_request(self):
-        resolved = resolve_options("", {"structure": {"max_tokens": 50}}, inherited=(PAPERS,))
-        assert resolved["structure"]["max_tokens"] == 50
+        resolved = resolve_options("", {"structure": {"max_words": 50}}, inherited=(PAPERS,))
+        assert resolved["structure"]["max_words"] == 50
 
     def test_a_nearer_layer_refines_a_further_one_without_restating_it(self):
         # The case nearest-wins gets wrong: two settings on two levels, and both survive.
         resolved = resolve_options("", None, inherited=(PAPERS, YEAR))
-        assert resolved["structure"]["max_tokens"] == 120
+        assert resolved["structure"]["max_words"] == 120
         assert resolved["facts"]["enabled"] is False
 
     def test_no_layers_is_the_answer_it_always_was(self):
         assert resolve_options("", None, inherited=()) == resolve_options("", None)
 
     def test_an_inherited_layer_is_validated_like_every_other(self):
-        with pytest.raises(ValueError, match="structure.max_tokns"):
-            resolve_options("", None, inherited=({"structure": {"max_tokns": 9}},))
+        with pytest.raises(ValueError, match="structure.max_wrdss"):
+            resolve_options("", None, inherited=({"structure": {"max_wrdss": 9}},))
 
     def test_an_inherited_layer_is_blamed_on_the_collection_and_not_on_the_request(self):
         # Attribution, not decoration: a caller told their option is wrong when the wrong
         # one is three folders above them looks for a bug in their own request.
         with pytest.raises(ValueError, match="a collection's options"):
-            resolve_options("", None, inherited=({"structure": {"max_tokns": 9}},))
+            resolve_options("", None, inherited=({"structure": {"max_wrdss": 9}},))
 
     def test_merging_first_and_resolving_with_layers_give_the_same_answer(self):
         """The ratchet ``merge_option_layers``' docstring promises.
@@ -219,7 +219,7 @@ class TestTheUploadResolvesUnderItsCollection:
 
         node_id = _upload(db_session, b"# A paper\n\nprose.\n", "paper.md", parent_id=papers.id)
         recorded = EvidenceRepository(db_session).read(node_id, OPTIONS_KEY)
-        assert recorded["structure"]["max_tokens"] == 120
+        assert recorded["structure"]["max_words"] == 120
 
     def test_the_request_still_wins_over_the_collection(self, db_session):
         papers = _folder(db_session, "papers")
@@ -232,10 +232,10 @@ class TestTheUploadResolvesUnderItsCollection:
             b"# A paper\n\nprose.\n",
             "paper.md",
             parent_id=papers.id,
-            options={"structure": {"max_tokens": 60}},
+            options={"structure": {"max_words": 60}},
         )
         recorded = EvidenceRepository(db_session).read(node_id, OPTIONS_KEY)
-        assert recorded["structure"]["max_tokens"] == 60
+        assert recorded["structure"]["max_words"] == 60
 
     def test_a_file_uploaded_with_no_parent_is_unchanged(self, db_session):
         node_id = _upload(db_session, b"# A paper\n\nprose.\n", "paper.md")
@@ -306,9 +306,9 @@ class TestTheRoute:
     def test_an_unknown_option_is_refused_and_named(self, db_session):
         folder = _folder(db_session, "papers")
         db_session.flush()
-        with pytest.raises(ValueError, match="max_tokns"):
+        with pytest.raises(ValueError, match="max_wrdss"):
             IngestService(db_session).set_collection_options(
-                folder.id, _request({"structure": {"max_tokns": 9}})
+                folder.id, _request({"structure": {"max_wrdss": 9}})
             )
 
     def test_a_missing_document_is_a_lookup_error(self, db_session):
@@ -369,10 +369,10 @@ class TestTheWire:
         db_session.flush()
         response = client_with_db.put(
             f"/documents/{folder.id}/ingest-options",
-            json={"options": {"structure": {"max_tokns": 9}}},
+            json={"options": {"structure": {"max_wrdss": 9}}},
         )
         assert response.status_code == 400
-        assert "max_tokns" in response.text
+        assert "max_wrdss" in response.text
 
     def test_a_missing_document_is_a_404(self, client_with_db):
         assert client_with_db.get("/documents/10000001/ingest-options").status_code == 404
@@ -397,7 +397,7 @@ class TestAnalyzeForecastsTheCollectionItWouldLandIn:
             UploadedFile(data=b"# One\n\nprose.\n", filename="one.md", content_type="text/plain"),
             parent_id=papers.id,
         )
-        assert answer.plan.options["structure"]["max_tokens"] == 120
+        assert answer.plan.options["structure"]["max_words"] == 120
 
     def test_analyze_with_no_parent_is_unchanged(self, db_session):
         from jmfts_client.contracts.upload import UploadedFile

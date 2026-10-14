@@ -106,7 +106,7 @@ AGREEMENT_GRID = [
     ("unknown", {"has_text_layer": True, "has_images": True}),
 ]
 
-OPTIONS_GRID = [None, {"structure": {"max_tokens": 60}}]
+OPTIONS_GRID = [None, {"structure": {"max_words": 60}}]
 
 
 def _by_task(plan) -> dict:
@@ -496,12 +496,12 @@ class TestOptions:
     def test_overrides_reach_the_structure_rows_params(self):
         plan = explain_plan(
             "pdf",
-            options={"structure": {"max_tokens": 60}},
+            options={"structure": {"max_words": 60}},
             patterns={"has_text_layer": True, "has_outline": True},
         )
-        assert plan.options["structure"]["max_tokens"] == 60
+        assert plan.options["structure"]["max_words"] == 60
         tasks = _by_task(plan)
-        assert tasks[TASK_STRUCTURE_DECLARED].params["max_tokens"] == 60
+        assert tasks[TASK_STRUCTURE_DECLARED].params["max_words"] == 60
         # ...and the rest of the group is still complete, not a diff.
         assert (
             tasks[TASK_STRUCTURE_DECLARED].params["chunk_strategy"]
@@ -513,22 +513,22 @@ class TestOptions:
 
     def test_params_are_reported_even_for_a_row_that_will_not_run(self):
         """What the queue row WOULD carry is part of the answer either way."""
-        tasks = _by_task(explain_plan("epub", options={"structure": {"max_tokens": 60}}))
+        tasks = _by_task(explain_plan("epub", options={"structure": {"max_words": 60}}))
         assert tasks[TASK_STRUCTURE_DECLARED].outcome == OUTCOME_NOT_APPLICABLE
-        assert tasks[TASK_STRUCTURE_DECLARED].params["max_tokens"] == 60
+        assert tasks[TASK_STRUCTURE_DECLARED].params["max_words"] == 60
 
     def test_params_are_copies_not_shared_state(self):
         plan = explain_plan("pdf", patterns={"has_text_layer": True})
         tasks = _by_task(plan)
-        tasks[TASK_STRUCTURE_INFERRED].params["max_tokens"] = 9999
-        assert plan.options["structure"]["max_tokens"] == STRUCTURE_CHUNK_PARAMS["max_tokens"]
+        tasks[TASK_STRUCTURE_INFERRED].params["max_words"] = 9999
+        assert plan.options["structure"]["max_words"] == STRUCTURE_CHUNK_PARAMS["max_words"]
 
     @pytest.mark.parametrize(
         "options,message",
         [
             ({"structure": {"max_token": 60}}, "unknown option structure.max_token"),
-            ({"chunking": {"max_tokens": 60}}, "unknown option group 'chunking'"),
-            ({"structure": {"max_tokens": 0}}, "expected a positive integer"),
+            ({"chunking": {"max_words": 60}}, "unknown option group 'chunking'"),
+            ({"structure": {"max_words": 0}}, "expected a positive integer"),
             ({"structure": {"chunk_strategy": "vibes"}}, "expected one of"),
         ],
     )
@@ -571,7 +571,7 @@ class TestExplainEndpoint:
     def test_the_route_returns_what_the_in_process_call_returns(self, client_with_db):
         body = {
             "format": "pdf",
-            "options": {"structure": {"max_tokens": 60}},
+            "options": {"structure": {"max_words": 60}},
             "patterns": REAL_PDF_PATTERNS,
         }
         response = client_with_db.post("/ingest/explain", json=body)

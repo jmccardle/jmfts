@@ -121,7 +121,7 @@ class CollectionOptionsRequest(BaseModel):
 
     **This is a PARTIAL set, unlike the one an upload records.** A file node's `options`
     row is the complete resolved set the run used; this is a declaration of what to
-    deviate, so a folder can name `structure.max_tokens` and leave everything else to the
+    deviate, so a folder can name `structure.max_words` and leave everything else to the
     layer below. That is what lets a nested collection refine its parent without restating
     it. An empty object is a real answer — this collection deviates in nothing — and it is
     also how a declaration is cleared, because there is nothing a separate verb would say.
@@ -135,7 +135,7 @@ class CollectionOptionsRequest(BaseModel):
     options: dict = Field(
         description=(
             'Option overrides in the shape `POST /ingest/file` takes them — `{"structure": '
-            '{"max_tokens": 60}}`. Validated exactly as a request\'s are, so an option that '
+            '{"max_words": 60}}`. Validated exactly as a request\'s are, so an option that '
             "does not exist is a 400 here for the same reason it is a 400 there."
         )
     )

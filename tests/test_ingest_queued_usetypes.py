@@ -199,7 +199,7 @@ class TestDeduplication:
         _ingest(db_session, usetype="raw")
 
         with pytest.raises(ValueError, match="already holds these exact bytes"):
-            _ingest(db_session, usetype="raw", options={"structure": {"max_tokens": 33}})
+            _ingest(db_session, usetype="raw", options={"structure": {"max_words": 33}})
 
     def test_the_same_content_under_two_usetypes_collides_on_their_options(self, db_session):
         """`raw` and `markdown` resolve to different chunk strategies, so the same text

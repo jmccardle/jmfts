@@ -289,9 +289,14 @@ class EmbeddingService:
         The measuring is `chunk_text`'s now — it takes the predicate and enforces it on
         every piece it returns, so the guarantee is the same one every other caller gets
         by passing `fits`, rather than a second implementation of it that lived here.
+
+        The default is ``sentence_window``: whole sentences packed up to the window, measured
+        with the same predicate (issue #2). It was ``sentence``, which made every piece one
+        sentence — 40 sentences, 40 chunks of about 50 characters — so an over-window turn
+        reached MaxSim as a list of sentences rather than as passages.
         """
         if strategy is None:
-            strategy = ChunkStrategy.sentence
+            strategy = ChunkStrategy.sentence_window
         if max_chars is None:
             max_chars = get_settings().chunk_max_chars
 

@@ -72,7 +72,7 @@ SCHEMA = "bench_evidence"
 PROFILES: dict[str, dict] = {
     "file": {
         "file": {"filename": "annual-report.pdf", "size": 4_100_000, "mime": "application/pdf"},
-        "options": {"structure": {"min_chunk_length": 200, "max_tokens": 480}},
+        "options": {"structure": {"min_chunk_length": 200, "max_words": 480}},
         "matched": {
             "format": "pdf",
             "probed_at": "2026-08-29T00:00:00Z",
