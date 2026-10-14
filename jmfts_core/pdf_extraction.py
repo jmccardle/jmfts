@@ -417,6 +417,21 @@ def _process_page(
 
     blocks = page.get_text("dict", flags=pymupdf.TEXTFLAGS_TEXT)["blocks"]
 
+    # EVERY RECTANGLE IS STORED IN THE ROTATED PAGE'S SPACE. `get_text` measures on the
+    # UNROTATED page, while `page.rect`, `rendering.page_geometry` and the clip `get_pixmap`
+    # takes are all the page as displayed. On a `/Rotate 90` page the two spaces barely
+    # overlap, so an anchor measured in one and cropped in the other renders a blank PNG
+    # (#38). `rotation_matrix` is the identity on an unrotated page, so this is a no-op
+    # everywhere else.
+    #
+    # IT IS READ HERE, BEFORE `find_tables`, and that order is load-bearing. On a rotated
+    # page `find_tables` de-rotates the page to analyse it and restores it with
+    # `set_mediabox`, which DELETES the CropBox (pymupdf/table.py `page_rotation_set0` /
+    # `page_rotation_reset`). A matrix read afterwards is the MediaBox's, and on a page whose
+    # CropBox is smaller every anchor lands off the page — so `extract_tables` would change
+    # where the prose's anchors point.
+    rotation = page.rotation_matrix
+
     found = _find_page_tables(page) if extract_tables else _PageTables()
     result.table_errors = found.errors
     result.tables_rejected = found.rejected
@@ -480,14 +495,6 @@ def _process_page(
     # (see the constant), so an offset taken before the removal is wrong by however many
     # were removed above it. The "\n\n" the segments are joined with carries no control
     # character, so accounting for it as two characters between segments is exact.
-    #
-    # EVERY RECTANGLE IS STORED IN THE ROTATED PAGE'S SPACE. `get_text` and `find_tables`
-    # measure on the UNROTATED page, while `page.rect`, `rendering.page_geometry` and the
-    # clip `get_pixmap` takes are all the page as displayed. On a `/Rotate 90` page the two
-    # spaces barely overlap, so an anchor measured in one and cropped in the other renders
-    # a blank PNG (#38). `rotation_matrix` is the identity on an unrotated page, so this is
-    # a no-op everywhere else.
-    rotation = page.rotation_matrix
     pieces: list[str] = []
     cursor = 0
     for position, (text, bbox) in enumerate(segments):

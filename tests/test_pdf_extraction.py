@@ -647,3 +647,69 @@ class TestPagesWithTablesIsReportedHere:
 
         assert meta["tables_rejected"], "the fixture must produce a candidate to reject"
         assert meta["pages_with_tables"] == []
+
+
+# ---------------------------------------------------------------------------
+# Rotated pages (#38) — every stored rectangle is in the DISPLAYED page's space
+# ---------------------------------------------------------------------------
+
+#: The word the prose block carries, and the table's cells. Distinct tokens so a cell that
+#: is emitted twice — once as prose, once inside the table — can be counted.
+_ROTATED_WORD = "Turnip harvest report"
+_ROTATED_CELLS = [["Crop", "Yield", "Field"], ["Turnip", "41", "North"], ["Swede", "17", "East"]]
+
+
+def _make_rotated_pdf(rotation: int, *, cropbox=None) -> bytes:
+    """One Letter page: a prose line, then a ruled 3x3 table, carrying ``/Rotate rotation``.
+
+    Content is written before the rotation is set, so its coordinates are the unrotated
+    page's, as a landscape export writes them. ``cropbox`` (top-left points) is set before
+    the rotation too, which is the case where the CropBox and the MediaBox disagree.
+    """
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 100), _ROTATED_WORD, fontsize=20)
+    x0, y0, w, h = 300, 300, 70, 24
+    for r in range(len(_ROTATED_CELLS) + 1):
+        page.draw_line((x0, y0 + r * h), (x0 + 3 * w, y0 + r * h))
+    for c in range(4):
+        page.draw_line((x0 + c * w, y0), (x0 + c * w, y0 + 3 * h))
+    for r, row in enumerate(_ROTATED_CELLS):
+        for c, value in enumerate(row):
+            page.insert_text((x0 + c * w + 5, y0 + r * h + 16), value, fontsize=10)
+    if cropbox is not None:
+        page.set_cropbox(pymupdf.Rect(*cropbox))
+    page.set_rotation(rotation)
+    return doc.tobytes()
+
+
+def _dark_fraction(pdf: bytes, bbox) -> float:
+    """Share of the crop's samples darker than mid-grey, rendered the way ``/region`` does.
+
+    A 200 is not evidence the crop shows anything: the defect #38 is about answered 200
+    with white paper. Ink is.
+    """
+    import pymupdf
+
+    from jmfts_core.rendering import render_page
+
+    pixmap = pymupdf.Pixmap(render_page(pdf, page=0, dpi=72, clip=tuple(bbox)))
+    samples = pixmap.samples
+    return sum(1 for value in samples if value < 128) / len(samples)
+
+
+class TestRotatedPagesStoreDisplayedRectangles:
+    @pytest.mark.parametrize("rotation", [90, 180, 270])
+    def test_a_cropbox_page_anchors_the_same_with_and_without_tables(self, rotation):
+        """`find_tables` restores a rotated page with `set_mediabox`, which deletes the
+        CropBox. A rotation matrix read after it is the MediaBox's, and the prose anchor
+        landed off the page only when `extract_tables` was on."""
+        data = _make_rotated_pdf(rotation, cropbox=(40, 50, 560, 700))
+        _, without = pdf_to_markdown(data, extract_tables=False)
+        _, with_tables = pdf_to_markdown(data, extract_tables=True)
+
+        prose = without["text_blocks"][0]
+        assert with_tables["text_blocks"][0]["bbox"] == prose["bbox"]
+        assert _dark_fraction(data, prose["bbox"]) > 0.05
