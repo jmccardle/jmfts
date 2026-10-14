@@ -314,16 +314,36 @@ class TestRenderBounds:
         with pytest.raises(UnreadablePdf, match="encrypted"):
             render_page(locked, page=0, dpi=72)
 
-    def test_a_crop_of_blank_paper_is_refused_rather_than_answered_with_a_blank_png(
+    def test_an_anchor_that_crops_blank_paper_is_refused_rather_than_answered_blank(
         self, pdf_bytes
     ):
-        """The bottom margin of the fixture holds nothing. A 200 with an all-white PNG is
-        indistinguishable, to a caller, from a rectangle that hit the passage."""
-        with pytest.raises(BadRenderRequest, match="single colour"):
-            render_page(pdf_bytes, page=0, dpi=72, clip=(50, 700, 300, 780))
+        """The bottom margin of the fixture holds nothing. A stored anchor is written from
+        where words are, so a 200 with an all-white PNG would be a confident picture of a
+        passage that is not in it. On an unrotated page nothing is blamed on #38."""
+        with pytest.raises(BadRenderRequest, match="crops blank paper") as refused:
+            render_page(pdf_bytes, page=0, dpi=72, clip=(50, 700, 300, 780), anchor=True)
+        assert "#38" not in str(refused.value)
+
+    def test_a_named_rectangle_of_blank_paper_is_a_picture_of_the_margin(self, pdf_bytes):
+        """A caller who names a margin gets the margin. Only a STORED anchor is refused."""
+        assert _png_size(render_page(pdf_bytes, page=0, dpi=72, clip=(50, 700, 300, 780)))
+
+    def test_an_anchor_inside_a_filled_box_is_one_colour_and_still_answered(self):
+        """One colour is not "no content": inside a filled box, a 1x1-point crop, or the
+        inside of a glyph at 150 dpi are all correct pictures of one colour. Only white
+        paper is refused, so this is a 200 even when it is an anchor."""
+        doc = pymupdf.open()
+        page = doc.new_page(width=LETTER_PT[0], height=LETTER_PT[1])
+        page.draw_rect(pymupdf.Rect(300, 300, 500, 500), color=(0, 0, 1), fill=(0, 0, 1))
+        data = doc.tobytes()
+        for anchor in (False, True):
+            png = render_page(data, page=0, dpi=72, clip=(350, 350, 450, 450), anchor=anchor)
+            pixmap = pymupdf.Pixmap(png)
+            assert pixmap.samples[:3] == b"\x00\x00\xff"
+            assert pixmap.samples == pixmap.samples[:3] * (pixmap.width * pixmap.height)
 
     def test_a_large_blank_crop_is_refused_in_bounded_time(self):
-        """The single-colour check is one ``bytes`` comparison, not a loop per sample.
+        """The blank-paper check is one ``bytes`` comparison, not a loop per sample.
 
         Letter at 300 dpi is 8.4 Mpx. ``Pixmap.is_unicolor`` walks it in Python and took 40
         seconds off-line; rendering it takes a fraction of a second. Five seconds is
@@ -335,7 +355,7 @@ class TestRenderBounds:
         doc.new_page(width=LETTER_PT[0], height=LETTER_PT[1])
         started = time.monotonic()
         with pytest.raises(BadRenderRequest):
-            render_page(doc.tobytes(), page=0, dpi=300, clip=(0, 0, *LETTER_PT))
+            render_page(doc.tobytes(), page=0, dpi=300, clip=(0, 0, *LETTER_PT), anchor=True)
         assert time.monotonic() - started < 5
 
     def test_a_whole_blank_page_still_renders(self):
@@ -380,13 +400,17 @@ class TestRotatedPages:
         # Back through the inverse, the rectangle is still the passage's own.
         assert "turned page" in page.get_textbox(box * page.derotation_matrix)
 
-    def test_an_unrotated_space_rectangle_on_a_rotated_page_is_refused_by_name(self):
+    def test_an_unrotated_space_anchor_on_a_rotated_page_is_refused_by_name(self):
         """What an anchor written before #38 holds: the passage's rectangle on the page as
-        stored, which on a 90-degree page is blank paper on the page as displayed."""
+        stored, which on a 90-degree page is blank paper on the page as displayed. There is
+        no marker on such an anchor, so the refusal says how to re-derive one."""
         data = _rotated_pdf(90)
         stale = (72.0, 78.5, 360.0, 106.0)
-        with pytest.raises(BadRenderRequest, match="rotated 90 degrees"):
-            render_page(data, page=0, dpi=72, clip=stale)
+        with pytest.raises(BadRenderRequest, match="rotated 90 degrees") as refused:
+            render_page(data, page=0, dpi=72, clip=stale, anchor=True)
+        message = str(refused.value)
+        assert "written before #38 was fixed" in message
+        assert "`citation`" in message and "`extract:tables`" in message
 
 
 # ---------------------------------------------------------------------------
@@ -600,6 +624,16 @@ class TestRegion:
         assert resp.status_code == 200
         assert resp.headers["content-type"] == "image/png"
         assert _png_size(resp.content) == (200, 100)
+
+    def test_a_named_rectangle_of_blank_margin_is_answered(self, client_with_db, pdf_node):
+        """Only a stored anchor that crops blank paper is refused (#38). A margin a caller
+        names is a correct picture of a margin, through the route as well as underneath."""
+        resp = client_with_db.get(
+            f"/documents/{pdf_node.id}/region",
+            params={"page": 0, "bbox": "50,700,300,780", "dpi": 72},
+        )
+        assert resp.status_code == 200
+        assert _png_size(resp.content) == (250, 80)
 
     def test_the_nodes_own_anchor_crops_to_the_passage(self, db_session, pdf_node):
         """``anchor=true`` is the form a client has after a search hit: no coordinates to

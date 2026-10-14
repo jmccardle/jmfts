@@ -1897,7 +1897,10 @@ class DocumentService:
 
         A rectangle that hangs over the edge of the page is intersected with it; one that
         misses the page entirely is a 400 naming the media box, because there is no picture
-        of it. An anchor with ``continues`` covers only the page the passage BEGINS on, which
+        of it. The node's OWN anchor cropping nothing but blank paper is a 400 too (#38): it
+        was written from where words are, so a white PNG would be a picture of a passage
+        that is not in it. A rectangle the caller names is answered blank. An anchor with
+        ``continues`` covers only the page the passage BEGINS on, which
         is what ``anchor_for_span`` wrote and deliberately so; the overlay is what says
         "continues on p. 4".
 
@@ -1929,6 +1932,6 @@ class DocumentService:
                 "page, and GET /documents/{document_id}/image is the verb that serves one"
             )
         return BinaryPayload(
-            content=render_page(self._pdf_bytes(node), page=page, dpi=dpi, clip=box),
+            content=render_page(self._pdf_bytes(node), page=page, dpi=dpi, clip=box, anchor=anchor),
             media_type=PNG_MEDIA_TYPE,
         )

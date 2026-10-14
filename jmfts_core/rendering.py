@@ -216,17 +216,20 @@ def _check_bounds(width_pt: float, height_pt: float, dpi: int) -> None:
         )
 
 
-def _is_one_colour(pixmap: pymupdf.Pixmap) -> bool:
-    """Whether every pixel of ``pixmap`` is the same colour as its first.
+def _is_blank_paper(pixmap: pymupdf.Pixmap) -> bool:
+    """Whether every sample of ``pixmap`` is white — paper with nothing printed on it.
+
+    White and not "one colour": a crop inside a filled box, a 1x1-point crop, or the inside
+    of a glyph at 150 dpi is legitimately one colour and is a correct picture of what is
+    there. Paper is what ``alpha=False`` renders the page background as.
 
     NOT ``Pixmap.is_unicolor``, which is a pure-Python loop over every sample: on a blank
-    8.4 Mpx crop (Letter at 300 dpi) it took 40 seconds and turned a 0.13 s refusal into an
-    8.4 s one through REST. One ``bytes`` comparison is a ``memcmp``, and the repeated first
-    pixel it compares against is the same allocation :data:`PIXELS_MAX` already prices.
+    8.4 Mpx crop (Letter at 300 dpi) it took 40 seconds and turned a 0.13 s answer into an
+    8.4 s one through REST. One ``bytes`` comparison is a ``memcmp``, against an allocation
+    :data:`PIXELS_MAX` already prices.
     """
     samples = pixmap.samples
-    width = pixmap.n
-    return samples == samples[:width] * (len(samples) // width)
+    return samples == b"\xff" * len(samples)
 
 
 def render_page(
@@ -235,6 +238,7 @@ def render_page(
     page: int,
     dpi: int = DPI_DEFAULT,
     clip: Optional[tuple[float, float, float, float]] = None,
+    anchor: bool = False,
 ) -> bytes:
     """One page, or one rectangle of it, as PNG bytes.
 
@@ -248,6 +252,12 @@ def render_page(
     an ordinary anchor on a page whose media box the writer measured differently, and the
     part that is on the page is the answer. A rectangle that misses the page entirely is not
     — there is no picture of it — and that refuses.
+
+    ``anchor`` says ``clip`` is a STORED ``source_anchor``, and only then is a crop of blank
+    paper refused (#38). An anchor is written from where words are, so one that crops white
+    paper edge to edge has missed them, and a 200 with a blank PNG is a confident picture of
+    nothing. A rectangle a caller names is the caller's: blank paper is a correct picture of
+    a margin, so that is answered.
     """
     doc = _open(pdf)
     try:
@@ -276,21 +286,18 @@ def render_page(
         # `alpha=False`: 3 bytes a pixel, which is what PIXELS_MAX is priced in, and a page
         # has nothing to be transparent against.
         pixmap = target.get_pixmap(dpi=dpi, clip=area, alpha=False)
-        if clip is not None and _is_one_colour(pixmap):
-            # A crop is asked for because something is there. One colour edge to edge is
-            # a rectangle that missed it, and a 200 with a blank PNG is the silent wrong
-            # answer #38 was about; a whole page is allowed to be blank, a crop is not.
+        if anchor and clip is not None and _is_blank_paper(pixmap):
             hint = ""
             if target.rotation:
                 hint = (
-                    f" Page {page} is rotated {target.rotation} degrees and bboxes are in the "
-                    f"rotated page's space; an anchor measured on the unrotated page (one "
-                    f"written before #38) lands elsewhere — re-derive it by re-running the "
-                    f"citation task"
+                    f" Page {page} is rotated {target.rotation} degrees. Anchors on rotated "
+                    f"pages written before #38 was fixed were measured on the unrotated page "
+                    f"and land on blank paper; re-derive them by re-running `citation` (text "
+                    f"anchors) or `extract:text` then `extract:tables` (table spans)"
                 )
             raise BadRenderRequest(
-                f"bbox {clip} on page {page} renders as a single colour, so there is no "
-                f"content of the page inside it.{hint}"
+                f"this node's anchor, bbox {clip} on page {page}, crops blank paper: nothing "
+                f"is printed inside it, so there is no picture of the passage to return.{hint}"
             )
         return pixmap.tobytes("png")
     finally:
