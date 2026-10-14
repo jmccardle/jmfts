@@ -186,10 +186,19 @@ one-off one, which is the difference 0.6.0 step 3 was for.
     the first run of the audit 0.6.0 step 3 landed. This entry is a pointer and not a copy:
     each one is written out as an `OPEN GAP` string in
     `tests/test_expose_principal_audit.py`, so the audit reports them and the test does not go
-    green by pretending otherwise. Five are `IndexService` verbs, in a service that reaches
+    green by pretending otherwise. ~~Five are `IndexService` verbs, in a service that reaches
     `jmfts_core.access` nowhere at all; one of those rebuilds BM25 postings for every document
     under an index's roots, and retrieval gates the postings again on the way out, so that one
-    is unauthorised **work** rather than disclosure. `TemplateService.get_template` and
+    is unauthorised **work** rather than disclosure.~~ **CLOSED 2026-10-12:** the gates live in
+    `SearchRepository` — `index_document` and add/remove root take `require_write` (hidden
+    reads as missing, read-only is a 403), `get_index_roots` drops roots the caller cannot
+    read, and `refresh_index` takes write on every root before clearing anything; held by
+    `tests/test_access_index_verbs.py`. Nine verbs remained at that point, and four after
+    these five closed. **Residual, read 2026-10-13:** `refresh_index` checks write on each ROOT,
+    not on what lies under it, so a caller with no grants on a private access-control root
+    nested under an open root can refresh and learns `total_docs_found` including documents it
+    cannot read. Count only; retrieval still filters postings, and it predates this change.
+    `TemplateService.get_template` and
     `render_template` read a template by `session.get(Document, template_id)` with no
     `can_read`, and a template IS a document. ~~`DocumentService.embed_document` reaches
     `DocumentRepository.embed_document` rather than `.update`, so it misses the

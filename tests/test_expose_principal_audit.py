@@ -85,19 +85,6 @@ AGGREGATE_COUNTS = (
 
 # --- and the entries that are gaps, said in those words -------------------------------
 
-GAP_INDEX_NAMES_A_DOCUMENT = (
-    "OPEN GAP. Names a document id and neither reads nor writes it through a gate. "
-    "IndexService consults jmfts_core.access nowhere at all. Block A steps 1 and 2 scope "
-    "to edges and graph analytics, so nothing in 0.6.0 closes this."
-)
-
-GAP_INDEX_REBUILD = (
-    "OPEN GAP, of a different kind: it rebuilds BM25 postings for every document under the "
-    "index's roots with no read check on any of them. Retrieval gates the postings again on "
-    "the way out (repositories/search.py), so this is unauthorised WORK rather than "
-    "disclosure — still nothing consults the principal."
-)
-
 GAP_TEMPLATE_IS_A_DOCUMENT = (
     "OPEN GAP. A template IS a document (usetype `template`, under a container node), read "
     "here by `session.get(Document, template_id)` with no can_read. A template container "
@@ -131,11 +118,12 @@ NOT_PRINCIPAL_SCOPED: dict[str, str] = {
     "IndexService.create_index": CONFIG_OBJECT,
     "IndexService.get_index": CONFIG_OBJECT,
     "IndexService.delete_index": CONFIG_OBJECT,
-    "IndexService.get_index_roots": GAP_INDEX_NAMES_A_DOCUMENT,
-    "IndexService.add_root_to_index": GAP_INDEX_NAMES_A_DOCUMENT,
-    "IndexService.remove_root_from_index": GAP_INDEX_NAMES_A_DOCUMENT,
-    "IndexService.index_single_document": GAP_INDEX_NAMES_A_DOCUMENT,
-    "IndexService.refresh_index": GAP_INDEX_REBUILD,
+    # The five IndexService verbs that name documents were here, as two OPEN GAP entries.
+    # They left this list on 2026-10-12, and every gate lives in SearchRepository:
+    # add/remove root and index_document take require_write (a hidden or missing document
+    # is a 404 — a 400 for index_document, matching its "not found" — read-only a 403),
+    # get_index_roots drops roots the caller cannot read, and refresh_index takes write on
+    # every root before it clears anything. `tests/test_access_index_verbs.py`.
     "IngestService.explain_ingest": NO_DOCUMENT,
     "IngestService.list_registered_pipelines": NO_DOCUMENT,
     "IngestService.file_frontier": GAP_FRONTIER,

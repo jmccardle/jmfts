@@ -24,10 +24,35 @@ from jmfts_core.models.search_index import (
 )
 from jmfts_core.embedding import get_embedding_service
 from jmfts_core.config import get_settings
-from jmfts_core.access import readable_filter, readable_sql
+from jmfts_core.access import (
+    AccessDeniedError,
+    can_read,
+    can_write,
+    readable_filter,
+    readable_id_subset,
+    readable_sql,
+    require_write,
+)
 from jmfts_core.effective_content import frontier_members
 
 logger = logging.getLogger(__name__)
+
+
+class IndexRefreshDeniedError(AccessDeniedError):
+    """A refresh would rebuild a root the principal may not write (→ 403).
+
+    Names the index and no root: the same answer whether the root is read-only or
+    hidden, so a refresh cannot be used to probe for roots the caller cannot see."""
+
+    def __init__(self, index_name: str):
+        self.doc_id = None
+        self.action = "refresh"
+        Exception.__init__(
+            self,
+            f"Access denied: principal may not refresh index '{index_name}' — it holds "
+            "a subtree the principal may not write",
+        )
+
 
 #: The iterative-scan mode :meth:`SearchRepository.vector_search` asks pgvector for.
 #: ``docs/SPRINT_0_4_0.md`` Block A step 2.
@@ -1573,7 +1598,18 @@ class SearchRepository:
         Tokenizes content and updates inverted index tables.
         """
         doc = self.session.get(Document, document_id)
-        if not doc or not doc.content:
+        if not doc:
+            return False
+        # Subtree RBAC write gate, the same one `DocumentRepository.embed_document` takes:
+        # indexing writes postings derived from this document's content. A document the
+        # principal cannot read returns False exactly as a missing one does, so
+        # `IndexService.index_single_document` answers both with the same 400 (existence
+        # hiding); readable but not writable -> 403. A worker binds no principal, and the
+        # creator in `DocumentService.create`'s auto-index already passed require_add_child.
+        if not can_read(self.session, doc):
+            return False
+        require_write(self.session, doc, "index")
+        if not doc.content:
             return False
 
         # Skip excluded usetypes (e.g. entity, summary) — Kanban #279
@@ -1776,11 +1812,25 @@ class SearchRepository:
         """List all search indexes."""
         return list(self.session.execute(select(SearchIndex)).scalars().all())
 
+    def _require_root_write(self, root_document_id: int, action: str) -> None:
+        """Subtree RBAC write gate on an index root, the gate `embed_document` takes.
+
+        Registering or unregistering a root decides which subtree a refresh writes
+        postings for, so it is a write on that subtree. A missing root and one the
+        principal cannot read raise the same LookupError (404, existence-hiding — and a
+        missing root used to be a foreign-key 500); readable but not writable -> 403.
+        Unbound (worker, script) and owner callers bypass, as everywhere."""
+        doc = self.session.get(Document, root_document_id)
+        if doc is None:
+            raise LookupError(f"Document {root_document_id} not found")
+        require_write(self.session, doc, action)
+
     def add_root_to_index(self, index_name: str, root_document_id: int) -> bool:
         """Add a document subtree to an index."""
         index = self.get_index(index_name)
         if not index:
             return False
+        self._require_root_write(root_document_id, "register an index root at")
 
         # Check if already a member
         from jmfts_core.models.search_index import SearchIndexMember
@@ -1809,6 +1859,7 @@ class SearchRepository:
         index = self.get_index(index_name)
         if not index:
             return False
+        self._require_root_write(root_document_id, "remove an index root at")
 
         self.session.execute(
             text(
@@ -1818,12 +1869,9 @@ class SearchRepository:
         )
         return True
 
-    def get_index_roots(self, index_name: str) -> list[int]:
-        """Get root document IDs for an index."""
-        index = self.get_index(index_name)
-        if not index:
-            return []
-
+    def _member_root_ids(self, index: SearchIndex) -> list[int]:
+        """Every root registered on ``index``, unfiltered — for the rebuild, which must
+        see all of them whoever asks."""
         from jmfts_core.models.search_index import SearchIndexMember
 
         return list(
@@ -1836,21 +1884,47 @@ class SearchRepository:
             .all()
         )
 
+    def get_index_roots(self, index_name: str) -> list[int]:
+        """Get root document IDs for an index — the ones the principal may read.
+
+        A root id names a document, so a root under an ACR the principal cannot read is
+        left out, as an edge to a hidden document is. Owner and unbound callers see all."""
+        index = self.get_index(index_name)
+        if not index:
+            return []
+
+        root_ids = self._member_root_ids(index)
+        readable = readable_id_subset(self.session, root_ids)
+        return [r for r in root_ids if r in readable]
+
     def refresh_index(self, index_name: str) -> dict:
         """
         Rebuild an index from its member subtrees.
 
         Clears existing entries and re-indexes all documents in member subtrees.
         Returns stats about the refresh operation.
+
+        Takes write on EVERY registered root before it clears anything: a rebuild writes
+        postings for every document under every root, and rebuilding only the caller's
+        share would silently empty the index for everyone else. A root the principal
+        cannot write raises IndexRefreshDeniedError (403) whether it is hidden or merely
+        read-only — the same answer for both, naming no root, so it discloses nothing
+        about the roots a caller cannot see.
         """
         index = self.get_index(index_name)
         if not index:
             return {"error": "Index not found"}
 
         # Get all root document IDs
-        root_ids = self.get_index_roots(index_name)
+        root_ids = self._member_root_ids(index)
         if not root_ids:
             return {"error": "No roots in index", "indexed": 0}
+
+        for root in self.session.execute(
+            select(Document).where(Document.id.in_(root_ids))
+        ).scalars():
+            if not can_write(self.session, root):
+                raise IndexRefreshDeniedError(index_name)
 
         # Clear existing index data
         self.session.execute(
