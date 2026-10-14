@@ -1,15 +1,20 @@
 """Turtle in. ``docs/SPRINT_0_3_0.md`` 5.1 and 5.2.
 
-**The subset is a ceiling, not a starting point.** 5.1 names nine terms — ``sh:NodeShape``,
-``sh:targetClass``, ``sh:property``, ``sh:path``, ``sh:minCount``, ``sh:maxCount``,
-``sh:datatype``, ``sh:in``, ``sh:class`` — and that is what this reads. Everything else in
-the document is stored (``ontologies.source_turtle`` holds the bytes verbatim) and
-REPORTED as unsupported. It is not read, not enforced, and not quietly approximated.
+**The subset is what this PARSER reads into the digest, not what the appliance enforces.**
+5.1 names nine terms — ``sh:NodeShape``, ``sh:targetClass``, ``sh:property``, ``sh:path``,
+``sh:minCount``, ``sh:maxCount``, ``sh:datatype``, ``sh:in``, ``sh:class`` — and that is
+what this reads into ``ontologies.shapes``. Everything else in the document is stored
+(``ontologies.source_turtle`` holds the bytes verbatim) and REPORTED by name in
+``unsupported_terms``, meaning "not summarized in the parsed digest" — it is not
+approximated into one of the nine.
 
-The reporting is the whole point of the ceiling. A parser that ignored ``sh:pattern``
-would give a caller a stored shape that passes on data the shape forbids — a validator
-that is right about eight constraints and silent about the ninth is worse than no
-validator, because the silence looks like a pass. So the unread terms come back by name.
+Being listed there does NOT mean a term is ignored at run time. Validation
+(``validate_tasks``) hands ``source_turtle`` to ``pyshacl``, so a SHACL Core constraint such
+as ``sh:pattern`` IS enforced when its shape is bound and validated; derivation
+(``derive_tasks``) runs ``sh:rule`` / ``sh:SPARQLRule`` / ``sh:construct``. What the list
+does say is that the digest a caller reads back omits the term, so a caller reading the
+digest to learn what a shape checks must read ``source_turtle`` for anything named here.
+OWL axioms are the exception that is genuinely inert: no reasoner runs (next paragraph).
 
 **No reasoner, and none of the two OWL predicates 5.4 admits are inferred here.**
 ``owl:InverseFunctionalProperty`` and ``owl:equivalentProperty`` are structural and are
@@ -126,7 +131,8 @@ class ParsedOntology:
     shapes: list[ParsedShape] = field(default_factory=list)
     #: ``{predicate IRI: local name}`` for every term a bound shape could constrain.
     predicate_terms: dict[str, str] = field(default_factory=dict)
-    #: SHACL/OWL terms the document used that the subset does not read. Sorted, so two
+    #: SHACL/OWL terms the document used that the digest does not summarize — see the module
+    #: docstring for what that does and does not imply about enforcement. Sorted, so two
     #: uploads of the same bytes report the same list.
     unsupported_terms: list[str] = field(default_factory=list)
 
@@ -264,11 +270,11 @@ def _parse_property(rdflib, graph, sh, node) -> ParsedProperty:
 
 
 def _unsupported_terms(graph) -> list[str]:
-    """SHACL and OWL terms the document used that the subset does not read.
+    """SHACL and OWL terms the document used that the parsed digest does not summarize.
 
     Only the SHACL and OWL namespaces, and only where the term appears as a PREDICATE or as
     the object of ``rdf:type`` — those are the two positions where a term makes a claim
-    that a validator would have to honour. A term appearing anywhere else is data.
+    that a reader of the digest would otherwise miss. A term appearing anywhere else is data.
     """
     used: set[str] = set()
     rdf_type = RDF + "type"
