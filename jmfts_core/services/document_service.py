@@ -1582,8 +1582,8 @@ class DocumentService:
             # `_pdf_anchor`, and /region and /page map only the former (409). Naming the
             # node's own id instead would name a /cells call that is itself a 409.
             raise RegionNotAddressable(
-                f"Document {document_id} carries a cells anchor and has no worksheet node "
-                "at or above it, so there is no node to ask for its cells"
+                f"Document {document_id} carries a cells anchor ({ref}) and has no "
+                "worksheet node at or above it, so there is no node to ask for its cells"
             )
         return f"GET /documents/{sheet.id}/cells?ref={ref}"
 

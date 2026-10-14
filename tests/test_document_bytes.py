@@ -591,9 +591,11 @@ class TestRegion:
         self, db_session, client_with_db, pdf_node
     ):
         """``docs/SPRINT_0_6_0.md`` step 22: for a sheet, JSON cells are the better answer
-        than a picture of cells, and ``GET /documents/{id}/cells`` already serves them. The
-        409 carries that route, because an error that names the fix costs one call instead of
-        a search."""
+        than a picture of cells, and ``GET /documents/{id}/cells`` serves them — on the SHEET
+        node, which refuses every other usetype (#29). This chunk has a cells anchor and no
+        worksheet above it, so there is no ``/cells`` call to name, and naming its own id
+        would name a 409. It is still a 409 that keeps the ref. The case with a sheet above
+        the node, where the route IS named, is ``tests/test_sheet_records.py``."""
         chunk, _ = _anchored_chunk(db_session, pdf_node.id)
         evidence = EvidenceRepository(db_session)
         evidence.delete(chunk.id, ANCHOR_ROW)
@@ -604,7 +606,8 @@ class TestRegion:
         assert resp.status_code == 409
         detail = resp.json()["detail"]
         assert "B4:H120" in detail
-        assert f"/documents/{chunk.id}/cells" in detail
+        assert "no worksheet node" in detail
+        assert f"/documents/{chunk.id}/cells" not in detail
 
     def test_a_character_span_has_no_geometry_and_says_so(self, db_session, pdf_node):
         """Same treatment, different absence: a range in text has no rectangle on any page
