@@ -41,7 +41,8 @@ from jmfts_core.repositories.document import DocumentRepository  # noqa: E402
 from jmfts_core.repositories.evidence import EvidenceRepository  # noqa: E402
 from jmfts_core.repositories.task_queue import TaskQueueRepository  # noqa: E402
 from jmfts_core.services.ingest_service import IngestService  # noqa: E402
-from jmfts_core.structure_tasks import _extract_pdf  # noqa: E402
+from jmfts_core.models.task_queue import TaskQueue  # noqa: E402
+from jmfts_core.structure_tasks import _extract_pdf, _replan_after_extraction  # noqa: E402
 from jmfts_core.table_tasks import run_extract_tables, table_key  # noqa: E402
 from tests.conftest import drain_ingest_queue  # noqa: E402
 
@@ -255,6 +256,59 @@ class TestTheHandler:
         assert outcome.detail["document_vector_only"] == ["p0.t0"]
         assert EvidenceRepository(db_session).read(child.id, "table")["fits_token_window"] is False
 
+    def test_a_second_run_matches_the_first_and_writes_nothing(self, db_session):
+        """A worker that finished after its lease was reaped, and the run it was reaped into,
+        both commit. The natural key matches the first run's children; the second writes
+        no table and queues no second embed."""
+        node = _file_node(db_session)
+        run_extract_tables(db_session, _ScopedTask(node.id))
+        db_session.flush()
+
+        again = run_extract_tables(db_session, _ScopedTask(node.id))
+
+        (child,) = _children(db_session, node.id)
+        assert again.detail["tables_written"] == 0
+        assert again.detail["tables_matched"] == ["p0.t0"]
+        queued = TaskQueueRepository(db_session).unfinished_tasks_for(child.id)
+        assert [t.task_type for t in queued] == [TASK_EMBED]
+
+    def test_a_run_that_matches_only_some_keys_raises(self, db_session):
+        """All or none: a partial set is not a re-run to absorb, it is a changed record."""
+        node = _file_node(db_session)
+        run_extract_tables(db_session, _ScopedTask(node.id))
+        (child,) = _children(db_session, node.id)
+        evidence = EvidenceRepository(db_session)
+        table = evidence.read(child.id, "table")
+        evidence.write(child.id, "table", {**table, "key": "p0.t7"})
+        db_session.flush()
+
+        with pytest.raises(ValueError, match=r"already has extract:tables children keyed"):
+            run_extract_tables(db_session, _ScopedTask(node.id))
+        assert len(_children(db_session, node.id)) == 1
+
+    def test_the_re_plan_run_twice_enqueues_one_row(self, db_session):
+        """6.1's attempt diff: the second re-plan finds the first one's pending record."""
+        node = _file_node(db_session)
+        extraction = EvidenceRepository(db_session).read(node.id, "extraction")
+
+        first = _replan_after_extraction(db_session, node, extraction)
+        second = _replan_after_extraction(db_session, node, extraction)
+
+        assert list(first["enqueued"]) == [TASK_EXTRACT_TABLES]
+        assert first["already_attempted"] == []
+        assert second["enqueued"] == {}
+        assert second["already_attempted"] == [TASK_EXTRACT_TABLES]
+        rows = (
+            db_session.execute(
+                select(TaskQueue)
+                .where(TaskQueue.scope_document_id == node.id)
+                .where(TaskQueue.task_type == TASK_EXTRACT_TABLES)
+            )
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 1
+
     def test_missing_spans_raise(self, db_session):
         node = _file_node(db_session)
         extraction = EvidenceRepository(db_session).read(node.id, "extraction")
@@ -415,4 +469,12 @@ class TestThePipeline:
 
         text = _attempt(db_session, node, TASK_EXTRACT_TEXT)["detail"]
         assert text["enqueued"] == {}
-        assert "was not measured" in text["not_applicable"][TASK_EXTRACT_TABLES]
+        # extract:text has run, so the promise probe made ("extract:text measures it and
+        # re-plans") is not repeated by the task it names: its reader for this format
+        # does not measure the pattern, and the reason says so.
+        assert text["not_applicable"][TASK_EXTRACT_TABLES] == (
+            "patterns.pages_with_tables was not measured: extract:text ran, and it does not "
+            "measure it for format 'text'"
+        )
+        probe = _attempt(db_session, node, TASK_PROBE)["detail"]
+        assert "extract:text measures it" in probe["not_applicable"][TASK_EXTRACT_TABLES]

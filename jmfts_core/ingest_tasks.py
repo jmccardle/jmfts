@@ -1876,9 +1876,20 @@ def _uncomparable_reason(row: TaskRow, label: str, value: object, right_label: s
 
 
 def _requires_reason(
-    t: Term, row: TaskRow, fmt: str, patterns: dict, resolved: dict
+    t: Term,
+    row: TaskRow,
+    fmt: str,
+    patterns: dict,
+    resolved: dict,
+    measured_by: Optional[str] = None,
 ) -> Optional[str]:
-    """Why a ``requires`` term does not hold, or ``None`` if it does."""
+    """Why a ``requires`` term does not hold, or ``None`` if it does.
+
+    ``measured_by`` names a task that has already RUN on this node, which is what
+    :func:`plan_after_measurement` passes: a pattern that task measures and still left
+    absent was not measured because its reader does not measure it for this format, not
+    because nobody has looked yet.
+    """
     state, label, value = _left_side(t, fmt, patterns, resolved)
     if state is _IMPOSSIBLE:
         return SENTINEL_REASONS[t.left](fmt)
@@ -1894,6 +1905,11 @@ def _requires_reason(
         # says who will measure it, so a probe attempt log does not read as "nothing will
         # ever happen to this row".
         measurer = PATTERN_MEASURED_BY.get(t.left) if isinstance(t.left, str) else None
+        if measurer is not None and measurer == measured_by:
+            return (
+                f"{label} was not measured: {measurer} ran, and it does not measure it "
+                f"for format {fmt!r}"
+            )
         if measurer is not None:
             return f"{label} was not measured; {measurer} measures it and re-plans {row.task}"
         return f"{label} was not measured"
@@ -1980,6 +1996,7 @@ def _blocking_reason(
     eligible: set[str],
     eligible_anywhere: set[str],
     resolved: dict,
+    measured_by: Optional[str] = None,
 ) -> Optional[str]:
     """Why ``row``'s condition does not hold, or ``None`` if it does.
 
@@ -2015,7 +2032,7 @@ def _blocking_reason(
     for t in row.requires:
         if t.reads_option:
             continue
-        reason = _requires_reason(t, row, fmt, patterns, resolved)
+        reason = _requires_reason(t, row, fmt, patterns, resolved, measured_by)
         if reason is not None:
             return reason
 
@@ -2073,7 +2090,9 @@ class _Evaluated:
     not_applicable: dict[str, str]
 
 
-def _evaluate(fmt: str, patterns: dict, options: Optional[dict]) -> _Evaluated:
+def _evaluate(
+    fmt: str, patterns: dict, options: Optional[dict], measured_by: Optional[str] = None
+) -> _Evaluated:
     """One pass over :data:`TASK_ROWS`, deciding every row at every scope.
 
     Scopes are decided together and cannot be decided apart: a row scoped to the children of
@@ -2097,7 +2116,9 @@ def _evaluate(fmt: str, patterns: dict, options: Optional[dict]) -> _Evaluated:
 
     for row in TASK_ROWS:
         in_scope = eligible_in_scope.setdefault(row.scope, set())
-        reason = _blocking_reason(row, fmt, patterns, in_scope, eligible_anywhere, resolved)
+        reason = _blocking_reason(
+            row, fmt, patterns, in_scope, eligible_anywhere, resolved, measured_by
+        )
         if reason is not None:
             not_applicable[row.task] = reason
             continue
@@ -2222,8 +2243,13 @@ def plan_after_measurement(
     satisfied by construction — and a rollback removes both. Leaving it would hand
     ``enqueue_batch`` a name that is not in the batch, which it refuses. ``_check_task_rows``
     rule 6 is what guarantees nothing else is left in ``after``.
+
+    **A name ``measured_by`` measures and left absent is reported as such.** The sentence
+    probe wrote — "extract:text measures it and re-plans" — is a promise about the future,
+    and once ``measured_by`` has run it is false for a format whose reader does not measure
+    the name (``.md``, ``.docx``); the not-applicable reason says the reader ran instead.
     """
-    decided = _evaluate(fmt, patterns, options)
+    decided = _evaluate(fmt, patterns, options, measured_by)
     gated = {
         row.task for row in TASK_ROWS if row.scope == ROOT_SCOPE and measured_by in _measurers(row)
     }

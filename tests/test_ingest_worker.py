@@ -386,7 +386,10 @@ class TestPlanAfterMeasurement:
             "docx", {"has_text_layer": True}, measured_by=TASK_EXTRACT_TEXT
         )
         assert plan.eligible == ()
-        assert "was not measured" in plan.not_applicable[TASK_EXTRACT_TABLES]
+        assert plan.not_applicable[TASK_EXTRACT_TABLES] == (
+            "patterns.pages_with_tables was not measured: extract:text ran, and it does not "
+            "measure it for format 'docx'"
+        )
 
     def test_measured_patterns_reads_only_its_own_names(self):
         record = {"pages_with_tables": [4], "page_count": 9, "tables_found": 1}

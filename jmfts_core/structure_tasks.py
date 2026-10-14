@@ -49,7 +49,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
+
+from jmfts_client.contracts.attempt import param_fingerprint
 
 from jmfts_core.atoms import (
     COST_CPU,
@@ -592,7 +595,8 @@ def _replan_after_extraction(session: Session, doc: Document, extraction: dict) 
     flight until this task finishes and the new rows are unfinished tasks on it, so
     ``structuring_complete`` cannot settle it in between; a rollback removes both.
 
-    Returns the same four keys ``run_probe`` writes, for the attempt detail.
+    Returns the same four keys ``run_probe`` writes, for the attempt detail, and
+    ``already_attempted``: the eligible rows the attempt diff found already queued or run.
     """
     fmt, patterns, options = _plan_inputs(session, doc)
     if fmt is None:
@@ -607,7 +611,22 @@ def _replan_after_extraction(session: Session, doc: Document, extraction: dict) 
         measured_by=TASK_EXTRACT_TEXT,
     )
     runnable, deferred = _split_by_handler(plan.eligible)
-    enqueued = enqueue_batch(TaskQueueRepository(session), doc.id, runnable) if runnable else ()
+    # SPEC 6.1'S DIFF, as `AttemptDiffPlanner` applies it at the rollup boundary: a row whose
+    # `(task, param_fingerprint)` the node's attempt log already records is not enqueued
+    # again. `enqueue` writes the pending record in the same transaction as the row, so a
+    # second commit of this task — a worker that finished after its lease was reaped, or
+    # the retry it was reaped into — finds the first one's rows here. The node's row lock
+    # orders the two: the second waits until the first has committed, then reads its log.
+    session.execute(select(Document.id).where(Document.id == doc.id).with_for_update()).one()
+    tasks = TaskQueueRepository(session)
+    attempted = tasks.attempted_fingerprints(doc.id)
+    already = {
+        spec.task_type
+        for spec in runnable
+        if (spec.task_type, param_fingerprint(spec.params)) in attempted
+    }
+    runnable = [spec for spec in runnable if spec.task_type not in already]
+    enqueued = enqueue_batch(tasks, doc.id, runnable) if runnable else ()
     docs = DocumentRepository(session)
     for entry in plan.skipped:
         docs.upsert_attempt(doc, _skipped_record(doc, entry, docs.attempt_counts(doc)))
@@ -616,6 +635,7 @@ def _replan_after_extraction(session: Session, doc: Document, extraction: dict) 
         "deferred": deferred,
         "skipped": {entry.task_type: entry.reason for entry in plan.skipped},
         "not_applicable": plan.not_applicable,
+        "already_attempted": sorted(already),
     }
 
 

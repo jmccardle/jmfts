@@ -31,6 +31,7 @@ characters under a table's name.
 
 from __future__ import annotations
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from jmfts_core.atoms import (
@@ -139,6 +140,45 @@ def _checked_spans(doc: Document, extraction: dict) -> list[dict]:
     return tables
 
 
+def _written_keys(session: Session, doc: Document) -> dict[str, int]:
+    """``{natural key: node id}`` for the ``table`` children this rule already wrote here.
+
+    Matched on the declared child key (``table.key``, ``SPRINT_JOBS.md`` 9.2), among the
+    children still stamped ``produced_by = extract:tables`` — a child whose content a person
+    edited has the stamp cleared (9.4) and is not this rule's to match.
+
+    **The lock is the point, as in** ``DocumentRepository._refuse_if_populated``. Under READ
+    COMMITTED two runs of this task — the worker whose lease expired and the one the row was
+    handed to next — would each read no children and each write a full set. ``FOR UPDATE``
+    on the file node's row conflicts with the ``FOR KEY SHARE`` a child INSERT takes on its
+    parent, so the second run waits here until the first commits, and then sees its rows.
+    """
+    session.execute(select(Document.id).where(Document.id == doc.id).with_for_update()).one()
+    children = (
+        session.execute(
+            select(Document.id)
+            .where(Document.parent_id == doc.id)
+            .where(Document.produced_by == TASK_EXTRACT_TABLES)
+        )
+        .scalars()
+        .all()
+    )
+    if not children:
+        return {}
+    evidence = EvidenceRepository(session).read_many(children)
+    keys: dict[str, int] = {}
+    for child_id in children:
+        key = (evidence[child_id].get("table") or {}).get("key")
+        if not isinstance(key, str) or key in keys:
+            raise ValueError(
+                f"document {doc.id}'s {TASK_EXTRACT_TABLES} child {child_id} carries "
+                f"table key {key!r}, which is missing or shared with another child; the "
+                "natural key is what tells one table from another across runs"
+            )
+        keys[key] = child_id
+    return keys
+
+
 # `extraction@self` is the derived edge: the spans are `extract:text`'s, and `text@self` is
 # the string they index. Both are on the file node, which is why `after` names it.
 @register_task_handler(
@@ -164,6 +204,28 @@ def run_extract_tables(session: Session, task: TaskQueue) -> TaskOutcome:
     doc = _scope_node(session, task, TASK_EXTRACT_TABLES)
     extraction = EvidenceRepository(session).read(doc.id, "extraction") or {}
     tables = _checked_spans(doc, extraction)
+
+    already = _written_keys(session, doc)
+    if already:
+        expected = {table_key(t["page"], t["index"]) for t in tables}
+        if set(already) != expected:
+            raise ValueError(
+                f"document {doc.id} already has {TASK_EXTRACT_TABLES} children keyed "
+                f"{sorted(already)}, and its extraction record spans {sorted(expected)}; "
+                "this task writes all of a document's tables or none, so a partial or "
+                "different set means the record changed under the nodes, and re-deriving "
+                "them (SPRINT_JOBS.md 9.1's delete of an unmatched child) is not built"
+            )
+        # The same run committed already — a worker that lost its lease and finished
+        # anyway, or the row re-handed out after it. Every key matches, so the work this
+        # row asks for exists, with its `embed` queued by whoever wrote it.
+        return TaskOutcome(
+            detail={
+                "tables_written": 0,
+                "tables_matched": sorted(already),
+                "pages": sorted({t["page"] for t in tables}),
+            }
+        )
 
     frontier = plan_frontier(session, doc, produced_by=TASK_EXTRACT_TABLES, usetype=USETYPE_TABLE)
     if not frontier.in_flight:
