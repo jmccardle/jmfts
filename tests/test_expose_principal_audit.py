@@ -17,9 +17,16 @@ within the defining class, and ``obj.method`` where ``obj`` was bound by a visib
 * A verb with NO path to ``jmfts_core.access`` provably does not consult the principal.
   That direction is sound and it is the one the assertion is written on.
 * A verb WITH a path is not thereby proved to be gated. ``TemplateService.list_templates``
-  reaches ``require_add_child`` because ``_get_container_id`` may create the container
-  document — a real call, on a gate, that scopes nothing about the listing. Reachability is
-  a necessary condition, not a sufficient one.
+  once reached ``require_add_child`` only because ``_get_container_id`` may create the
+  container document — a real call, on a gate, that scoped nothing about the listing — and
+  so read as scoped while returning every template. Since 2026-10-13 it reaches
+  ``readable_filter`` directly, which does scope the listing
+  (``tests/test_access_template_reads.py``). The residual of the same kind today is
+  ``IngestService.file_frontier``: it takes ``can_read`` on the named node, but
+  ``nodes_total`` and the per-state counts still include descendants the caller cannot
+  read, so a governed caller learns a hidden subtree's size (ROADMAP known gap 12). It
+  cannot be listed below, because the list is held in both directions and the verb does
+  reach a gate. Reachability is a necessary condition, not a sufficient one.
 
 So this file is a FLOOR: the list below is the set of verbs that are certainly unscoped, and
 it can only be under-inclusive. It still does the job step 3 asked of it — the next verb
@@ -120,7 +127,9 @@ NOT_PRINCIPAL_SCOPED: dict[str, str] = {
     "IngestService.list_registered_pipelines": NO_DOCUMENT,
     # IngestService.file_frontier was here, as an OPEN GAP. It left this list on
     # 2026-10-13: it takes can_read on the node, so a hidden node is the same 404 as a
-    # missing one. `tests/test_access_file_frontier.py`.
+    # missing one. `tests/test_access_file_frontier.py`. RESIDUAL, and not listed because
+    # the verb does reach a gate: the counts still include descendants the caller cannot
+    # read (the AGGREGATE_COUNTS shape), recorded in ROADMAP known gap 12.
     "MetaService.capabilities": APPLIANCE,
     "OntologyService.import_ontology": VOCABULARY,
     "OntologyService.list_ontologies": VOCABULARY,
@@ -140,7 +149,9 @@ NOT_PRINCIPAL_SCOPED: dict[str, str] = {
     # TemplateService.get_template and render_template were here, as an OPEN GAP. They
     # left this list on 2026-10-13: both read the template through can_read, so a template
     # under a root the caller holds no grant on is "Template not found".
-    # `tests/test_access_template_reads.py`.
+    # `tests/test_access_template_reads.py`. list_templates is scoped too, by
+    # readable_filter on its own query (it only reached require_add_child through
+    # _get_container_id, which scoped nothing); the same file holds it over HTTP.
     "TripleService.create_predicate": VOCABULARY,
     "TripleService.get_predicate": VOCABULARY,
     "TripleService.list_predicates": VOCABULARY,

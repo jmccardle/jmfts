@@ -40,7 +40,7 @@ from jmfts_client.contracts.template import (
     TemplateSearchRequest,
     TemplateUpdate,
 )
-from jmfts_core.access import can_read
+from jmfts_core.access import can_read, readable_filter
 from jmfts_core.models.document import Document
 from jmfts_core.registry import expose, register_service
 from jmfts_core.repositories.document import DocumentRepository
@@ -134,13 +134,21 @@ class TemplateService:
         summary="List all templates, optionally filtered by category",
     )
     def list_templates(self, *, category: Optional[str] = None) -> list[TemplateResponse]:
-        """List all templates, optionally filtered by category."""
+        """List the templates the caller may read, optionally filtered by category.
+
+        Scoped like ``get_template``: a template under an access-control root the caller
+        holds no grant on is absent from the list. ``readable_filter`` is ``None`` for
+        owner, unbound and no-ACR callers, which see everything.
+        """
         db = self.session
         container_id = self._get_container_id()
         query = db.query(Document).filter(
             Document.parent_id == container_id,
             Document.usetype == TEMPLATE_USETYPE,
         )
+        readable = readable_filter(db)
+        if readable is not None:
+            query = query.filter(readable)
 
         if category:
             _validate_category(category)

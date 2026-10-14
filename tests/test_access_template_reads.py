@@ -8,10 +8,15 @@ read it by ``session.get(Document, template_id)`` with no ``can_read`` (ROADMAP 
     reader                       -> allowed
 """
 
+from contextlib import contextmanager
+
 import pytest
+from fastapi.testclient import TestClient
 
 from jmfts_client.contracts.template import TemplateRenderRequest
 from jmfts_core.repositories.document import DocumentRepository
+from jmfts_core.principal_context import OWNER, reset_principal, set_principal
+from jmfts_core.services import template_service
 from jmfts_core.services.template_service import TEMPLATE_USETYPE, TemplateService
 from tests.test_access_write_gate import _as, _grant, _principal
 
@@ -80,3 +85,83 @@ def test_render_template_reader_allowed(db_session):
 def test_get_template_unbound_caller_allowed(db_session):
     tid, _, _ = _governed_template(db_session)
     assert TemplateService(db_session).get_template(tid).id == tid
+
+
+# --- GET /templates, over HTTP -------------------------------------------------------------
+#
+# The list verb once ran a raw ``db.query(Document)`` with no access filter, so it returned
+# the full body of a template that ``GET /templates/{id}`` answered 404.
+
+
+@contextmanager
+def _http(db_session, principal):
+    from jmfts_core.database import get_db
+    from jmfts_core.rest.auth import require_token
+    from jmfts_core.rest.main import app
+
+    async def _bind():
+        token = set_principal(principal)
+        try:
+            yield
+        finally:
+            reset_principal(token)
+
+    def _db():
+        yield db_session
+
+    app.dependency_overrides[require_token] = _bind
+    app.dependency_overrides[get_db] = _db
+    try:
+        yield TestClient(app, raise_server_exceptions=False)
+    finally:
+        app.dependency_overrides.pop(require_token, None)
+        app.dependency_overrides.pop(get_db, None)
+
+
+def _listed_template(session, monkeypatch, *, governed):
+    """A template inside the (patched) container; its own ACR for RD when ``governed``."""
+    repo = DocumentRepository(session)
+    container = repo.create(
+        title="prompt_templates", content=None, usetype="adjutant:container", auto_embed=False
+    )
+    session.flush()
+    monkeypatch.setattr(template_service, "_container_id", container.id)
+    tpl = repo.create(
+        title="secret greeting",
+        content="SECRET Hello {{name}}",
+        parent_id=container.id,
+        usetype=TEMPLATE_USETYPE,
+        structured_content={"category": "ideation", "variables": [], "usage_count": 0},
+        auto_embed=False,
+    )
+    session.flush()
+    rd = _principal(session, "RD")
+    na = _principal(session, "NA")
+    if governed:
+        _grant(session, tpl.id, rd, "read")
+    return tpl.id, rd, na
+
+
+def _list_ids(db_session, principal):
+    with _http(db_session, principal) as client:
+        resp = client.get("/templates")
+    assert resp.status_code == 200, resp.text
+    return [t["id"] for t in resp.json()]
+
+
+def test_list_templates_hides_template_from_non_reader(db_session, monkeypatch):
+    tid, _, na = _listed_template(db_session, monkeypatch, governed=True)
+    assert tid not in _list_ids(db_session, na)
+    with _http(db_session, na) as client:
+        assert client.get(f"/templates/{tid}").status_code == 404
+
+
+def test_list_templates_shows_template_to_reader_and_owner(db_session, monkeypatch):
+    tid, rd, _ = _listed_template(db_session, monkeypatch, governed=True)
+    assert tid in _list_ids(db_session, rd)
+    assert tid in _list_ids(db_session, OWNER)
+
+
+def test_list_templates_with_no_acr_shows_everyone(db_session, monkeypatch):
+    tid, _, na = _listed_template(db_session, monkeypatch, governed=False)
+    assert tid in _list_ids(db_session, na)
