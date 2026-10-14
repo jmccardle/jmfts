@@ -193,14 +193,19 @@ one-off one, which is the difference 0.6.0 step 3 was for.
     `SearchRepository` — `index_document` and add/remove root take `require_write` (hidden
     reads as missing, read-only is a 403), `get_index_roots` drops roots the caller cannot
     read, and `refresh_index` takes write on every root before clearing anything; held by
-    `tests/test_access_index_verbs.py`. `TemplateService.get_template` and
+    `tests/test_access_index_verbs.py`. Nine verbs remained at that point, and four after
+    these five closed. **Residual, read 2026-10-13:** `refresh_index` checks write on each ROOT,
+    not on what lies under it, so a caller with no grants on a private access-control root
+    nested under an open root can refresh and learns `total_docs_found` including documents it
+    cannot read. Count only; retrieval still filters postings, and it predates this change.
+    `TemplateService.get_template` and
     `render_template` read a template by `session.get(Document, template_id)` with no
     `can_read`, and a template IS a document. ~~`DocumentService.embed_document` reaches
     `DocumentRepository.embed_document` rather than `.update`, so it misses the
     `require_write` at `repositories/document.py:401`.~~ **CLOSED 2026-10-12 (0.6.2):**
     `DocumentRepository.embed_document` now takes `require_write` (404 for a hidden
     document, 403 for a read-only one), held by `tests/test_access_embed_write.py`; nine
-    verbs remained, and four after the `IndexService` five closed. `IngestService.file_frontier`
+    verbs remain. `IngestService.file_frontier`
     distinguishes "a document with work under it" from "no such document" for a caller that
     may read neither. The eleventh gap the audit found became step 35 and is closed.
     **Each is a candidate 0.7.0 step and none is a 0.6.0 step**: eleven is more than Block A

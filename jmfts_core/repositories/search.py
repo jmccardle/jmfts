@@ -53,6 +53,7 @@ class IndexRefreshDeniedError(AccessDeniedError):
             "a subtree the principal may not write",
         )
 
+
 #: The iterative-scan mode :meth:`SearchRepository.vector_search` asks pgvector for.
 #: ``docs/SPRINT_0_4_0.md`` Block A step 2.
 #:
@@ -1829,7 +1830,7 @@ class SearchRepository:
         index = self.get_index(index_name)
         if not index:
             return False
-        self._require_root_write(root_document_id, "add to an index")
+        self._require_root_write(root_document_id, "register an index root at")
 
         # Check if already a member
         from jmfts_core.models.search_index import SearchIndexMember
@@ -1858,7 +1859,7 @@ class SearchRepository:
         index = self.get_index(index_name)
         if not index:
             return False
-        self._require_root_write(root_document_id, "remove from an index")
+        self._require_root_write(root_document_id, "remove an index root at")
 
         self.session.execute(
             text(
@@ -1919,7 +1920,9 @@ class SearchRepository:
         if not root_ids:
             return {"error": "No roots in index", "indexed": 0}
 
-        for root in self.session.execute(select(Document).where(Document.id.in_(root_ids))).scalars():
+        for root in self.session.execute(
+            select(Document).where(Document.id.in_(root_ids))
+        ).scalars():
             if not can_write(self.session, root):
                 raise IndexRefreshDeniedError(index_name)
 
