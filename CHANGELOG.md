@@ -72,7 +72,8 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
   the old key.
 - **`/image`, `/region` and `/blob` declare their refusals in OpenAPI** (400/404/409/413, and
   404/409), and a bounding box containing `nan` or `inf` is a 400 where it used to render an
-  arbitrary rectangle (#38).
+  arbitrary rectangle, as is a finite one beyond float32 range (about 3.4e38; it was a 500)
+  (#38).
 - **The import report's `unsupported_terms` is documented as "not summarized in the digest"**,
   not "not enforced": SHACL validation reads the stored source, so `sh:pattern` is enforced
   while listed there.
@@ -90,6 +91,22 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
 - **A workbook no longer ends ingest with a failed `anchor:render`** (#37). The missing-evidence
   sentinel is compared by identity at the three sites that read it with `or {}`, and the
   planner offers `anchor:render` only for sources the handler reads (OOXML).
+- **PDF rectangles on rotated pages are stored in the displayed page's space** (#38).
+  `get_text` measures the unrotated page while `/region`, `/image` and `page_geometry` read
+  the page as displayed, so on `/Rotate 90/180/270` pages every text anchor cropped blank
+  paper and `/region` answered 200 with a white PNG. Text rectangles are now turned by the
+  page's rotation; table spans are not turned twice (`find_tables` already de-rotates), and
+  a table now owns its cells on a turned page instead of emitting them a second time as
+  prose. The matrix is read before table detection deletes the CropBox, so a CropBox page's
+  anchors no longer land off the page when `extract_tables` is on. **Anchors on rotated
+  pages written before this change carry no marker and are not migrated: re-derive them by
+  re-running `citation` (text anchors) and `extract:text` then `extract:tables` (table
+  spans).**
+- **`/region?anchor=true` refuses an anchor that crops blank paper** with a 400 that says
+  so, and on a rotated page names the re-derivation above. Only a stored anchor that renders
+  entirely white is refused: a rectangle a caller names, or a crop that is one non-white
+  colour (inside a filled box), is still a 200. The check is one bytes comparison;
+  `Pixmap.is_unicolor` took 17–40 s on a blank 8.4 Mpx crop.
 
 ## [0.6.2] — 2026-10-12
 

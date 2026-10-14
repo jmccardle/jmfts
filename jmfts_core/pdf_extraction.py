@@ -417,11 +417,35 @@ def _process_page(
 
     blocks = page.get_text("dict", flags=pymupdf.TEXTFLAGS_TEXT)["blocks"]
 
+    # EVERY RECTANGLE IS STORED IN THE ROTATED PAGE'S SPACE. `get_text` measures on the
+    # UNROTATED page, while `page.rect`, `rendering.page_geometry` and the clip `get_pixmap`
+    # takes are all the page as displayed. On a `/Rotate 90` page the two spaces barely
+    # overlap, so an anchor measured in one and cropped in the other renders a blank PNG
+    # (#38). `rotation_matrix` is the identity on an unrotated page, so this is a no-op
+    # everywhere else.
+    #
+    # IT IS READ HERE, BEFORE `find_tables`, and that order is load-bearing. On a rotated
+    # page `find_tables` de-rotates the page to analyse it and restores it with
+    # `set_mediabox`, which DELETES the CropBox (pymupdf/table.py `page_rotation_set0` /
+    # `page_rotation_reset`). A matrix read afterwards is the MediaBox's, and on a page whose
+    # CropBox is smaller every anchor lands off the page — so `extract_tables` would change
+    # where the prose's anchors point.
+    rotation = page.rotation_matrix
+
     found = _find_page_tables(page) if extract_tables else _PageTables()
     result.table_errors = found.errors
     result.tables_rejected = found.rejected
     result.tables_found = len(found.tables)
-    table_rects = [pymupdf.Rect(t.bbox) for t in found.tables]
+    # `find_tables` answers in the OTHER space. It de-rotates the page before it measures
+    # (pymupdf/table.py `page_rotation_set0`), so a table's bbox is already the displayed
+    # page's while every `get_text` rectangle above is the unrotated page's. They are brought
+    # into `get_text`'s space here, once, so that `_table_owner` compares like with like —
+    # compared across spaces no block is owned on a turned page and every cell is emitted
+    # twice — and so that the single `* rotation` below is right for every segment. Rotating
+    # a table's bbox as it came would turn it twice: blank paper at 90, off the page at
+    # 180 and 270.
+    unrotate = ~rotation
+    table_rects = [pymupdf.Rect(t.bbox) * unrotate for t in found.tables]
     # A table is rendered at most once even if several blocks belong to it.
     emitted = [False] * len(found.tables)
 
@@ -432,7 +456,7 @@ def _process_page(
         md = _table_to_markdown(rows)
         if md:
             table_segments[len(segments)] = (index, len(rows), len(rows[0]))
-            segments.append((md, tuple(found.tables[index].bbox)))
+            segments.append((md, tuple(table_rects[index])))
 
     for block in blocks:
         if block.get("type") != 0:  # only text blocks
@@ -487,8 +511,9 @@ def _process_page(
         result.control_chars_removed += removed
         if pieces:
             cursor += 2  # the "\n\n" join
+        displayed = pymupdf.Rect(bbox) * rotation
         block = {
-            "bbox": [round(value, 2) for value in bbox],
+            "bbox": [round(value, 2) for value in displayed],
             "start": cursor,
             "end": cursor + len(clean),
         }
@@ -555,7 +580,9 @@ def pdf_to_markdown(
     granularity of a paragraph rather than a page: ``{"page": int, "bbox": [x0, y0, x1, y1],
     "start": int, "end": int}`` per emitted markdown segment, in document order, with
     ``start``/``end`` being character offsets into ``markdown_text`` and ``bbox`` being the
-    rectangle in PDF points on ``page``. It is what makes a character offset in the markdown
+    rectangle in PDF points on ``page`` AS DISPLAYED — after ``/Rotate``, which is the space
+    ``rendering.page_geometry`` and ``/region`` read (#38); ``tables[*].bbox`` is in the same
+    space. It is what makes a character offset in the markdown
     invertible back into a place on a page, which is ``OFFICE_SPEC.md`` Part 5's anchor —
     see ``jmfts_core.citation_tasks``, which is the only consumer and which recomputes this
     from the blob rather than having it stored on the node.
