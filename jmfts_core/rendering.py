@@ -55,6 +55,10 @@ DPI_MAX = 600
 #: request can ask for more than about 75 MB of RGB.
 PIXELS_MAX = 25_000_000
 
+#: The largest coordinate magnitude :func:`parse_bbox` accepts: single precision's range,
+#: rounded down. ``pymupdf.Rect`` holds float32 and raises ``OverflowError`` past it.
+COORDINATE_MAX = 3.4e38
+
 #: What ``@expose`` declares for the two rendering routes, and what the pixmap is encoded as.
 #: PNG and not JPEG: a page of text is line art, where JPEG's ringing lands exactly on the
 #: glyph edges a reader is trying to read.
@@ -125,6 +129,15 @@ def parse_bbox(raw: str) -> tuple[float, float, float, float]:
     if not all(math.isfinite(v) for v in (x0, y0, x1, y1)):
         raise BadRenderRequest(
             f"bbox {raw!r} has a non-finite value; a rectangle is four finite numbers, "
+            "`x0,y0,x1,y1` in PDF points"
+        )
+    # FINITE IS NOT ENOUGH. `pymupdf.Rect` stores single-precision floats and raises
+    # `OverflowError` past their range, which nothing maps, so `bbox=1e39,0,100,100` was a
+    # 500. No page is anywhere near this size — PDF's own limit is 14,400 points a side.
+    if not all(abs(v) <= COORDINATE_MAX for v in (x0, y0, x1, y1)):
+        raise BadRenderRequest(
+            f"bbox {raw!r} has a value beyond ±{COORDINATE_MAX:g}, the largest coordinate a "
+            "PDF renderer stores (single precision); a rectangle is four numbers within it, "
             "`x0,y0,x1,y1` in PDF points"
         )
     # Put the ends in order rather than refusing a reversed one: `x1 < x0` names the same

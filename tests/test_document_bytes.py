@@ -215,6 +215,12 @@ class TestParseBbox:
         with pytest.raises(BadRenderRequest, match="non-finite"):
             parse_bbox(raw)
 
+    @pytest.mark.parametrize("raw", ["1e39,0,100,100", "-1e308,-1e308,1e308,1e308"])
+    def test_finite_values_beyond_single_precision_are_refused(self, raw):
+        """Finite, but past what ``pymupdf.Rect`` can hold: it raised ``OverflowError``."""
+        with pytest.raises(BadRenderRequest, match="3.4e"):
+            parse_bbox(raw)
+
 
 class TestRenderOpenApi:
     """The statuses the render verbs really answer with are in the document, not just 200."""
@@ -688,6 +694,16 @@ class TestRegion:
         )
         assert resp.status_code == 400
         assert "four" in resp.json()["detail"]
+
+    @pytest.mark.parametrize("bbox", ["1e39,0,100,100", "-1e308,-1e308,1e308,1e308"])
+    def test_a_coordinate_past_single_precision_is_a_400_not_a_500(
+        self, client_with_db, pdf_node, bbox
+    ):
+        resp = client_with_db.get(
+            f"/documents/{pdf_node.id}/region", params={"page": 0, "bbox": bbox}
+        )
+        assert resp.status_code == 400
+        assert "3.4e+38" in resp.json()["detail"]
 
     def test_a_rectangle_off_the_page_names_the_media_box(self, client_with_db, pdf_node):
         resp = client_with_db.get(
