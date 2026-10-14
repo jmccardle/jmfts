@@ -574,6 +574,49 @@ class TestOversizeTurns:
         assert repo.get_children(turn.id, depth=1, limit=100) == []
 
 
+class TestAStaleStructureRowIsRefused:
+    """A queue row without the complete ``structure`` group fails PERMANENT, naming why.
+
+    Rows of ``structure:conversation`` queued before issue #4 carry ``{}``: the row had no
+    ``params_key`` then. Filling each missing key with the group's default would chunk at
+    options the planner never resolved for this document and settle as success, which
+    ``ingest_options.py``'s "a group here is complete" exists to rule out.
+    """
+
+    @pytest.mark.parametrize(
+        "params, says",
+        [
+            ({}, "chunk_strategy, max_words, min_chunk_length"),
+            ({"chunk_strategy": "sentence", "min_chunk_length": 1}, "max_words"),
+            (
+                {"chunk_strategy": "sentence", "max_tokens": 50, "min_chunk_length": 1},
+                "renamed max_words",
+            ),
+        ],
+    )
+    def test_the_conversation_rung_refuses_it(self, db_session, params, says):
+        from types import SimpleNamespace
+
+        from jmfts_core.conversation_tasks import run_structure_conversation
+        from jmfts_core.ingest_tasks import TASK_STRUCTURE_CONVERSATION
+        from jmfts_core.task_errors import ErrorType, classify_exception
+
+        response = _ingest(
+            db_session,
+            messages=_msgs(("assistant", "Go. " * 300), ("user", "A short reply.")),
+            extract_facts=False,
+        )
+        stale = SimpleNamespace(
+            scope_document_id=response.source_document_id,
+            task_type=TASK_STRUCTURE_CONVERSATION,
+            params=params,
+        )
+
+        with pytest.raises(ValueError, match=says) as raised:
+            run_structure_conversation(db_session, stale)
+        assert classify_exception(raised.value) == ErrorType.PERMANENT
+
+
 # ============================================================================
 # API Endpoint Tests (FastAPI TestClient)
 # ============================================================================

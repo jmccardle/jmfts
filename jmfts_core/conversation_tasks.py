@@ -294,8 +294,14 @@ def _split_oversized(
 
     The pieces are cut with the task's ``structure`` options and the window's own
     predicate — the same ``chunk_text`` call the prose rungs make per section (issue #4).
-    It was ``chunk_to_fit``'s hard-coded ``sentence`` strategy, which no option reached:
-    every part was one sentence, and the default ``sentence_packed`` gives passages.
+    It was ``chunk_to_fit``'s fixed default — ``sentence`` until issue #2 made it
+    ``sentence_window`` — which no option reached. The ``structure`` group defaults to
+    ``sentence_packed``, which gives passages.
+
+    Which layers set the group: the usetype default and a collection's options reach every
+    transcript; a request's own ``structure`` options reach it only through an entry point
+    that takes ``options`` (an upload, ``POST /ingest``). ``POST /conversations/ingest``
+    has no field for the group.
     """
     if not service.check_fit(message.content, with_tokens=True).truncated:
         return 0

@@ -525,8 +525,10 @@ INGEST_USETYPES: dict[str, Usetype] = {
                 "embed, optionally RAPTOR + fact extraction"
             ),
             source=SOURCE_CONTENT,
-            # No chunking override: a conversation's leaves are its turns, and a turn is a
-            # boundary the transcript states rather than one a strategy finds.
+            # No chunking override, and no longer because nothing reads one. A turn is a
+            # boundary the transcript states and no option moves it; but since issue #4
+            # `structure:conversation` reads the `structure` group to cut an over-window
+            # turn into parts, at the group's defaults unless a layer overrides them.
             options=_FACTS_ON,
         ),
         Usetype(

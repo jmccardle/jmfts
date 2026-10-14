@@ -850,11 +850,22 @@ def structure_chunk_params(task: TaskQueue) -> tuple[ChunkStrategy, int, int]:
             "max_tokens, which 0.7.0 renamed max_words; re-ingest the document to queue it "
             "under the new name"
         )
-    strategy = ChunkStrategy(params.get("chunk_strategy", STRUCTURE_CHUNK_PARAMS["chunk_strategy"]))
-    max_words = int(params.get("max_words", STRUCTURE_CHUNK_PARAMS["max_words"]))
-    min_chunk_length = int(
-        params.get("min_chunk_length", STRUCTURE_CHUNK_PARAMS["min_chunk_length"])
-    )
+    # Every row carries the COMPLETE group (`ingest_options.py`, "a group here is
+    # complete"), so a missing key is a row the planner did not write this way — in
+    # practice `structure:conversation` queued before issue #4 gave it `params_key`, with
+    # `{}`. Reading the defaults instead would chunk at options nobody resolved for this
+    # document and settle as success.
+    missing = [key for key in STRUCTURE_CHUNK_PARAMS if key not in params]
+    if missing:
+        raise ValueError(
+            f"{task.task_type} for document {task.scope_document_id} was queued without "
+            f"structure option(s) {', '.join(missing)}; the row predates the change that "
+            "puts the whole `structure` group on it. Re-ingest the document (or re-queue "
+            "the task) so it is planned with the group"
+        )
+    strategy = ChunkStrategy(params["chunk_strategy"])
+    max_words = int(params["max_words"])
+    min_chunk_length = int(params["min_chunk_length"])
     return strategy, max_words, min_chunk_length
 
 
