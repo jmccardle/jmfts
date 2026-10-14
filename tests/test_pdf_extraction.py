@@ -700,7 +700,50 @@ def _dark_fraction(pdf: bytes, bbox) -> float:
     return sum(1 for value in samples if value < 128) / len(samples)
 
 
+def _prose_block(meta: dict) -> dict:
+    """The text block that is NOT a table segment."""
+    table_spans = {(t["start"], t["end"]) for t in meta["tables"]}
+    (block,) = [b for b in meta["text_blocks"] if (b["start"], b["end"]) not in table_spans]
+    return block
+
+
 class TestRotatedPagesStoreDisplayedRectangles:
+    @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+    def test_a_table_span_crops_to_the_table(self, rotation):
+        """`find_tables` de-rotates the page before it measures (pymupdf/table.py
+        `page_rotation_set0`), so its rectangles are ALREADY the displayed page's. Rotating
+        them a second time cropped blank paper at 90 and missed the page at 180/270."""
+        import pymupdf
+
+        data = _make_rotated_pdf(rotation)
+        _, meta = pdf_to_markdown(data)
+
+        (table,) = meta["tables"]
+        # The whole table's ink is about 0.083 of its own rectangle at every rotation; the
+        # twice-turned rectangle at 90 caught a corner of it at 0.034.
+        assert _dark_fraction(data, table["bbox"]) > 0.06
+        page = pymupdf.open(stream=data, filetype="pdf")[0]
+        inside = page.get_textbox(pymupdf.Rect(table["bbox"]) * page.derotation_matrix)
+        assert all(cell in inside for row in _ROTATED_CELLS for cell in row)
+
+    @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+    def test_a_table_cell_is_emitted_once(self, rotation):
+        """Ownership compares a text block with a table rectangle, so both have to be in
+        one space. Compared across spaces, no block was owned on a turned page and every
+        cell came out twice: once as prose, once inside the table."""
+        md, meta = pdf_to_markdown(_make_rotated_pdf(rotation))
+
+        assert meta["tables_found"] == 1
+        assert md.count("Swede") == 1
+        assert md.count("North") == 1
+
+    @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+    def test_the_prose_rectangle_crops_to_the_words(self, rotation):
+        data = _make_rotated_pdf(rotation)
+        _, meta = pdf_to_markdown(data)
+
+        assert _dark_fraction(data, _prose_block(meta)["bbox"]) > 0.05
+
     @pytest.mark.parametrize("rotation", [90, 180, 270])
     def test_a_cropbox_page_anchors_the_same_with_and_without_tables(self, rotation):
         """`find_tables` restores a rotated page with `set_mediabox`, which deletes the
