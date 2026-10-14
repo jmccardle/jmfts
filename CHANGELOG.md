@@ -21,12 +21,28 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
   to unknown fields. Migration 024 rewrites the stored `options` evidence row; a structure
   task already queued with `max_tokens` is not rewritten (its param fingerprint would stop
   matching) and fails PERMANENT with the rename message, so re-ingest the document.
+- **A queued `structure:conversation` row from before this release fails PERMANENT** (#4). Such
+  rows carry `{}` for their parameters, and the task now reads the whole `structure` group from
+  its row; one missing a key is refused, naming the keys and saying to re-ingest the document,
+  instead of quietly running on defaults. The prose rungs refuse the same way.
+- **`EmbeddingService.chunk_to_fit` is removed.** Its only production caller was the
+  conversation rung. Call `chunk_text(text, fits=service.fits_token_window)`, which gives the
+  same guarantee.
 
 ### Added
 
 - **`sentence_window` chunk strategy.** Packs whole sentences up to the embedding model's
   token window, measured with the real tokenizer through `fits`; it refuses to run without
   one.
+
+- **Spreadsheet nodes carry `cells` source anchors** (#29). `extract:sheet` writes the measured
+  used range on the table node and each record's worksheet row (e.g. `A5:C5`) on the record;
+  `profile:sheet` writes the used range on the profile node; an empty sheet gets
+  `source_anchor.unresolved` with code `empty_sheet`. `/region?anchor=true` on one of them
+  now names the call that works, `GET /documents/<sheet id>/cells?ref=…`, where it used to
+  name the node's own `/cells`, which refuses every node that is not a sheet. Anchors start at
+  `A1` (the existing used-range rule), and a document ingested before this release has none:
+  re-ingest it.
 
 - **PDF tables become `table` nodes (`extract:tables`).** A table the text layer renders
   inline is written as a `usetype=table` child of the file node, keyed `p{page}.t{index}`,
@@ -44,6 +60,36 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
 - **The `extract:tables` not-applicable reason after `extract:text` has run** now says the
   reader ran and does not measure `pages_with_tables` for that format (`.md`, `.docx`),
   instead of repeating probe's "extract:text measures it and re-plans extract:tables".
+
+- **Conversation turns are cut with the `structure` ingest options** (#4), the same
+  `chunk_text` call the prose rungs make. With the defaults (`sentence_packed`, 120 words) 300
+  one-word sentences become 3 parts, not 300. A transcript ingested before this release keeps
+  its one-part-per-sentence tree; nothing re-plans it yet.
+- **The `input_tokens` evidence of an LLM summary is the prompt size the endpoint reported**
+  (#7), cache reads and writes included, and `null` when the server sent no usage. It used to
+  hold the embedding tokenizer's count, which the model never saw; that count is kept as
+  `input_embedding_tokens`. Rows written before this release still hold the old number under
+  the old key.
+- **`/image`, `/region` and `/blob` declare their refusals in OpenAPI** (400/404/409/413, and
+  404/409), and a bounding box containing `nan` or `inf` is a 400 where it used to render an
+  arbitrary rectangle (#38).
+- **The import report's `unsupported_terms` is documented as "not summarized in the digest"**,
+  not "not enforced": SHACL validation reads the stored source, so `sh:pattern` is enforced
+  while listed there.
+
+### Fixed
+
+- **Ten operations that ignored subtree access now respect it** (#30, ROADMAP known gap 12).
+  The five `IndexService` verbs that name a document (`index_document`, add and remove a root,
+  `get_index_roots`, `refresh_index`), template get, render **and list**, `file_frontier`, and
+  `create_binding`: a caller with no grant sees a governed document as missing (404, or 400 for
+  `index_document`), a read-only caller is refused a write (403), and `add_root_to_index` on an
+  id that does not exist is a 404 where it was a 500. Owners, unbound callers and deployments
+  with no access-control root behave as before. Two counts still include documents the caller
+  cannot read (`refresh_index`, `file_frontier`).
+- **A workbook no longer ends ingest with a failed `anchor:render`** (#37). The missing-evidence
+  sentinel is compared by identity at the three sites that read it with `or {}`, and the
+  planner offers `anchor:render` only for sources the handler reads (OOXML).
 
 ## [0.6.2] — 2026-10-12
 

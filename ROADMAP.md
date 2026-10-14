@@ -1,6 +1,6 @@
 # JMFTS Roadmap
 
-Last updated: 2026-09-17. **This file is open work; `CHANGELOG.md` is what shipped.** Where
+Last updated: 2026-10-13 (the Status section and known gap 12 only). **This file is open work; `CHANGELOG.md` is what shipped.** Where
 the two would say the same thing, this one says nothing and points there.
 
 The 2026-09-17 pass re-read one section — the job system — against `master` at `8e7ccba`, and
@@ -26,10 +26,22 @@ internal file at its own date and has not been re-checked.
 
 ## Status
 
+**Read 2026-10-13, and it supersedes the two struck rows below.** Released: **0.6.2**
+(2026-10-12; PyPI carries `jmfts`, `jmfts-client` and `jmfts-web`, all three, on one tag).
+`master` is 0.6.2 plus the 0.7.0 work merged on 2026-10-13, none of it tagged: the
+`max_tokens` → `max_words` rename with `sentence_window` and the per-section chunk ceiling,
+conversation turns cut by the structure options, `extract:tables`, cells anchors on
+spreadsheet nodes, the ten subtree-access gates of known gap 12, and the `input_tokens`
+evidence fix. **Next: 0.7.0.** Headline: the standalone Vue console (`jmfts-ui`, issue #11),
+which sits on its own branch `worktree-vue-frontend` until its Search, Ingest and document
+views exist, and office documents read, cited and previewed (issue #29). The version rule
+is unchanged: three distributions, one number, one tag. Open work is the 0.7.0 milestone
+on the issue tracker; the numbered gaps below are the long-lived ones.
+
 | | |
 |---|---|
-| Released | **0.5.1**, 2026-09-13. `master` is the tag; `jmfts` and `jmfts-client` are both on PyPI |
-| Next | **0.6.0** — `docs/SPRINT_0_6_0.md`. Headline: a **web front end**. Seven blocks, thirty-six steps. Gate M5 closed 2026-09-15 and step 8 answered the same day (`fadbcb4`), so M6 — `CHANGELOG.md`, the bump, the tag — is what is left |
+| ~~Released~~ | ~~**0.5.1**, 2026-09-13. `master` is the tag; `jmfts` and `jmfts-client` are both on PyPI~~ |
+| ~~Next~~ | ~~**0.6.0** — `docs/SPRINT_0_6_0.md`. Headline: a **web front end**. Seven blocks, thirty-six steps. Gate M5 closed 2026-09-15 and step 8 answered the same day (`fadbcb4`), so M6 — `CHANGELOG.md`, the bump, the tag — is what is left~~ |
 | Version rule | The two distributions release in lockstep: one number, two wheels, one tag |
 | Changing at 0.6.0 | A **third** distribution, `jmfts-web`, joins the lockstep. `jmfts[web]` depends on it |
 
