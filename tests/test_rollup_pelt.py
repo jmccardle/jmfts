@@ -28,6 +28,7 @@ from jmfts_core.ingest_tasks import (
     TASK_SUMMARIZE,
     TASK_SUMMARIZE_LLM,
 )
+from jmfts_core.llm_client import LlmCompletion
 from jmfts_core.models.document import SETTLED_IN_FLIGHT, SETTLED_SETTLED, Document
 from jmfts_core.models.task_queue import TaskQueue
 from jmfts_core.repositories.document import DocumentRepository
@@ -444,14 +445,21 @@ class TestEffectiveContent:
 
         def _fake(text, settings, model):
             calls.append((len(text), model))
-            return "A short summary of a long span about retrieval quality."
+            return LlmCompletion(
+                text="A short summary of a long span about retrieval quality.",
+                model=model,
+                usage={"input_tokens": 12345, "output_tokens": 11},
+            )
 
         monkeypatch.setattr(rollup, "summarize_span", _fake)
         outcome = run_summarize_llm(db_session, _Task(parent.id, {}, TASK_SUMMARIZE_LLM))
 
         assert len(calls) == 1
         assert outcome.detail["method"] == METHOD_LLM_SUMMARY
-        assert outcome.detail["input_tokens"] > outcome.detail["window"]
+        # Forgejo john/jmfts #7: `input_tokens` is the LLM's count, as the endpoint reported
+        # it, and the embedding tokenizer's count of the same text is kept under its own name.
+        assert outcome.detail["input_tokens"] == 12345
+        assert outcome.detail["input_embedding_tokens"] > outcome.detail["window"]
         record = evidence(db_session.get(Document, parent.id))["effective_content"]
         assert record["text"] == "A short summary of a long span about retrieval quality."
 
@@ -463,7 +471,11 @@ class TestEffectiveContent:
         _configure_llm(monkeypatch, rollup)
         long_text = "Retrieval quality is measured against a baseline. " * 900
         parent = _tree(db_session, [0, 1], text=long_text)
-        monkeypatch.setattr(rollup, "summarize_span", lambda text, settings, model: long_text)
+        monkeypatch.setattr(
+            rollup,
+            "summarize_span",
+            lambda text, settings, model: LlmCompletion(text=long_text, model=model, usage={}),
+        )
 
         with pytest.raises(ValueError, match="did not summarize"):
             run_summarize_llm(db_session, _Task(parent.id, {}, TASK_SUMMARIZE_LLM))
@@ -510,7 +522,7 @@ TWO_TOPIC_TEXT = (
 )
 
 INGEST_OPTIONS = {
-    "structure": {"max_tokens": 20, "min_chunk_length": 5},
+    "structure": {"max_words": 20, "min_chunk_length": 5},
     "rollup": {"max_children": 4, "min_segment": 2, "penalty": 0.5},
 }
 

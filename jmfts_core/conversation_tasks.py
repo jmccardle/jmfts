@@ -48,6 +48,7 @@ from jmfts_core.atoms import (
     ChildKey,
     Fanout,
 )
+from jmfts_core.chunking import ChunkStrategy, chunk_text
 from jmfts_core.conversation_ingest import ParsedMessage, parse_adjutant_jsonl
 from jmfts_core.embedding import get_embedding_service
 from jmfts_core.ingest_tasks import (
@@ -64,7 +65,7 @@ from jmfts_core.repositories.blob import BlobRepository
 from jmfts_core.repositories.document import DocumentRepository
 from jmfts_core.repositories.evidence import EvidenceRepository
 from jmfts_core.repositories.task_queue import TaskQueueRepository
-from jmfts_core.structure_tasks import RUNG_DECLARED, _scope_node
+from jmfts_core.structure_tasks import RUNG_DECLARED, _scope_node, structure_chunk_params
 
 logger = logging.getLogger(__name__)
 
@@ -78,15 +79,19 @@ def _conversation_ceiling(evidence: dict, params: dict) -> tuple[int, int]:
     * **Turns.** A turn is a JSON string inside one line, and a line yields at most two —
       a prompt/response pair writes both. NOT at most one, which is what 4.11 said; the
       sum below still holds because of the next point.
-    * **Parts.** :func:`_split_oversized` writes one per piece ``chunk_to_fit`` returns,
+    * **Parts.** :func:`_split_oversized` writes one per piece ``chunk_text`` returns,
       and every piece holds at least one non-whitespace character of the turn that no
-      other piece holds. ``_split_sentences`` drops a piece that strips to nothing;
+      other piece holds. The splitters drop a piece that strips to nothing;
       ``_enforce_max_chars`` emits a short text whole and otherwise only non-empty
       ``str.split()`` words, joins of them, or non-empty slices of one; ``_enforce_fit``
-      recurses through ``_enforce_max_chars`` and nothing else. ``min_chunk_length`` does
-      not enter — this caller leaves it at 1 — and neither does the window: the window
-      decides WHETHER a turn splits, and the ``sentence`` strategy emits one part per
-      sentence without packing them, so a part is a sentence and not a window's worth.
+      recurses through ``_enforce_max_chars`` and nothing else. ``overlap`` is not a
+      ``structure`` option, so no strategy repeats a word across pieces. Since issue #4 the
+      strategy, ``max_words`` and ``min_chunk_length`` are the task's ``structure``
+      options, and none of them can break this: packing (``sentence_packed``, and
+      ``sentence_window``'s whole sentences up to the window, issue #2) and the
+      ``min_chunk_length`` merge only join pieces. The worst case is still the
+      ``sentence`` strategy — one part per sentence, which a caller can ask for — and the
+      default ``sentence_packed`` writes far fewer.
     * **The sum.** A JSON-decoded string is never longer than its encoding, and every line
       that yields a turn spends at least 13 characters on syntax (``{"prompt":""}``) and
       27 on a pair. So a line writes at most ``2 + its content characters``, which is
@@ -96,8 +101,10 @@ def _conversation_ceiling(evidence: dict, params: dict) -> tuple[int, int]:
 
     Floor zero: a file whose lines parse to no turns settles with no children (the
     handler's zero-yield branch), so zero is reachable. Option B in 4.11 is the tighter
-    replacement — pack the parts to the window, then bound them by tokens — and it is
-    0.7.0's, because it changes what the rung writes rather than what it declares.
+    replacement — pack the parts to the window, then bound them by tokens. Packing is
+    whichever strategy the ``structure`` group names (issue #4); bounding by tokens needs
+    a token count as evidence, which probe does not measure, so the declared ceiling is
+    still option A's.
     """
     lines = int(evidence["matched.patterns.line_count"])
     characters = int(evidence["matched.patterns.char_count"])
@@ -165,6 +172,9 @@ def run_structure_conversation(session: Session, task: TaskQueue) -> TaskOutcome
     repo = DocumentRepository(session)
     tasks = TaskQueueRepository(session)
     service = get_embedding_service()
+    # The `structure` group, read the way the prose rungs read it. It does not move a turn
+    # boundary — the transcript states those — it decides how an over-window turn is cut.
+    strategy, max_words, min_chunk_length = structure_chunk_params(task)
     # One frontier for the whole transcript. A turn and an over-window turn's parts are the
     # same kind of node written by the same rule, so they share it: 4.1's scope is
     # `(produced_by, usetype)` and both halves are equal for the two.
@@ -193,6 +203,9 @@ def run_structure_conversation(session: Session, task: TaskQueue) -> TaskOutcome
             message=message,
             conversation_id=doc.id,
             frontier=frontier,
+            strategy=strategy,
+            max_words=max_words,
+            min_chunk_length=min_chunk_length,
         )
 
     session.flush()
@@ -267,6 +280,9 @@ def _split_oversized(
     message: ParsedMessage,
     conversation_id: int,
     frontier: Frontier,
+    strategy: ChunkStrategy,
+    max_words: int,
+    min_chunk_length: int,
 ) -> int:
     """Give an over-window turn chunk children that fit. Returns how many were written.
 
@@ -275,11 +291,32 @@ def _split_oversized(
     vectors, so MaxSim has something in range to score against. Before this shape existed
     the message was embedded as a ~2000-character prefix and reported as fully embedded
     (KNOWN-DEFECTS D1).
+
+    The pieces are cut with the task's ``structure`` options and the window's own
+    predicate — the same ``chunk_text`` call the prose rungs make per section (issue #4).
+    It was ``EmbeddingService.chunk_to_fit``'s fixed default — ``sentence`` — which no
+    option reached; that method had no other caller and is deleted. The ``structure``
+    group defaults to ``sentence_packed``, which gives passages.
+
+    Which layers set the group: the usetype default and a collection's options reach every
+    transcript; a request's own ``structure`` options reach it only through an entry point
+    that takes ``options`` (an upload, ``POST /ingest``). ``POST /conversations/ingest``
+    has no field for the group.
     """
     if not service.check_fit(message.content, with_tokens=True).truncated:
         return 0
+    pieces = [
+        chunk.text
+        for chunk in chunk_text(
+            message.content,
+            strategy=strategy,
+            max_words=max_words,
+            min_chunk_length=min_chunk_length,
+            fits=service.fits_token_window,
+        )
+    ]
     written = 0
-    for index, piece in enumerate(service.chunk_to_fit(message.content)):
+    for index, piece in enumerate(pieces):
         node = repo.create(
             title=f"{message.role} — turn {message.turn_index} (part {index + 1})",
             content=piece,

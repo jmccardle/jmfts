@@ -54,6 +54,8 @@ from jmfts_core.ingest_tasks import (
     UnknownTaskError,
     _split_by_handler,
     get_task_handler,
+    measured_patterns,
+    plan_after_measurement,
     plan_after_probe,
     register_task_handler,
 )
@@ -272,7 +274,8 @@ class TestEnqueueConditions:
         measured_false = plan_after_probe("pdf", {"has_text_layer": True, "pages_with_tables": []})
 
         assert absent.not_applicable[TASK_EXTRACT_TABLES] == (
-            "patterns.pages_with_tables was not measured"
+            "patterns.pages_with_tables was not measured; extract:text measures it and "
+            "re-plans extract:tables"
         )
         assert measured_false.not_applicable[TASK_EXTRACT_TABLES] == (
             "patterns.pages_with_tables is false"
@@ -282,18 +285,17 @@ class TestEnqueueConditions:
             != measured_false.not_applicable[TASK_EXTRACT_TABLES]
         )
 
-    def test_a_populated_page_list_reaches_the_deferred_path(self):
-        """The condition holds, and `extract:tables` still has no handler.
+    def test_a_populated_page_list_makes_the_tables_row_runnable(self):
+        """The condition holds and `extract:tables` has a handler, so it is runnable.
 
-        Two different facts (spec 3.4), and this is the one that says the CONDITION is
-        satisfied — so when the handler lands, nothing about the schedule has to change.
+        This was the deferred path ("no handler") until `table_tasks` landed; the schedule
+        did not change, which is the property the old test was pinning.
         """
         plan = plan_after_probe("pdf", {"has_text_layer": True, "pages_with_tables": [2]})
         runnable, deferred = _split_by_handler(plan.eligible)
 
-        assert TASK_EXTRACT_TABLES in [spec.task_type for spec in plan.eligible]
-        assert TASK_EXTRACT_TABLES not in [spec.task_type for spec in runnable]
-        assert "no handler" in deferred[TASK_EXTRACT_TABLES]
+        assert TASK_EXTRACT_TABLES in [spec.task_type for spec in runnable]
+        assert TASK_EXTRACT_TABLES not in deferred
 
     def test_a_scanned_document_records_ocr_as_skipped_with_a_reason(self):
         """Part 4 marks `ocr` out of scope for v1 and says to record it as skipped."""
@@ -343,6 +345,62 @@ class TestEnqueueConditions:
         eligible = {spec.task_type: spec.params for spec in plan.eligible}
         assert TASK_STRUCTURE_INFERRED in eligible
         assert eligible[TASK_STRUCTURE_INFERRED] == dict(STRUCTURE_CHUNK_PARAMS)
+
+
+class TestPlanAfterMeasurement:
+    """Spec 3.3's "a pattern may arrive after probe": the measuring task re-plans the rows
+    gated on what it measured, and ONLY those."""
+
+    def test_it_decides_only_the_rows_gated_on_what_it_measured(self):
+        """No double enqueue: the structure rungs were probe's, and stay probe's."""
+        plan = plan_after_measurement(
+            "pdf",
+            {"has_text_layer": True, "has_outline": True, "pages_with_tables": [0, 3]},
+            measured_by=TASK_EXTRACT_TEXT,
+        )
+        assert [spec.task_type for spec in plan.eligible] == [TASK_EXTRACT_TABLES]
+        assert plan.not_applicable == {}
+        assert plan.skipped == ()
+
+    def test_the_measurer_is_stripped_from_after(self):
+        """The caller IS `extract:text`, completing in the same transaction; leaving it in
+        `after` would hand `enqueue_batch` a name that is not in the batch."""
+        plan = plan_after_measurement(
+            "pdf", {"has_text_layer": True, "pages_with_tables": [1]}, measured_by=TASK_EXTRACT_TEXT
+        )
+        (spec,) = plan.eligible
+        assert spec.after == ()
+
+    def test_no_tables_is_not_applicable_and_says_false(self):
+        plan = plan_after_measurement(
+            "pdf", {"has_text_layer": True, "pages_with_tables": []}, measured_by=TASK_EXTRACT_TEXT
+        )
+        assert plan.eligible == ()
+        assert plan.not_applicable[TASK_EXTRACT_TABLES] == "patterns.pages_with_tables is false"
+
+    def test_a_reader_that_measures_nothing_leaves_the_row_unmeasured(self):
+        """A `.docx`'s `extract:text` writes no `pages_with_tables`, so the pattern stays
+        absent and the reason stays "not measured" — never "is false"."""
+        assert measured_patterns(TASK_EXTRACT_TEXT, {"toc": [], "characters": 10}) == {}
+        plan = plan_after_measurement(
+            "docx", {"has_text_layer": True}, measured_by=TASK_EXTRACT_TEXT
+        )
+        assert plan.eligible == ()
+        assert plan.not_applicable[TASK_EXTRACT_TABLES] == (
+            "patterns.pages_with_tables was not measured: extract:text ran, and it does not "
+            "measure it for format 'docx'"
+        )
+
+    def test_measured_patterns_reads_only_its_own_names(self):
+        record = {"pages_with_tables": [4], "page_count": 9, "tables_found": 1}
+        assert measured_patterns(TASK_EXTRACT_TEXT, record) == {"pages_with_tables": [4]}
+        assert measured_patterns("structure:inferred", record) == {}
+
+    def test_a_task_that_measures_nothing_unlocks_nothing(self):
+        plan = plan_after_measurement(
+            "pdf", {"has_text_layer": True, "pages_with_tables": [1]}, measured_by="probe"
+        )
+        assert plan.eligible == () and plan.not_applicable == {}
 
 
 class TestTaskTable:

@@ -136,6 +136,56 @@ def _attempt(session, node: Document, task: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
+class TestTheChunkCeilingCountsSections:
+    """Issue #5's remainder, run end to end: `_write_chunks` calls `chunk_text` once per
+    section, so the ceiling EXPLAIN declares has to know how many sections there can be.
+
+    A markdown file of many one-line sections is the case 0.6.2's length-only bound
+    under-reported: every section is its own chunk however short."""
+
+    # Six characters a section. The length-only bound grows by 2/20 + 3/64 of a chunk per
+    # character at the default min_chunk_length of 20, so it falls behind one chunk per
+    # section below about 6.8 characters each — this is just under.
+    TEXT = ("# H\nx\n" * 80).encode("utf-8")
+
+    def _ingest_markdown(self, session) -> Document:
+        response = IngestService(session).upload_file(
+            UploadedFile(data=self.TEXT, filename="many.md", content_type="text/markdown")
+        )
+        # One `embed` per chunk, plus the rollup above them: past the default bound of 100.
+        drain_ingest_queue(session, max_tasks=500)
+        return DocumentRepository(session).get(response.document_id)
+
+    def test_extract_records_the_section_ceiling(self, db_session, evidence):
+        node = self._ingest_markdown(db_session)
+        assert evidence(node)["extraction"]["section_ceiling"] == 81  # 80 headings + preamble
+
+    def test_what_the_rung_wrote_is_inside_the_declared_interval(self, db_session, evidence):
+        from jmfts_core.chunking import chunk_count_ceiling
+        from jmfts_core.config import get_settings
+        from jmfts_core.structure_tasks import _chunk_ceiling
+
+        node = self._ingest_markdown(db_session)
+        extraction = evidence(node)["extraction"]
+        attempt = _attempt(db_session, node, TASK_STRUCTURE_DECLARED)
+        written = attempt["detail"]["chunk_nodes"]
+        minimum = attempt["detail"]["params"]["min_chunk_length"]
+
+        _, ceiling = _chunk_ceiling(
+            {
+                "extraction.characters": extraction["characters"],
+                "extraction.section_ceiling": extraction["section_ceiling"],
+            },
+            {"min_chunk_length": minimum},
+        )
+        single_call = chunk_count_ceiling(
+            extraction["characters"], minimum, get_settings().chunk_max_chars
+        )
+        assert written == 80
+        assert written <= ceiling
+        assert single_call < written, "the length-only bound this replaced under-reports here"
+
+
 class TestExtractText:
     def test_the_file_node_holds_the_whole_extracted_text(self, db_session, outlined_pdf):
         node = _ingest(db_session, outlined_pdf)
@@ -297,7 +347,7 @@ class TestDeclaredRungRecordsWhatItCovered:
 
         assert attempt["rung"] == RUNG_DECLARED
         assert attempt["detail"]["params"]["chunk_strategy"] == "sentence_packed"
-        assert attempt["detail"]["params"]["max_tokens"] == 120
+        assert attempt["detail"]["params"]["max_words"] == 120
         assert attempt["param_fingerprint"]
 
     def test_produced_child_ids_are_the_undo_record(self, db_session, outlined_pdf):
@@ -401,3 +451,57 @@ class TestADocumentWithNoStructureAtAll:
         assert evidence(node)["structure"]["coverage"] == 0.0
         assert evidence(node)["structure"]["gap_regions"] == 1
         assert node.settled == SETTLED_SETTLED
+
+
+class TestATaskQueuedBeforeTheRename:
+    """Issue #1: `structure.max_tokens` became `structure.max_words`, and
+    `migrations/024_max_words.sql` deliberately leaves queued `task_queue.params` alone (the
+    param fingerprint would stop matching). So a task queued under the old name reaches
+    `_build_tree` still carrying it, and must be refused rather than chunked at the default."""
+
+    def test_it_fails_permanent_with_the_rename_message(self, db_session, outlined_pdf):
+        from jmfts_core.ingest_tasks import WRITE_CHILDREN
+        from jmfts_core.repositories.task_queue import TaskQueueRepository
+        from jmfts_core.task_errors import ErrorType
+
+        node = _ingest(db_session, outlined_pdf)
+        before = len(_children(db_session, node.id))
+
+        task = TaskQueueRepository(db_session).enqueue(
+            TASK_STRUCTURE_DECLARED,
+            node.id,
+            WRITE_CHILDREN,
+            params={"chunk_strategy": "sentence_packed", "max_tokens": 80},
+            max_retries=0,
+        )
+        task_id = task.id
+        drain_ingest_queue(db_session)
+
+        task = TaskQueueRepository(db_session).get(task_id)
+        assert task.status == "failed"
+        assert task.error_type == ErrorType.PERMANENT.value
+        assert "max_tokens" in task.error and "max_words" in task.error
+        # Refused, not run at the default budget: nothing was written under the node.
+        assert len(_children(db_session, node.id)) == before
+
+
+class TestAStaleStructureRowIsRefused:
+    """The prose rungs read the group through the same ``structure_chunk_params`` as the
+    conversation rung, so a row missing part of it is refused here too rather than read
+    at the defaults (issue #4's review)."""
+
+    def test_the_declared_rung_refuses_a_row_without_the_group(self, db_session, outlined_pdf):
+        from types import SimpleNamespace
+
+        from jmfts_core.structure_tasks import run_structure_declared
+        from jmfts_core.task_errors import ErrorType, classify_exception
+
+        node = _ingest(db_session, outlined_pdf)
+        stale = SimpleNamespace(
+            scope_document_id=node.id, task_type=TASK_STRUCTURE_DECLARED, params={}
+        )
+
+        with pytest.raises(ValueError, match="Re-ingest the document") as raised:
+            run_structure_declared(db_session, stale)
+        assert "chunk_strategy, max_words, min_chunk_length" in str(raised.value)
+        assert classify_exception(raised.value) == ErrorType.PERMANENT

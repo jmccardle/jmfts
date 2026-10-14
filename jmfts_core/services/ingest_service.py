@@ -196,7 +196,7 @@ class IngestService:
 
         Override the ingest options with ``options``::
 
-            {"structure": {"chunk_strategy": "paragraph", "max_tokens": 300}}
+            {"structure": {"chunk_strategy": "paragraph", "max_words": 300}}
 
         ``pipeline_config`` was the deprecated pipeline's stage vocabulary and is REFUSED.
         There is no translation between the two — path A's ``summarize`` stage was RAPTOR
@@ -273,7 +273,7 @@ class IngestService:
         if request.pipeline_config is not None:
             raise ValueError(
                 f"usetype {request.usetype!r} runs on the ingest queue, which takes "
-                "`options` (ingest option groups, e.g. {'structure': {'max_tokens': 300}}) "
+                "`options` (ingest option groups, e.g. {'structure': {'max_words': 300}}) "
                 "rather than `pipeline_config` (stage names). The two are not "
                 "translatable: the queue has no `summarize` stage to switch off, its "
                 "`summarize` task is what gives a container node its vectors."
@@ -419,7 +419,7 @@ class IngestService:
         registered text pipeline keep their synchronous behaviour unchanged: they run to
         completion inside the request and return a finished tree.
 
-        ``options`` are this request's overrides — ``{"structure": {"max_tokens": 60}}`` —
+        ``options`` are this request's overrides — ``{"structure": {"max_words": 60}}`` —
         over the task defaults and any profile ``jmfts_core.ingest_options`` registers for
         the format detected from the bytes. They are resolved BEFORE anything is created,
         so a misspelled option is
@@ -894,7 +894,7 @@ class IngestService:
         that the same bytes resolve to the same node and that a parameter change is handled
         by diffing `(task, fingerprint)` against `attempts` and enqueuing only the
         difference — "no re-parse, no duplicate tree". That diff is the NEXT step and does
-        not exist yet, so an upload that asks for `max_tokens: 30` against a node ingested
+        not exist yet, so an upload that asks for `max_words: 30` against a node ingested
         at 400 can be answered in exactly two honest ways: do the work, or say it was not
         done. Returning the node as though the options had been applied is the third one,
         and it is the kind of quiet wrong answer this codebase does not ship.
@@ -1297,7 +1297,9 @@ class IngestService:
         """
         db = self.session
         node = DocumentRepository(db).get(document_id)
-        if node is None:
+        # A node the caller may not read is the same 404 as no node: otherwise the counts
+        # distinguish "a document with work under it" from "no such document".
+        if node is None or not can_read(db, node):
             raise LookupError(f"Document {document_id} not found")
 
         counts = DocumentRepository(db).settle_frontier(document_id)

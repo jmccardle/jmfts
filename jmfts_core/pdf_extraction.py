@@ -260,6 +260,11 @@ class _PageResult:
 
     markdown: str
     blocks: list[dict] = field(default_factory=list)
+    #: ``{"index", "bbox", "start", "end", "rows", "cols"}`` per RENDERED table, in the
+    #: order they were emitted. The same span :attr:`blocks` carries for the table's segment,
+    #: plus which table it was and its shape. It is what lets ``extract:tables`` slice the
+    #: table out of the markdown byte for byte instead of rendering it a second time.
+    tables: list[dict] = field(default_factory=list)
     control_chars_removed: int = 0
     tables_found: int = 0
     table_errors: list[str] = field(default_factory=list)
@@ -406,24 +411,52 @@ def _process_page(
     extra pass is made over the page. See `_PageResult.blocks` for what that buys.
     """
     segments: list[tuple[str, tuple[float, float, float, float]]] = []
+    #: segment position -> (table index, rows, cols), for the segments that are tables.
+    table_segments: dict[int, tuple[int, int, int]] = {}
     result = _PageResult(markdown="")
 
     blocks = page.get_text("dict", flags=pymupdf.TEXTFLAGS_TEXT)["blocks"]
+
+    # EVERY RECTANGLE IS STORED IN THE ROTATED PAGE'S SPACE. `get_text` measures on the
+    # UNROTATED page, while `page.rect`, `rendering.page_geometry` and the clip `get_pixmap`
+    # takes are all the page as displayed. On a `/Rotate 90` page the two spaces barely
+    # overlap, so an anchor measured in one and cropped in the other renders a blank PNG
+    # (#38). `rotation_matrix` is the identity on an unrotated page, so this is a no-op
+    # everywhere else.
+    #
+    # IT IS READ HERE, BEFORE `find_tables`, and that order is load-bearing. On a rotated
+    # page `find_tables` de-rotates the page to analyse it and restores it with
+    # `set_mediabox`, which DELETES the CropBox (pymupdf/table.py `page_rotation_set0` /
+    # `page_rotation_reset`). A matrix read afterwards is the MediaBox's, and on a page whose
+    # CropBox is smaller every anchor lands off the page — so `extract_tables` would change
+    # where the prose's anchors point.
+    rotation = page.rotation_matrix
 
     found = _find_page_tables(page) if extract_tables else _PageTables()
     result.table_errors = found.errors
     result.tables_rejected = found.rejected
     result.tables_found = len(found.tables)
-    table_rects = [pymupdf.Rect(t.bbox) for t in found.tables]
+    # `find_tables` answers in the OTHER space. It de-rotates the page before it measures
+    # (pymupdf/table.py `page_rotation_set0`), so a table's bbox is already the displayed
+    # page's while every `get_text` rectangle above is the unrotated page's. They are brought
+    # into `get_text`'s space here, once, so that `_table_owner` compares like with like —
+    # compared across spaces no block is owned on a turned page and every cell is emitted
+    # twice — and so that the single `* rotation` below is right for every segment. Rotating
+    # a table's bbox as it came would turn it twice: blank paper at 90, off the page at
+    # 180 and 270.
+    unrotate = ~rotation
+    table_rects = [pymupdf.Rect(t.bbox) * unrotate for t in found.tables]
     # A table is rendered at most once even if several blocks belong to it.
     emitted = [False] * len(found.tables)
 
     def render(index: int) -> None:
         """Emit table ``index`` once, in the place of the first block it accounts for."""
         emitted[index] = True
-        md = _table_to_markdown(found.rows[index])
+        rows = found.rows[index]
+        md = _table_to_markdown(rows)
         if md:
-            segments.append((md, tuple(found.tables[index].bbox)))
+            table_segments[len(segments)] = (index, len(rows), len(rows[0]))
+            segments.append((md, tuple(table_rects[index])))
 
     for block in blocks:
         if block.get("type") != 0:  # only text blocks
@@ -473,18 +506,21 @@ def _process_page(
     # character, so accounting for it as two characters between segments is exact.
     pieces: list[str] = []
     cursor = 0
-    for text, bbox in segments:
+    for position, (text, bbox) in enumerate(segments):
         clean, removed = _CONTROL_CHARS.subn("", text)
         result.control_chars_removed += removed
         if pieces:
             cursor += 2  # the "\n\n" join
-        result.blocks.append(
-            {
-                "bbox": [round(value, 2) for value in bbox],
-                "start": cursor,
-                "end": cursor + len(clean),
-            }
-        )
+        displayed = pymupdf.Rect(bbox) * rotation
+        block = {
+            "bbox": [round(value, 2) for value in displayed],
+            "start": cursor,
+            "end": cursor + len(clean),
+        }
+        result.blocks.append(block)
+        if position in table_segments:
+            index, rows, cols = table_segments[position]
+            result.tables.append({"index": index, **block, "rows": rows, "cols": cols})
         pieces.append(clean)
         cursor += len(clean)
 
@@ -526,6 +562,12 @@ def pdf_to_markdown(
       give a node to. ``probe`` used to count raw ``find_tables()`` output and therefore
       reported the attention paper's three figure pages as pages with tables; they are
       figures drawn as ruled grids, and that answer was wrong.
+    * ``tables`` — ``{"page", "index", "bbox", "start", "end", "rows", "cols"}`` per rendered
+      table, in document order. ``markdown_text[start:end]`` is the table's markdown exactly
+      as it was written inline; ``rows`` counts the header row, so the slice has ``rows + 1``
+      lines (the separator). ``index`` is the table's position among the page's accepted
+      candidates. Unlike ``text_blocks`` this IS meant to be persisted: there are a few per
+      document, and ``extract:tables`` reads it to turn each inline table into a node.
     * ``table_failures`` — ``{"page": int, "error": str}`` per page whose tables could not
       be detected or extracted. Empty is the ordinary case, and it is a different fact
       from a document with no tables, which reports ``tables_found == 0`` and no failures.
@@ -538,7 +580,9 @@ def pdf_to_markdown(
     granularity of a paragraph rather than a page: ``{"page": int, "bbox": [x0, y0, x1, y1],
     "start": int, "end": int}`` per emitted markdown segment, in document order, with
     ``start``/``end`` being character offsets into ``markdown_text`` and ``bbox`` being the
-    rectangle in PDF points on ``page``. It is what makes a character offset in the markdown
+    rectangle in PDF points on ``page`` AS DISPLAYED — after ``/Rotate``, which is the space
+    ``rendering.page_geometry`` and ``/region`` read (#38); ``tables[*].bbox`` is in the same
+    space. It is what makes a character offset in the markdown
     invertible back into a place on a page, which is ``OFFICE_SPEC.md`` Part 5's anchor —
     see ``jmfts_core.citation_tasks``, which is the only consumer and which recomputes this
     from the blob rather than having it stored on the node.
@@ -574,6 +618,7 @@ def pdf_to_markdown(
         table_failures: list[dict] = []
         tables_rejected: list[dict] = []
         text_blocks: list[dict] = []
+        tables: list[dict] = []
         cursor = 0
         for page_number, page in enumerate(doc):
             # Sanitised per page and per segment, BEFORE the offsets are taken — see
@@ -590,6 +635,15 @@ def pdf_to_markdown(
             for rejection in result.tables_rejected:
                 tables_rejected.append({"page": page_number, **rejection})
             control_chars_removed += result.control_chars_removed
+            for table in result.tables:
+                tables.append(
+                    {
+                        **table,
+                        "page": page_number,
+                        "start": cursor + table["start"],
+                        "end": cursor + table["end"],
+                    }
+                )
             for block in result.blocks:
                 text_blocks.append(
                     {
@@ -608,6 +662,7 @@ def pdf_to_markdown(
             "control_chars_removed": control_chars_removed,
             "tables_found": tables_found,
             "pages_with_tables": pages_with_tables,
+            "tables": tables,
             "table_failures": table_failures,
             "tables_rejected": tables_rejected,
             "page_offsets": page_offsets,

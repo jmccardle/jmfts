@@ -39,8 +39,10 @@ from jmfts_core.ingest_tasks import (
     OP_GT,
     OP_LT,
     PATTERNS_NOT_PROBED,
+    PATTERN_MEASURED_BY,
     TASK_ANCHOR_SOURCE,
     TASK_EXTRACT_FACTS,
+    TASK_EXTRACT_TABLES,
     TASK_EXTRACT_TEXT,
     TASK_RENDER_PDF,
     TASK_ROWS,
@@ -111,8 +113,14 @@ class TestTheGuardVocabulary:
     def test_the_two_unprobed_names_are_the_two_expected(self):
         """Named rather than counted, because they are two different facts. One is planned
         and unbuilt (OFFICE_SPEC Part 2); the other is written by `extract:text`, which
-        means `extract:tables` is unreachable until something re-plans a node."""
+        re-plans the rows gated on it once it has measured it (`plan_after_measurement`) —
+        so `extract:tables` is decided after extraction rather than at probe."""
         assert sorted(PATTERNS_NOT_PROBED) == ["has_heading_styles", "pages_with_tables"]
+
+    def test_a_measured_pattern_names_its_measurer(self):
+        """The machine-readable half of the prose above: who re-plans the rows."""
+        assert PATTERN_MEASURED_BY == {"pages_with_tables": TASK_EXTRACT_TEXT}
+        assert set(PATTERN_MEASURED_BY) <= set(PATTERNS_NOT_PROBED)
 
     def test_pages_with_tables_is_typed_as_the_list_it_is(self):
         """The case that proves a defaulted type wrong. `evidence.pattern_type` calls it a
@@ -163,6 +171,23 @@ class TestTheTermAudit:
         rows = _replace(TASK_EXTRACT_TEXT, requires=(term(HAS_TEXT_LAYER, OP_GT, True),))
         check = self._with(rows, monkeypatch)
         with pytest.raises(ValueError, match="the same kind of thing|are for counts"):
+            check()
+
+    def test_a_measured_pattern_row_not_after_its_measurer_is_refused(self, monkeypatch):
+        """Rule 6. Without `after` on its measurer the row could be decided before the
+        measurement landed, and the re-plan would never see it."""
+        check = self._with(_replace(TASK_EXTRACT_TABLES, after=()), monkeypatch)
+        with pytest.raises(ValueError, match="re-plans it at the file node"):
+            check()
+
+    def test_a_measured_pattern_row_ordered_after_anything_else_is_refused(self, monkeypatch):
+        """Rule 6's other half: the re-plan is a batch of its own, so an `after` naming a
+        task probe enqueued could not be resolved by `enqueue_batch`."""
+        rows = _replace(
+            TASK_EXTRACT_TABLES, after=(TASK_EXTRACT_TEXT,), after_any=(TASK_STRUCTURE_INFERRED,)
+        )
+        check = self._with(rows, monkeypatch)
+        with pytest.raises(ValueError, match="re-plans it at the file node"):
             check()
 
     def test_an_option_nobody_declares_is_refused(self, monkeypatch):

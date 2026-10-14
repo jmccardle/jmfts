@@ -1,6 +1,6 @@
 # JMFTS Roadmap
 
-Last updated: 2026-09-17. **This file is open work; `CHANGELOG.md` is what shipped.** Where
+Last updated: 2026-10-13 (the Status section and known gap 12 only). **This file is open work; `CHANGELOG.md` is what shipped.** Where
 the two would say the same thing, this one says nothing and points there.
 
 The 2026-09-17 pass re-read one section — the job system — against `master` at `8e7ccba`, and
@@ -26,10 +26,22 @@ internal file at its own date and has not been re-checked.
 
 ## Status
 
+**Read 2026-10-13, and it supersedes the two struck rows below.** Released: **0.6.2**
+(2026-10-12; PyPI carries `jmfts`, `jmfts-client` and `jmfts-web`, all three, on one tag).
+`master` is 0.6.2 plus the 0.7.0 work merged on 2026-10-13, none of it tagged: the
+`max_tokens` → `max_words` rename with `sentence_window` and the per-section chunk ceiling,
+conversation turns cut by the structure options, `extract:tables`, cells anchors on
+spreadsheet nodes, the ten subtree-access gates of known gap 12, and the `input_tokens`
+evidence fix. **Next: 0.7.0.** Headline: the standalone Vue console (`jmfts-ui`, issue #11),
+which sits on its own branch `worktree-vue-frontend` until its Search, Ingest and document
+views exist, and office documents read, cited and previewed (issue #29). The version rule
+is unchanged: three distributions, one number, one tag. Open work is the 0.7.0 milestone
+on the issue tracker; the numbered gaps below are the long-lived ones.
+
 | | |
 |---|---|
-| Released | **0.5.1**, 2026-09-13. `master` is the tag; `jmfts` and `jmfts-client` are both on PyPI |
-| Next | **0.6.0** — `docs/SPRINT_0_6_0.md`. Headline: a **web front end**. Seven blocks, thirty-six steps. Gate M5 closed 2026-09-15 and step 8 answered the same day (`fadbcb4`), so M6 — `CHANGELOG.md`, the bump, the tag — is what is left |
+| ~~Released~~ | ~~**0.5.1**, 2026-09-13. `master` is the tag; `jmfts` and `jmfts-client` are both on PyPI~~ |
+| ~~Next~~ | ~~**0.6.0** — `docs/SPRINT_0_6_0.md`. Headline: a **web front end**. Seven blocks, thirty-six steps. Gate M5 closed 2026-09-15 and step 8 answered the same day (`fadbcb4`), so M6 — `CHANGELOG.md`, the bump, the tag — is what is left~~ |
 | Version rule | The two distributions release in lockstep: one number, two wheels, one tag |
 | Changing at 0.6.0 | A **third** distribution, `jmfts-web`, joins the lockstep. `jmfts[web]` depends on it |
 
@@ -186,19 +198,47 @@ one-off one, which is the difference 0.6.0 step 3 was for.
     the first run of the audit 0.6.0 step 3 landed. This entry is a pointer and not a copy:
     each one is written out as an `OPEN GAP` string in
     `tests/test_expose_principal_audit.py`, so the audit reports them and the test does not go
-    green by pretending otherwise. Five are `IndexService` verbs, in a service that reaches
+    green by pretending otherwise. ~~Five are `IndexService` verbs, in a service that reaches
     `jmfts_core.access` nowhere at all; one of those rebuilds BM25 postings for every document
     under an index's roots, and retrieval gates the postings again on the way out, so that one
-    is unauthorised **work** rather than disclosure. `TemplateService.get_template` and
+    is unauthorised **work** rather than disclosure.~~ **CLOSED 2026-10-12:** the gates live in
+    `SearchRepository` — `index_document` and add/remove root take `require_write` (hidden
+    reads as missing, read-only is a 403), `get_index_roots` drops roots the caller cannot
+    read, and `refresh_index` takes write on every root before clearing anything; held by
+    `tests/test_access_index_verbs.py`. Nine verbs remained at that point, and four after
+    these five closed. **Residual, read 2026-10-13:** `refresh_index` checks write on each ROOT,
+    not on what lies under it, so a caller with no grants on a private access-control root
+    nested under an open root can refresh and learns `total_docs_found` including documents it
+    cannot read. Count only; retrieval still filters postings, and it predates this change.
+    ~~`TemplateService.get_template` and
     `render_template` read a template by `session.get(Document, template_id)` with no
-    `can_read`, and a template IS a document. ~~`DocumentService.embed_document` reaches
+    `can_read`, and a template IS a document.~~ **CLOSED 2026-10-13:** both read the
+    template through `can_read`, so a template the caller may not read is "Template not
+    found", held by `tests/test_access_template_reads.py`. ~~`TemplateService.list_templates`
+    ran a raw `db.query(Document)`, so `GET /templates` returned the body of a template
+    that `GET /templates/{id}` answered 404; it reached `require_add_child` through
+    `_get_container_id` and so read as scoped.~~ **CLOSED 2026-10-13:** the query takes
+    `readable_filter`, held over HTTP by the same file. ~~`DocumentService.embed_document` reaches
     `DocumentRepository.embed_document` rather than `.update`, so it misses the
     `require_write` at `repositories/document.py:401`.~~ **CLOSED 2026-10-12 (0.6.2):**
     `DocumentRepository.embed_document` now takes `require_write` (404 for a hidden
     document, 403 for a read-only one), held by `tests/test_access_embed_write.py`; nine
-    verbs remain. `IngestService.file_frontier`
+    verbs remain. ~~`IngestService.file_frontier`
     distinguishes "a document with work under it" from "no such document" for a caller that
-    may read neither. The eleventh gap the audit found became step 35 and is closed.
+    may read neither.~~ **CLOSED 2026-10-13:** it takes `can_read` on the node, so a hidden
+    node is the same 404 as a missing one, held by `tests/test_access_file_frontier.py`.
+    **RESIDUAL, recorded 2026-10-13, not closed:** `nodes_total` and the per-state counts
+    still include descendants the caller cannot read, so a governed caller learns the size
+    of a hidden subtree under a node it may read. The audit cannot list it, because the verb
+    reaches a gate; closing it means counting through `readable_filter`, which is a design
+    decision about what "the frontier" means to a partial reader and not a one-line patch.
+    ~~`OntologyService.create_binding`, listed by the audit for the document reference in a
+    `parent_id` / `document_ids` scope~~ **CLOSED 2026-10-13:** it now refuses a governed
+    caller naming a document it cannot read (404, the same as a missing id;
+    `tests/test_access_binding_scope.py`).
+    **All ten are closed as of 2026-10-13**, the `IndexService` five and the four above
+    landing together for 0.7.0; the two RESIDUAL counts (`refresh_index`, `file_frontier`)
+    stay open. The eleventh gap the audit found became step 35 and is closed.
     **Each is a candidate 0.7.0 step and none is a 0.6.0 step**: eleven is more than Block A
     can absorb without becoming a different sprint.
 

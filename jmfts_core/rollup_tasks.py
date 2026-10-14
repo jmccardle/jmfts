@@ -97,7 +97,7 @@ from jmfts_core.ingest_tasks import (
     collection_option_layers,
     register_task_handler,
 )
-from jmfts_core.llm_client import complete_sync
+from jmfts_core.llm_client import LlmCompletion, complete_sync
 from jmfts_core.models.document import (
     SETTLED_IN_FLIGHT,
     SUMMARIZES_LINK_TYPE,
@@ -269,8 +269,20 @@ class IngestRollupPlanner:
         # Offered SECOND, ahead of the two rungs that need a model or an LLM, for the reason
         # `index:bm25` is offered first: it needs neither, and ordering it behind `summarize`
         # would make a citation wait on an endpoint that has nothing to do with it.
+        #
+        # Gated on the format as well as on the rendition, because `run_anchor_render`
+        # recovers a rectangle by aligning an OOXML package's own blocks and refuses every
+        # other source. An xlsx has a rendition (`RENDITION_SOURCE_PATTERN` paginates it) and
+        # no reader in `OOXML_READERS`, so offering it here was a guaranteed failed task.
+        # Imported here: `citation_tasks` reaches this module through `ingest_tasks`'s
+        # registration imports, so a module-level import of it is circular.
+        from jmfts_core.citation_tasks import OOXML_READERS
+
         rendition = RenditionRepository(session).get(node.id, KIND_PDF)
-        if rendition is not None:
+        if (
+            rendition is not None
+            and evidence_value(session, node.id, "extraction.source") in OOXML_READERS
+        ):
             spec = _anchor_render_spec(rendition.content_hash, len(children))
             if (TASK_ANCHOR_RENDER, param_fingerprint(spec.params)) not in attempted:
                 return (spec,)
@@ -963,7 +975,8 @@ def run_summarize_llm(session: Session, task: TaskQueue) -> TaskOutcome:
         )
 
     model = (task.params or {}).get("llm_model") or settings.effective_llm_model
-    summary = summarize_span(text, settings, model)
+    completion = summarize_span(text, settings, model)
+    summary = completion.text
     summary_fit = service.check_fit(summary, with_tokens=False, prefix=EMBED_PREFIX)
     if summary_fit.truncated:
         # The model returned something longer than the window it was called to get under.
@@ -984,7 +997,13 @@ def run_summarize_llm(session: Session, task: TaskQueue) -> TaskOutcome:
         detail={
             "tokens": summary_fit.token_count,
             "window": summary_fit.limit,
-            "input_tokens": fit.token_count,
+            # What the LLM was sent, counted by the LLM (Forgejo john/jmfts #7). This key
+            # used to hold `fit.token_count` — the EMBEDDING tokenizer's count of the same
+            # text, which is a different vocabulary and was never the number the model
+            # billed or saw. That measurement is still here, under its own name, because it
+            # is why the LLM was called at all.
+            "input_tokens": llm_input_tokens(completion),
+            "input_embedding_tokens": fit.token_count,
             "input_characters": len(text),
             "model": model,
         },
@@ -1060,8 +1079,33 @@ def store_effective_content(
     return TaskOutcome(detail={"method": method, "source_children": children, **detail})
 
 
-def summarize_span(text: str, settings: Settings, model: str) -> str:
+def llm_input_tokens(completion: LlmCompletion) -> Optional[int]:
+    """The prompt size the endpoint reported for ``completion``, or ``None`` if it did not.
+
+    Recorded as ``input_tokens + cache_read_tokens + cache_write_tokens`` of the completion's
+    usage. τ computes ``input_tokens`` as ``prompt_tokens`` MINUS the cached and cache-write
+    spans, so ``input_tokens`` alone is only the uncached remainder: a prompt of 1234 tokens
+    with 1000 served from cache would record 234, and a full cache hit would record nothing.
+    The three partition the prompt, so their sum is the ``prompt_tokens`` the server sent.
+
+    τ's ``Usage`` defaults every counter to 0, so a server that sends no ``usage`` block
+    reads the same as one reporting all zeros; τ keeps no flag that tells them apart. No
+    request this module makes has an empty prompt — the system prompt alone is tokens — so a
+    sum of 0 can only mean "not reported", and recording it would be a measurement nobody
+    made. That is why 0 maps to ``None``.
+    """
+    usage = completion.usage
+    count = sum(
+        usage.get(key) or 0 for key in ("input_tokens", "cache_read_tokens", "cache_write_tokens")
+    )
+    return count if count > 0 else None
+
+
+def summarize_span(text: str, settings: Settings, model: str) -> LlmCompletion:
     """One LLM call over a contiguous span, in document order.
+
+    Returns the whole :class:`~jmfts_core.llm_client.LlmCompletion`, not just its text: the
+    caller records the endpoint's own input-token count, which only the usage carries.
 
     Deliberately not ``summarization._llm_summarize``. That one is written for a RAPTOR
     cluster — its prompt says the passages "belong to the same topic cluster", which is
@@ -1092,7 +1136,7 @@ def summarize_span(text: str, settings: Settings, model: str) -> str:
     if settings.summarization_disable_thinking:
         extra_body["chat_template_kwargs"] = {"enable_thinking": False}
 
-    result = complete_sync(
+    return complete_sync(
         settings=settings,
         base_url=base_url,
         model=model,
@@ -1104,7 +1148,6 @@ def summarize_span(text: str, settings: Settings, model: str) -> str:
         temperature=settings.summarization_temperature,
         extra_body=extra_body,
     )
-    return result.text
 
 
 # ---------------------------------------------------------------------------

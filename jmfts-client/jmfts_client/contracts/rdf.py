@@ -161,9 +161,11 @@ class OntologyImportResponse(BaseModel):
     unsupported_terms: list[str] = Field(
         default_factory=list,
         description=(
-            "SHACL and OWL terms present in the Turtle that 5.1's subset does not read. The "
-            "source is stored whole, so nothing is lost — but a constraint listed here is "
-            "NOT enforced, and a caller that assumed it was needs to know."
+            "SHACL and OWL terms present in the Turtle that the parsed shape digest (5.1's "
+            "subset) does not summarize. The source is stored whole and validation and "
+            "derivation run over it, so a SHACL Core constraint listed here (e.g. sh:pattern) "
+            "IS enforced on a bound shape and sh:rule IS run by derive; OWL axioms are not "
+            "acted on. Read source_turtle for what a listed term does."
         ),
     )
 

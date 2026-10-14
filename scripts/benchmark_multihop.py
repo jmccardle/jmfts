@@ -115,7 +115,7 @@ def chunk_body(text: str) -> list[str]:
     chunks = jmfts_chunk_text(
         text,
         strategy=ChunkStrategy.token_count,
-        max_tokens=CHUNK_SIZE,
+        max_words=CHUNK_SIZE,
         overlap=CHUNK_OVERLAP,
         fits=get_embedding_service().fits_token_window,
     )

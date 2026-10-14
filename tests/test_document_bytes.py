@@ -52,6 +52,7 @@ from jmfts_core.citation_tasks import UNRESOLVED_NO_SPAN, UNRESOLVED_REASON
 from jmfts_core.database import get_db
 from jmfts_core.models.document import Document, USETYPE_CHUNK
 from jmfts_core.models.principal import AccessGrant, Principal as PrincipalModel
+from jmfts_core.pdf_extraction import pdf_to_markdown
 from jmfts_core.principal_context import CurrentPrincipal, reset_principal, set_principal
 from jmfts_core.rendering import (
     DPI_MAX,
@@ -208,6 +209,28 @@ class TestParseBbox:
         with pytest.raises(BadRenderRequest, match="not four numbers"):
             parse_bbox("a,b,c,d")
 
+    @pytest.mark.parametrize("raw", ["nan,0,100,100", "0,inf,100,100", "0,0,-Infinity,100"])
+    def test_non_finite_values_are_refused_rather_than_rendered(self, raw):
+        """`float()` reads "nan" and "inf" as numbers, and neither is a coordinate."""
+        with pytest.raises(BadRenderRequest, match="non-finite"):
+            parse_bbox(raw)
+
+    @pytest.mark.parametrize("raw", ["1e39,0,100,100", "-1e308,-1e308,1e308,1e308"])
+    def test_finite_values_beyond_single_precision_are_refused(self, raw):
+        """Finite, but past what ``pymupdf.Rect`` can hold: it raised ``OverflowError``."""
+        with pytest.raises(BadRenderRequest, match="3.4e"):
+            parse_bbox(raw)
+
+
+class TestRenderOpenApi:
+    """The statuses the render verbs really answer with are in the document, not just 200."""
+
+    @pytest.mark.parametrize("verb", ["image", "region"])
+    def test_the_refusals_are_declared(self, verb):
+        operation = app.openapi()["paths"][f"/documents/{{document_id}}/{verb}"]["get"]
+        assert {"200", "400", "404", "409", "413"} <= set(operation["responses"])
+        assert "RenderTooLarge" in operation["responses"]["413"]["description"]
+
 
 class TestRenderBounds:
     def test_a_page_renders_at_the_density_asked_for(self, pdf_bytes):
@@ -296,6 +319,104 @@ class TestRenderBounds:
         locked = doc.tobytes(encryption=pymupdf.PDF_ENCRYPT_AES_256, user_pw="secret")
         with pytest.raises(UnreadablePdf, match="encrypted"):
             render_page(locked, page=0, dpi=72)
+
+    def test_an_anchor_that_crops_blank_paper_is_refused_rather_than_answered_blank(
+        self, pdf_bytes
+    ):
+        """The bottom margin of the fixture holds nothing. A stored anchor is written from
+        where words are, so a 200 with an all-white PNG would be a confident picture of a
+        passage that is not in it. On an unrotated page nothing is blamed on #38."""
+        with pytest.raises(BadRenderRequest, match="crops blank paper") as refused:
+            render_page(pdf_bytes, page=0, dpi=72, clip=(50, 700, 300, 780), anchor=True)
+        assert "#38" not in str(refused.value)
+
+    def test_a_named_rectangle_of_blank_paper_is_a_picture_of_the_margin(self, pdf_bytes):
+        """A caller who names a margin gets the margin. Only a STORED anchor is refused."""
+        assert _png_size(render_page(pdf_bytes, page=0, dpi=72, clip=(50, 700, 300, 780)))
+
+    def test_an_anchor_inside_a_filled_box_is_one_colour_and_still_answered(self):
+        """One colour is not "no content": inside a filled box, a 1x1-point crop, or the
+        inside of a glyph at 150 dpi are all correct pictures of one colour. Only white
+        paper is refused, so this is a 200 even when it is an anchor."""
+        doc = pymupdf.open()
+        page = doc.new_page(width=LETTER_PT[0], height=LETTER_PT[1])
+        page.draw_rect(pymupdf.Rect(300, 300, 500, 500), color=(0, 0, 1), fill=(0, 0, 1))
+        data = doc.tobytes()
+        for anchor in (False, True):
+            png = render_page(data, page=0, dpi=72, clip=(350, 350, 450, 450), anchor=anchor)
+            pixmap = pymupdf.Pixmap(png)
+            assert pixmap.samples[:3] == b"\x00\x00\xff"
+            assert pixmap.samples == pixmap.samples[:3] * (pixmap.width * pixmap.height)
+
+    def test_a_large_blank_crop_is_refused_in_bounded_time(self):
+        """The blank-paper check is one ``bytes`` comparison, not a loop per sample.
+
+        Letter at 300 dpi is 8.4 Mpx. ``Pixmap.is_unicolor`` walks it in Python and took 40
+        seconds off-line; rendering it takes a fraction of a second. Five seconds is
+        generous for the render and an order of magnitude short of the loop.
+        """
+        import time
+
+        doc = pymupdf.open()
+        doc.new_page(width=LETTER_PT[0], height=LETTER_PT[1])
+        started = time.monotonic()
+        with pytest.raises(BadRenderRequest):
+            render_page(doc.tobytes(), page=0, dpi=300, clip=(0, 0, *LETTER_PT), anchor=True)
+        assert time.monotonic() - started < 5
+
+    def test_a_whole_blank_page_still_renders(self):
+        """Only a CROP is refused for being blank. A page is the document's to leave empty."""
+        doc = pymupdf.open()
+        doc.new_page(width=LETTER_PT[0], height=LETTER_PT[1])
+        assert _png_size(render_page(doc.tobytes(), page=0, dpi=72)) == (612, 792)
+
+
+# ---------------------------------------------------------------------------
+# Rotated pages (#38) — the rectangle written at ingest is the one the crop reads
+# ---------------------------------------------------------------------------
+
+
+def _rotated_pdf(rotation: int) -> bytes:
+    """One Letter page with a passage on it, carrying ``/Rotate rotation``.
+
+    The text is written before the rotation is set, so its content-stream coordinates are
+    the unrotated page's, as a scanner or a landscape export writes them.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=LETTER_PT[0], height=LETTER_PT[1])
+    page.insert_text((72, 100), "A passage on a turned page.", fontsize=20)
+    page.set_rotation(rotation)
+    return doc.tobytes()
+
+
+class TestRotatedPages:
+    @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+    def test_the_extracted_rectangle_crops_to_the_passage(self, rotation):
+        """Extraction and rendering agree on the coordinate space at every rotation: the
+        rectangle ``pdf_to_markdown`` emits is on the displayed page and renders the words,
+        not blank paper."""
+        data = _rotated_pdf(rotation)
+        _, meta = pdf_to_markdown(data)
+        (block,) = meta["text_blocks"]
+        doc = pymupdf.open(stream=data, filetype="pdf")
+        page = doc[0]
+        box = pymupdf.Rect(block["bbox"])
+        assert box in page.rect + (-1, -1, 1, 1)
+        assert render_page(data, page=0, dpi=72, clip=tuple(block["bbox"]))
+        # Back through the inverse, the rectangle is still the passage's own.
+        assert "turned page" in page.get_textbox(box * page.derotation_matrix)
+
+    def test_an_unrotated_space_anchor_on_a_rotated_page_is_refused_by_name(self):
+        """What an anchor written before #38 holds: the passage's rectangle on the page as
+        stored, which on a 90-degree page is blank paper on the page as displayed. There is
+        no marker on such an anchor, so the refusal says how to re-derive one."""
+        data = _rotated_pdf(90)
+        stale = (72.0, 78.5, 360.0, 106.0)
+        with pytest.raises(BadRenderRequest, match="rotated 90 degrees") as refused:
+            render_page(data, page=0, dpi=72, clip=stale, anchor=True)
+        message = str(refused.value)
+        assert "written before #38 was fixed" in message
+        assert "`citation`" in message and "`extract:tables`" in message
 
 
 # ---------------------------------------------------------------------------
@@ -510,6 +631,16 @@ class TestRegion:
         assert resp.headers["content-type"] == "image/png"
         assert _png_size(resp.content) == (200, 100)
 
+    def test_a_named_rectangle_of_blank_margin_is_answered(self, client_with_db, pdf_node):
+        """Only a stored anchor that crops blank paper is refused (#38). A margin a caller
+        names is a correct picture of a margin, through the route as well as underneath."""
+        resp = client_with_db.get(
+            f"/documents/{pdf_node.id}/region",
+            params={"page": 0, "bbox": "50,700,300,780", "dpi": 72},
+        )
+        assert resp.status_code == 200
+        assert _png_size(resp.content) == (250, 80)
+
     def test_the_nodes_own_anchor_crops_to_the_passage(self, db_session, pdf_node):
         """``anchor=true`` is the form a client has after a search hit: no coordinates to
         carry, because the node already knows where it is."""
@@ -564,6 +695,16 @@ class TestRegion:
         assert resp.status_code == 400
         assert "four" in resp.json()["detail"]
 
+    @pytest.mark.parametrize("bbox", ["1e39,0,100,100", "-1e308,-1e308,1e308,1e308"])
+    def test_a_coordinate_past_single_precision_is_a_400_not_a_500(
+        self, client_with_db, pdf_node, bbox
+    ):
+        resp = client_with_db.get(
+            f"/documents/{pdf_node.id}/region", params={"page": 0, "bbox": bbox}
+        )
+        assert resp.status_code == 400
+        assert "3.4e+38" in resp.json()["detail"]
+
     def test_a_rectangle_off_the_page_names_the_media_box(self, client_with_db, pdf_node):
         resp = client_with_db.get(
             f"/documents/{pdf_node.id}/region", params={"page": 0, "bbox": "5000,5000,5100,5100"}
@@ -575,9 +716,11 @@ class TestRegion:
         self, db_session, client_with_db, pdf_node
     ):
         """``docs/SPRINT_0_6_0.md`` step 22: for a sheet, JSON cells are the better answer
-        than a picture of cells, and ``GET /documents/{id}/cells`` already serves them. The
-        409 carries that route, because an error that names the fix costs one call instead of
-        a search."""
+        than a picture of cells, and ``GET /documents/{id}/cells`` serves them — on the SHEET
+        node, which refuses every other usetype (#29). This chunk has a cells anchor and no
+        worksheet above it, so there is no ``/cells`` call to name, and naming its own id
+        would name a 409. It is still a 409 that keeps the ref. The case with a sheet above
+        the node, where the route IS named, is ``tests/test_sheet_records.py``."""
         chunk, _ = _anchored_chunk(db_session, pdf_node.id)
         evidence = EvidenceRepository(db_session)
         evidence.delete(chunk.id, ANCHOR_ROW)
@@ -588,7 +731,8 @@ class TestRegion:
         assert resp.status_code == 409
         detail = resp.json()["detail"]
         assert "B4:H120" in detail
-        assert f"/documents/{chunk.id}/cells" in detail
+        assert "no worksheet node" in detail
+        assert f"/documents/{chunk.id}/cells" not in detail
 
     def test_a_character_span_has_no_geometry_and_says_so(self, db_session, pdf_node):
         """Same treatment, different absence: a range in text has no rectangle on any page

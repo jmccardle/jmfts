@@ -150,10 +150,12 @@ class TestTheScopeVocabulary:
         `sheet_tasks._write_table` sets `with_tokens` false on its queue row rather than the
         row naming a second value. The cross-product widens each time and still costs
         nothing: `profile:sheet` writes no cell and no table, and a row only fires for a
-        child that exists.
+        child that exists. SIX RULES AND STILL FIVE KINDS since `extract:tables` landed: a
+        PDF's inline tables become `table` leaves too, the same usetype `extract:sheet`
+        writes, so the rule half widened and the usetype half did not.
         """
         scope = _row(TASK_EMBED).scope
-        assert len(scope.produced_by) == 5 and len(scope.usetypes) == 5
+        assert len(scope.produced_by) == 6 and len(scope.usetypes) == 5
         assert scope.matches(TASK_STRUCTURE_CONVERSATION, USETYPE_CHUNK)
         assert scope.matches(TASK_EXTRACT_SHEET, USETYPE_RECORD)
         assert scope.matches(TASK_EXTRACT_SHEET, USETYPE_TABLE)

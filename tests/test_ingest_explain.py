@@ -106,7 +106,7 @@ AGREEMENT_GRID = [
     ("unknown", {"has_text_layer": True, "has_images": True}),
 ]
 
-OPTIONS_GRID = [None, {"structure": {"max_tokens": 60}}]
+OPTIONS_GRID = [None, {"structure": {"max_words": 60}}]
 
 
 def _by_task(plan) -> dict:
@@ -320,11 +320,42 @@ class TestConditionalAnswer:
     def test_a_task_with_no_handler_is_decided_without_patterns(self):
         """Whether or not the condition fires, an unimplemented task is not enqueued —
         so it is reported as decided rather than as conditional."""
-        tasks = _by_task(explain_plan("pdf"))
-        for task_type in (TASK_EXTRACT_TABLES, TASK_EXTRACT_IMAGES):
-            assert tasks[task_type].outcome == OUTCOME_DEFERRED
-            assert tasks[task_type].if_condition_holds is None
-            assert tasks[task_type].reason == DEFERRED_REASON[task_type]
+        task = _by_task(explain_plan("pdf"))[TASK_EXTRACT_IMAGES]
+        assert task.outcome == OUTCOME_DEFERRED
+        assert task.if_condition_holds is None
+        assert task.reason == DEFERRED_REASON[TASK_EXTRACT_IMAGES]
+
+    def test_tables_are_conditional_now_that_they_have_a_handler(self):
+        """`extract:tables` was the other half of the test above until its handler landed.
+        With nothing measured it is conditional like any other row; it has no deferral
+        reason any more."""
+        task = _by_task(explain_plan("pdf"))[TASK_EXTRACT_TABLES]
+        assert task.outcome == OUTCOME_CONDITIONAL
+        assert task.if_condition_holds == OUTCOME_ENQUEUED
+        assert task.requires == ("has_text_layer", "pages_with_tables")
+        assert task.after == (TASK_EXTRACT_TEXT,)
+        assert TASK_EXTRACT_TABLES not in DEFERRED_REASON
+
+    def test_supplied_tables_are_enqueued(self):
+        """A caller pasting back a node's patterns after extraction gets the answer the
+        re-plan gives: the row runs."""
+        patterns = {**PROBE_ONLY_PDF_PATTERNS, "pages_with_tables": [2]}
+        task = _by_task(explain_plan("pdf", None, patterns))[TASK_EXTRACT_TABLES]
+        assert task.outcome == OUTCOME_ENQUEUED
+
+    def test_probe_only_tables_name_the_task_that_decides_them(self):
+        """At probe time the row is not applicable, as the probe-time plan records it — and
+        the reason says who measures the pattern and re-plans the row, so it does not read
+        as "nothing will ever happen". The outcome stays `not_applicable` rather than
+        `conditional` because EXPLAIN agrees with `plan_after_probe` by construction, and
+        for a `.pptx` (whose `extract:text` measures no tables) "conditional" would be
+        wrong."""
+        task = _by_task(explain_plan("pdf", None, PROBE_ONLY_PDF_PATTERNS))[TASK_EXTRACT_TABLES]
+        assert task.outcome == OUTCOME_NOT_APPLICABLE
+        assert task.reason == (
+            "patterns.pages_with_tables was not measured; extract:text measures it and "
+            "re-plans extract:tables"
+        )
 
     def test_if_condition_holds_is_set_only_on_conditional_tasks(self):
         for plan in (explain_plan("pdf"), explain_plan("pptx"), explain_plan("zip")):
@@ -496,12 +527,12 @@ class TestOptions:
     def test_overrides_reach_the_structure_rows_params(self):
         plan = explain_plan(
             "pdf",
-            options={"structure": {"max_tokens": 60}},
+            options={"structure": {"max_words": 60}},
             patterns={"has_text_layer": True, "has_outline": True},
         )
-        assert plan.options["structure"]["max_tokens"] == 60
+        assert plan.options["structure"]["max_words"] == 60
         tasks = _by_task(plan)
-        assert tasks[TASK_STRUCTURE_DECLARED].params["max_tokens"] == 60
+        assert tasks[TASK_STRUCTURE_DECLARED].params["max_words"] == 60
         # ...and the rest of the group is still complete, not a diff.
         assert (
             tasks[TASK_STRUCTURE_DECLARED].params["chunk_strategy"]
@@ -513,22 +544,22 @@ class TestOptions:
 
     def test_params_are_reported_even_for_a_row_that_will_not_run(self):
         """What the queue row WOULD carry is part of the answer either way."""
-        tasks = _by_task(explain_plan("epub", options={"structure": {"max_tokens": 60}}))
+        tasks = _by_task(explain_plan("epub", options={"structure": {"max_words": 60}}))
         assert tasks[TASK_STRUCTURE_DECLARED].outcome == OUTCOME_NOT_APPLICABLE
-        assert tasks[TASK_STRUCTURE_DECLARED].params["max_tokens"] == 60
+        assert tasks[TASK_STRUCTURE_DECLARED].params["max_words"] == 60
 
     def test_params_are_copies_not_shared_state(self):
         plan = explain_plan("pdf", patterns={"has_text_layer": True})
         tasks = _by_task(plan)
-        tasks[TASK_STRUCTURE_INFERRED].params["max_tokens"] = 9999
-        assert plan.options["structure"]["max_tokens"] == STRUCTURE_CHUNK_PARAMS["max_tokens"]
+        tasks[TASK_STRUCTURE_INFERRED].params["max_words"] = 9999
+        assert plan.options["structure"]["max_words"] == STRUCTURE_CHUNK_PARAMS["max_words"]
 
     @pytest.mark.parametrize(
         "options,message",
         [
             ({"structure": {"max_token": 60}}, "unknown option structure.max_token"),
-            ({"chunking": {"max_tokens": 60}}, "unknown option group 'chunking'"),
-            ({"structure": {"max_tokens": 0}}, "expected a positive integer"),
+            ({"chunking": {"max_words": 60}}, "unknown option group 'chunking'"),
+            ({"structure": {"max_words": 0}}, "expected a positive integer"),
             ({"structure": {"chunk_strategy": "vibes"}}, "expected one of"),
         ],
     )
@@ -571,7 +602,7 @@ class TestExplainEndpoint:
     def test_the_route_returns_what_the_in_process_call_returns(self, client_with_db):
         body = {
             "format": "pdf",
-            "options": {"structure": {"max_tokens": 60}},
+            "options": {"structure": {"max_words": 60}},
             "patterns": REAL_PDF_PATTERNS,
         }
         response = client_with_db.post("/ingest/explain", json=body)

@@ -49,7 +49,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
+
+from jmfts_client.contracts.attempt import param_fingerprint
 
 from jmfts_core.atoms import (
     COST_CPU,
@@ -74,10 +77,16 @@ from jmfts_core.ingest_tasks import (
     TASK_STRUCTURE_INFERRED,
     Frontier,
     TaskOutcome,
+    _plan_inputs,
+    _skipped_record,
+    _split_by_handler,
     enqueue_frontier,
+    measured_patterns,
+    plan_after_measurement,
     plan_frontier,
     register_task_handler,
 )
+from jmfts_core.settling import enqueue_batch
 from jmfts_core.models.document import (
     Document,
     SETTLED_IN_FLIGHT,
@@ -102,6 +111,7 @@ from jmfts_core.structural_splitting import (
     SectionNode,
     find_headings,
     nest,
+    section_ceiling,
     split_on_headings,
     split_on_outline,
 )
@@ -249,6 +259,10 @@ def _extract_pdf(data: bytes) -> Extracted:
     ``probe`` does not measure it (``jmfts_core.probe._probe_pdf``). A pattern that lived
     only in the attempt log would be a measurement nothing could plan from.
 
+    ``tables`` is in the record beside it: the span of each table the markdown holds, which
+    ``extract:tables`` slices into nodes. A few entries per document, so the argument
+    ``pdf_to_markdown`` makes against persisting ``text_blocks`` does not apply to it.
+
     ``table_failures`` and ``tables_rejected`` go to the DETAIL, because they are the
     attempt's own account of what it could not do — 3.4's business, not a later task's
     input. Without them the reporting `pdf_to_markdown` performs would stop at this
@@ -264,6 +278,8 @@ def _extract_pdf(data: bytes) -> Extracted:
             "page_offsets": meta["page_offsets"],
             "control_chars_removed": meta["control_chars_removed"],
             "pages_with_tables": meta["pages_with_tables"],
+            "tables_found": meta["tables_found"],
+            "tables": meta["tables"],
             "toc": meta["toc"],
         },
         detail={
@@ -539,6 +555,9 @@ def run_extract_text(session: Session, task: TaskQueue) -> TaskOutcome:
     extraction = {
         "source": extracted.source,
         "characters": len(extracted.text),
+        # What `_chunk_ceiling` needs besides the length: each section is its own
+        # `chunk_text` call, and every call can add chunks no length accounts for (#5).
+        "section_ceiling": section_ceiling(extracted.text, extracted.record.get("toc") or ()),
         **extracted.record,
     }
     if nul_removed:
@@ -562,7 +581,66 @@ def run_extract_text(session: Session, task: TaskQueue) -> TaskOutcome:
     if probed_chars is not None:
         detail["characters_probed"] = probed_chars
 
+    detail.update(_replan_after_extraction(session, doc, extraction))
     return TaskOutcome(detail=detail)
+
+
+def _replan_after_extraction(session: Session, doc: Document, extraction: dict) -> dict:
+    """Decide and enqueue the rows gated on a pattern this task just measured. Spec 3.3.
+
+    Probe could not decide them — ``pages_with_tables`` is not probe's — so probe recorded
+    them as "not measured" and moved on. This is the other half of that sentence: the
+    patterns probe measured, MERGED with what the extraction record now holds, through the
+    same table, keeping only the rows :data:`~jmfts_core.ingest_tasks.PATTERN_MEASURED_BY`
+    says this task unlocks. ``matched`` is not touched: it is probe's evidence, and the
+    extraction record is where 3.3 puts a pattern measured after probe.
+
+    Enqueued in THIS transaction, on the node this task is running on. The node is in
+    flight until this task finishes and the new rows are unfinished tasks on it, so
+    ``structuring_complete`` cannot settle it in between; a rollback removes both.
+
+    Returns the same four keys ``run_probe`` writes, for the attempt detail, and
+    ``already_attempted``: the eligible rows the attempt diff found already queued or run.
+    """
+    fmt, patterns, options = _plan_inputs(session, doc)
+    if fmt is None:
+        raise ValueError(
+            f"extract:text ran on document {doc.id}, which carries no `matched` block; it "
+            "was enqueued by probe, which writes one"
+        )
+    plan = plan_after_measurement(
+        fmt,
+        {**patterns, **measured_patterns(TASK_EXTRACT_TEXT, extraction)},
+        options,
+        measured_by=TASK_EXTRACT_TEXT,
+    )
+    runnable, deferred = _split_by_handler(plan.eligible)
+    # SPEC 6.1'S DIFF, as `AttemptDiffPlanner` applies it at the rollup boundary: a row whose
+    # `(task, param_fingerprint)` the node's attempt log already records is not enqueued
+    # again. `enqueue` writes the pending record in the same transaction as the row, so a
+    # second commit of this task — a worker that finished after its lease was reaped, or
+    # the retry it was reaped into — finds the first one's rows here. The node's row lock
+    # orders the two: the second waits until the first has committed, then reads its log.
+    session.execute(select(Document.id).where(Document.id == doc.id).with_for_update()).one()
+    tasks = TaskQueueRepository(session)
+    attempted = tasks.attempted_fingerprints(doc.id)
+    already = {
+        spec.task_type
+        for spec in runnable
+        if (spec.task_type, param_fingerprint(spec.params)) in attempted
+    }
+    runnable = [spec for spec in runnable if spec.task_type not in already]
+    enqueued = enqueue_batch(tasks, doc.id, runnable) if runnable else ()
+    docs = DocumentRepository(session)
+    for entry in plan.skipped:
+        docs.upsert_attempt(doc, _skipped_record(doc, entry, docs.attempt_counts(doc)))
+    return {
+        "enqueued": {spec.task_type: task_id for spec, task_id in zip(runnable, enqueued)},
+        "deferred": deferred,
+        "skipped": {entry.task_type: entry.reason for entry in plan.skipped},
+        "not_applicable": plan.not_applicable,
+        "already_attempted": sorted(already),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -731,19 +809,27 @@ def _chunk_ceiling(evidence: dict, params: dict) -> tuple[int, int]:
     that found no prose at all writes none, which is why the floor is zero and is not the
     interesting half of the interval.
 
-    The upper end is ``chunk_count_ceiling``: a bound ``chunk_text`` cannot exceed on one
-    call, deliberately loose. It is NOT ``characters // min_chunk_length``, which an earlier
+    The upper end is ``chunk_count_ceiling``: a bound ``chunk_text`` cannot exceed,
+    deliberately loose. It is NOT ``characters // min_chunk_length``, which an earlier
     version of this docstring called "the same division chunk_text cannot exceed" and which
     was false: a merge never crosses ``max_chars``, and ``fits`` splits a piece below
-    ``min_chunk_length`` when the embedding window demands it. What this still does not
-    cover is that ``_write_chunks`` calls ``chunk_text`` once PER SECTION, so every
-    non-empty section body is at least one chunk however short; nothing in
-    ``(evidence, params)`` says how many sections there are (``SPRINT_JOBS.md`` 2.4).
+    ``min_chunk_length`` when the embedding window demands it.
+
+    It is taken over ``extraction.section_ceiling`` CALLS, not one (issue #5's remainder).
+    ``_write_chunks`` calls ``chunk_text`` once per section, so every non-empty section body
+    is at least one chunk however short; 0.6.2's single-call bound declared 59 for a
+    document of 200 one-letter sections that writes 200, at ``min_chunk_length=1800``
+    (``tests/test_chunking.py``). Nothing in ``(evidence, params)``
+    carried the section count then, so ``extract:text`` now records the most sections
+    either rung can cut. A document extracted before it did has no such value, and EXPLAIN
+    reports the interval open and names the missing measurement rather than a ceiling that
+    is not one.
     """
     minimum = int(params["min_chunk_length"])
     characters = int(evidence["extraction.characters"])
+    sections = int(evidence["extraction.section_ceiling"])
     max_chars = get_settings().chunk_max_chars
-    return (0, chunk_count_ceiling(characters, minimum, max_chars))
+    return (0, chunk_count_ceiling(characters, minimum, max_chars, calls=sections))
 
 
 #: The two rungs write the same shapes from different boundaries, so they declare the same
@@ -751,8 +837,11 @@ def _chunk_ceiling(evidence: dict, params: dict) -> tuple[int, int]:
 #: that schedules them, and that is a Part 4 row, not an atom field.
 _RUNG_FANOUT = Fanout(
     bound=_chunk_ceiling,
-    reads=("extraction.characters",),
-    basis="chunk_count_ceiling(characters, min_chunk_length, chunk_max_chars) chunks",
+    reads=("extraction.characters", "extraction.section_ceiling"),
+    basis=(
+        "chunk_count_ceiling(characters, min_chunk_length, chunk_max_chars, "
+        "calls=section_ceiling) chunks"
+    ),
     # The chunks, not the sections. A titled region becomes a `section` node with chunks
     # under it and an untitled one becomes chunks directly, so the section count varies
     # with the document's shape while the ceiling is a function of its LENGTH — counting
@@ -817,6 +906,43 @@ def run_structure_inferred(session: Session, task: TaskQueue) -> TaskOutcome:
     return _run_rung(session, task, TASK_STRUCTURE_INFERRED, INFERRED_SPLITTERS, RUNG_INFERRED)
 
 
+def structure_chunk_params(task: TaskQueue) -> tuple[ChunkStrategy, int, int]:
+    """The ``structure`` group off a queue row: ``(chunk_strategy, max_words, min_chunk_length)``.
+
+    One reading for every rung that chunks with the group — the two prose rungs and
+    ``structure:conversation``'s over-window turns (issue #4) — so a caller's
+    ``structure.*`` option means the same thing whichever of them the probe chose, and a
+    stale row is refused the same way whichever of them claims it.
+    """
+    params = dict(task.params or {})
+    if "max_tokens" in params:
+        # Queued before 0.7.0 renamed the option (issue #1), and deliberately not rewritten
+        # by `migrations/024_max_words.sql` — see its header. Reading the default here
+        # instead would chunk at a budget the caller did not ask for and settle as success.
+        raise ValueError(
+            f"{task.task_type} for document {task.scope_document_id} was queued with "
+            "max_tokens, which 0.7.0 renamed max_words; re-ingest the document to queue it "
+            "under the new name"
+        )
+    # Every row carries the COMPLETE group (`ingest_options.py`, "a group here is
+    # complete"), so a missing key is a row the planner did not write this way — in
+    # practice `structure:conversation` queued before issue #4 gave it `params_key`, with
+    # `{}`. Reading the defaults instead would chunk at options nobody resolved for this
+    # document and settle as success.
+    missing = [key for key in STRUCTURE_CHUNK_PARAMS if key not in params]
+    if missing:
+        raise ValueError(
+            f"{task.task_type} for document {task.scope_document_id} was queued without "
+            f"structure option(s) {', '.join(missing)}; the row predates the change that "
+            "puts the whole `structure` group on it. Re-ingest the document (or re-queue "
+            "the task) so it is planned with the group"
+        )
+    strategy = ChunkStrategy(params["chunk_strategy"])
+    max_words = int(params["max_words"])
+    min_chunk_length = int(params["min_chunk_length"])
+    return strategy, max_words, min_chunk_length
+
+
 def _build_tree(
     session: Session,
     task: TaskQueue,
@@ -841,12 +967,7 @@ def _build_tree(
     resolvable over the chunks below. Both rungs write ``declared``-or-``inferred`` nodes;
     only the second column says which of the two rules did it.
     """
-    params = dict(task.params or {})
-    strategy = ChunkStrategy(params.get("chunk_strategy", STRUCTURE_CHUNK_PARAMS["chunk_strategy"]))
-    max_tokens = int(params.get("max_tokens", STRUCTURE_CHUNK_PARAMS["max_tokens"]))
-    min_chunk_length = int(
-        params.get("min_chunk_length", STRUCTURE_CHUNK_PARAMS["min_chunk_length"])
-    )
+    strategy, max_words, min_chunk_length = structure_chunk_params(task)
 
     text = doc.content or ""
     writer = _TreeWriter(
@@ -854,7 +975,7 @@ def _build_tree(
         tasks=TaskQueueRepository(session),
         rung=rung,
         strategy=strategy,
-        max_tokens=max_tokens,
+        max_words=max_words,
         min_chunk_length=min_chunk_length,
         # Taken from the FLAT list, which is the one thing guaranteed to be in document
         # order. `nest` preserves that order under a preorder walk, but the writer's walk
@@ -904,7 +1025,7 @@ def _build_tree(
         "gap_regions": gap_regions,
         "params": {
             "chunk_strategy": strategy.value,
-            "max_tokens": max_tokens,
+            "max_words": max_words,
             "min_chunk_length": min_chunk_length,
         },
         **extra_detail,
@@ -962,7 +1083,7 @@ class _TreeWriter:
         tasks: TaskQueueRepository,
         rung: str,
         strategy: ChunkStrategy,
-        max_tokens: int,
+        max_words: int,
         min_chunk_length: int,
         body_offsets: dict[int, int],
         sections: Frontier,
@@ -972,7 +1093,7 @@ class _TreeWriter:
         self.tasks = tasks
         self.rung = rung
         self.strategy = strategy
-        self.max_tokens = max_tokens
+        self.max_words = max_words
         self.min_chunk_length = min_chunk_length
         self.body_offsets = body_offsets
         #: TWO FRONTIERS, because this writer creates two kinds of node and a scope names
@@ -1087,7 +1208,7 @@ class _TreeWriter:
         chunks = chunk_text(
             body,
             strategy=self.strategy,
-            max_tokens=self.max_tokens,
+            max_words=self.max_words,
             min_chunk_length=self.min_chunk_length,
             fits=service.fits_token_window,
         )

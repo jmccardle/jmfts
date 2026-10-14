@@ -56,12 +56,12 @@ adds is the reader (:mod:`jmfts_core.office.workbook`) — tier 2, behind
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Optional, Sequence
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from jmfts_client.contracts.anchor import ANCHOR_UNRESOLVED_ROW, CellsAnchor
 from jmfts_core.atoms import (
     COST_CPU,
     EV_BLOB,
@@ -73,6 +73,7 @@ from jmfts_core.atoms import (
     EV_SHEET_MEASUREMENTS,
     EV_RECORD,
     EV_SHEET_SHAPE,
+    EV_SOURCE_ANCHOR,
     EV_STRUCTURE,
     EV_TABLE,
     EV_TEXT,
@@ -111,7 +112,6 @@ from jmfts_core.embedding import get_embedding_service
 from jmfts_core.ingest_options import STRUCTURE_CHUNK_PARAMS
 from jmfts_core.ingest_tasks import (
     DEFERRED_REASON,
-    TASK_EMBED,
     TASK_EXTRACT_SHEET,
     TASK_PROFILE_SHEET,
     TASK_PROPOSE_LINKS,
@@ -122,6 +122,7 @@ from jmfts_core.ingest_tasks import (
     enqueue_frontier,
     plan_frontier,
     register_task_handler,
+    without_token_vectors,
 )
 from jmfts_core.models.document import (
     Document,
@@ -135,7 +136,7 @@ from jmfts_core.models.document import (
     USETYPE_TABLE,
 )
 from jmfts_core.models.task_queue import TaskQueue, WRITE_CHILDREN, WRITE_SELF
-from jmfts_core.office.cells import json_value, read_rows
+from jmfts_core.office.cells import CellRange, json_value, read_rows, used_range
 from jmfts_core.office.sheets import measure_sheet
 from jmfts_core.office.workbook import read_sheets
 from jmfts_core.repositories.blob import BlobRepository
@@ -533,7 +534,12 @@ def _sheet_blob(session: Session, node: Document, *, task_type: str, name: str) 
 @register_task_handler(
     TASK_PROFILE_SHEET,
     consumes=(f"{EV_SHEET}@self", f"{EV_BLOB}@{LOCUS_ANCESTOR}"),
-    produces=(f"{EV_SHEET_MEASUREMENTS}@self", f"{EV_PROFILE}@children", f"{EV_TEXT}@children"),
+    produces=(
+        f"{EV_SHEET_MEASUREMENTS}@self",
+        f"{EV_PROFILE}@children",
+        f"{EV_TEXT}@children",
+        f"{EV_SOURCE_ANCHOR}@children",
+    ),
     write_mode=WRITE_CHILDREN,
     cost_class=COST_CPU,
     fanout=fixed(1, counts=USETYPE_PROFILE),
@@ -614,7 +620,11 @@ def run_profile_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
         parent_id=node.id,
         usetype=USETYPE_PROFILE,
         produced_by=TASK_PROFILE_SHEET,
-        evidence={"profile": dict(profile_record, sheet_name=name)},
+        evidence={
+            "profile": dict(profile_record, sheet_name=name),
+            # The profile describes the whole sheet, so it is addressed at what it measured.
+            **_cells_anchor(name, used_range(measurement.rows, measurement.cols)),
+        },
         # The model does not run here. `embed` is its own task and this node is not
         # retrievable until it has run, which is what `in_flight` states — the same
         # contract every chunk has.
@@ -671,8 +681,9 @@ def run_profile_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
 def chunk_prose(text: str) -> list:
     """A cell's prose, in pieces that each fit — with the parameters prose is chunked by.
 
-    NOT ``EmbeddingService.chunk_to_fit``, which is the same call with the library's bare
-    defaults: ``ChunkStrategy.sentence``, unpacked. That is the strategy
+    NOT the library's bare defaults, which is what the deleted
+    ``EmbeddingService.chunk_to_fit`` passed: ``ChunkStrategy.sentence``, unpacked, when
+    this was measured. ``sentence`` is the strategy
     :data:`~jmfts_core.ingest_options.STRUCTURE_CHUNK_PARAMS` was measured against and
     beat — over 25 extracted papers the share of leaves too short to carry a retrievable
     idea is 9.7% for ``sentence`` and 0.1% at 120 words packed. `ran` against the reference
@@ -696,12 +707,53 @@ def chunk_prose(text: str) -> list:
         for chunk in chunk_text(
             text,
             strategy=ChunkStrategy(STRUCTURE_CHUNK_PARAMS["chunk_strategy"]),
-            max_tokens=int(STRUCTURE_CHUNK_PARAMS["max_tokens"]),
+            max_words=int(STRUCTURE_CHUNK_PARAMS["max_words"]),
             min_chunk_length=int(STRUCTURE_CHUNK_PARAMS["min_chunk_length"]),
             max_chars=get_settings().chunk_max_chars,
             fits=service.fits_token_window,
         )
     ]
+
+
+#: The ``source_anchor.unresolved`` code for a node made from a sheet that holds nothing.
+UNRESOLVED_EMPTY_SHEET = "empty_sheet"
+
+
+def _cells_anchor(sheet_name: str, bounds: Optional[CellRange]) -> dict:
+    """The ``source_anchor`` row for a node made from a rectangle of one worksheet.
+
+    ``OFFICE_SPEC.md`` Part 5's ``{"kind": "cells", "sheet": ..., "ref": ...}``, built
+    through the contract model that READS it (``parse_anchor``), so the writer cannot spell
+    a row the reader refuses. Returned as an evidence fragment to spread into ``evidence=``.
+
+    With no rectangle — an empty sheet has no used range, and an anchor at ``A1:A1`` over
+    nothing would be an address invented here (``used_range``) — it is the UNRESOLVED row
+    instead, which is present exactly when the anchor is not (``evidence.py``). "Nothing
+    placed this node" and "this node has no region to place" are different answers.
+    """
+    if bounds is None:
+        return {
+            ANCHOR_UNRESOLVED_ROW: {
+                "code": UNRESOLVED_EMPTY_SHEET,
+                "reason": f"sheet {sheet_name!r} was measured to hold no cells, so it has "
+                "no used range to address",
+            }
+        }
+    return {EV_SOURCE_ANCHOR: CellsAnchor(sheet=sheet_name, ref=bounds.ref).model_dump()}
+
+
+def _row_range(row_index: int, measurements: dict) -> Optional[CellRange]:
+    """One worksheet row, across the sheet's measured width. What a record node came from.
+
+    The width is ``profile:sheet``'s, the same one the table and the profile are anchored
+    at, so a record's region is a slice of its sheet's region and never wider than it. Column
+    A and not the record's first filled column: the row is the unit a person goes back to,
+    and Excel's row header selects all of it.
+    """
+    cols = int(measurements.get("cols") or 0)
+    if cols < 1:
+        return None
+    return CellRange(min_row=row_index, min_col=1, max_row=row_index, max_col=cols)
 
 
 def _born(frontier) -> str:
@@ -843,17 +895,7 @@ def _write_table(
             "it a vector, which is a retrievable shape that no query can reach"
         )
     if not fits_token_window:
-        frontier = replace(
-            frontier,
-            specs=tuple(
-                (
-                    replace(spec, params={**spec.params, "with_tokens": False})
-                    if spec.task_type == TASK_EMBED
-                    else spec
-                )
-                for spec in frontier.specs
-            ),
-        )
+        frontier = without_token_vectors(frontier)
     child = repo.create(
         # Not "row N": this node IS the sheet, which is the one thing a reader has to be able
         # to tell it from its own siblings.
@@ -872,7 +914,13 @@ def _write_table(
                 "rendered_tokens": measurements.get("rendered_tokens"),
                 "fits_token_window": fits_token_window,
                 "fits_doc_window": measurements.get("rendered_fits_doc_window"),
-            }
+            },
+            # The markdown is the rendering of the measured used range, so that is the
+            # region this node is the whole of.
+            **_cells_anchor(
+                sheet_name,
+                used_range(int(measurements.get("rows") or 0), int(measurements.get("cols") or 0)),
+            ),
         },
         # The model does not run here. `embed` is its own task and this node is not
         # retrievable until it has run, which is what `in_flight` states.
@@ -931,6 +979,7 @@ def _row_ceiling(evidence: dict, params: dict) -> tuple[int, int]:
         f"{EV_RECORD}@children",
         f"{EV_CELL}@subtree",
         f"{EV_TABLE}@children",
+        f"{EV_SOURCE_ANCHOR}@children",
     ),
     write_mode=WRITE_CHILDREN,
     cost_class=COST_CPU,
@@ -1141,6 +1190,7 @@ def run_extract_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
                 # Sparse, and absent entirely on a row of plain values. See
                 # `jmfts_core.office.cells.CellNote` for what earns a cell an entry.
                 **({"cells": record.cells} if record.cells else {}),
+                **_cells_anchor(name, _row_range(record.row_index, measurements)),
             },
             # The model does not run here. `embed` is its own task and this node is not
             # retrievable until it has run, which is what `in_flight` states.

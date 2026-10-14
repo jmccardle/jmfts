@@ -51,7 +51,7 @@ class ExplainIngestRequest(BaseModel):
         default=None,
         description=(
             "Ingest option overrides, in the shape `POST /ingest/file` takes them — "
-            '`{"structure": {"max_tokens": 60}}`. Resolved against the task defaults and '
+            '`{"structure": {"max_words": 60}}`. Resolved against the task defaults and '
             "the format's profile exactly as an upload resolves them, so an option that "
             "does not exist is a 400 here for the same reason it is a 400 there."
         ),

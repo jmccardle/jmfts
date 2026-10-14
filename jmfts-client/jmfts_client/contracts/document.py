@@ -436,16 +436,32 @@ class SegmentResponse(BaseModel):
 
 
 class ChunkRequest(BaseModel):
-    """Request to chunk a document into container + children"""
+    """Request to chunk a document into container + children
+
+    ``extra="forbid"`` because this request's word budget was called ``max_tokens`` until
+    0.7.0 (issue #1). Pydantic ignores an unknown field by default, so a caller still
+    sending the old name would have had it dropped and been chunked at the default instead
+    — a 200 for a request that was not carried out. A field this model does not declare is
+    a 422 that names it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     strategy: str = Field(
         default="sentence",
-        description="Chunking strategy: sentence, paragraph, or token_count",
+        description=(
+            "Chunking strategy: sentence, sentence_packed, paragraph, paragraph_packed, "
+            "token_count, or sentence_window (needs auto_embed: it packs to the measured "
+            "token window)"
+        ),
     )
-    max_tokens: int = Field(
+    max_words: int = Field(
         default=200,
         ge=1,
-        description="Max words per chunk (token_count strategy only)",
+        description=(
+            "Target WORDS per chunk (token_count, sentence_packed and paragraph_packed). "
+            "A whitespace word count, not a tokenizer count; named max_tokens before 0.7.0"
+        ),
     )
     overlap: int = Field(
         default=0,
@@ -464,7 +480,7 @@ class ChunkRequest(BaseModel):
             "Hard upper bound on chunk size, enforced for every strategy after "
             "splitting and after merging. Defaults to settings.chunk_max_chars. "
             "Chunks exist to be embedded, so this is what keeps them inside the "
-            "embedder's window; max_tokens is a target, this is the guarantee."
+            "embedder's window; max_words is a target, this is the guarantee."
         ),
     )
     child_usetype: str = Field(

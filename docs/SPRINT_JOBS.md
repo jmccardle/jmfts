@@ -151,7 +151,8 @@ There is no `params_key`.
 * **The validation `ingest_options` exists to provide is absent.**
   `ingest_options._positive_int` rejects `bool` on purpose, because
   `isinstance(True, int)` is true and `max_tokens: true` would pack to one
-  token. `sheet_tasks.py:503` reads `int(params.get("max_rows", ...))`, and
+  token. *(Marked 2026-10-12: the option was a word count all along, and 0.7.0
+  renamed it `max_words` (issue #1) — one WORD, not one token.)* `sheet_tasks.py:503` reads `int(params.get("max_rows", ...))`, and
   `int(True)` is `1`. Latent rather than live — nothing can feed it a bool
   today, precisely because nothing can feed it anything.
 
@@ -432,15 +433,15 @@ The registry maps a name to a type: `bool`, `int`, `float`, `str`, `list`,
 `ingest_options._positive_int` currently provides for two groups only.
 
 **Phase 2 built it and it is `jmfts_core/evidence.py`.** It held thirty-six
-entries then and holds **fifty-one** now, a type and a storage location on
+entries then and holds **fifty-three** now, a type and a storage location on
 each, with `evidence.check` as the one place that answers whether a value is
 what its name says. `producers()` is derived from `ATOMS` rather than declared,
 so who-writes-what has one answer and not two.
 
 **Thirty-six of those entries are `document_evidence` rows, and the other
-fifteen are leaves inside them or values stored elsewhere.** Phase 2b moved the
+seventeen are leaves inside them or values stored elsewhere.** Phase 2b moved the
 rows out of `structured_content`; 13.1 measured the store and 13.3 decided the
-contract. The four counts this section quotes — 51 entries, 36 rows, 21 of the
+contract. The four counts this section quotes — 53 entries, 36 rows, 21 of the
 rows `dict`, 15 bare scalars — are pinned by
 `tests/test_evidence_registry.py::TestShape::test_the_counts_the_documents_quote_are_still_true`,
 which fails when the registry moves so that this prose is told rather than left
@@ -448,7 +449,11 @@ wrong.
 <!-- Updated 2026-09-15 from 44/30/15/15 to 51/36/21/15. The test's own docstring is the
      record of all six moves, and it is the mechanism working: it tells whoever changes the
      registry that this sentence has moved and where. These documents were outside the
-     repository between 0.5.1 and 0.6.0, so nobody who saw the failure could act on it. -->
+     repository between 0.5.1 and 0.6.0, so nobody who saw the failure could act on it.
+     Updated 2026-10-12 from 51 to 52 entries: the leaf `extraction.section_ceiling`, which
+     the structure rungs' fan-out bound reads (issue #5). Rows, dicts and scalars unmoved.
+     Updated 2026-10-13 from 52 to 53 entries: the leaf `extraction.tables_found`, which
+     `extract:tables`' fan-out bound reads. Rows, dicts and scalars unmoved. -->
 
 
 Four things the build corrected, and 3.1 as written above is wrong about two:
@@ -870,7 +875,8 @@ Three things generalising it decides:
 
 1. **Layered merge, not nearest-wins.** `_options_owner` returns ONE owner and
    uses its set wholesale, which is correct while there is only ever one. Under
-   a tree a caller will put `structure.max_tokens` on `/papers` and
+   a tree a caller will put `structure.max_tokens` (`max_words` since 0.7.0,
+   issue #1) on `/papers` and
    `facts.enabled` on `/papers/2026`, and nearest-wins gives them only the
    second. `resolve_options` already merges; this makes the layer count N:
 

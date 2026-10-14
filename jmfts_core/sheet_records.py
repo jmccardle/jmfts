@@ -151,7 +151,7 @@ class HeaderDoesNotCoverTheRow(ValueError):
 class CellDidNotSplit(ValueError):
     """``chunk`` returned nothing, or a piece that still does not fit the window.
 
-    ``EmbeddingService.chunk_to_fit`` enforces the predicate on every piece it returns, so
+    ``chunk_text`` given ``fits`` enforces the predicate on every piece it returns, so
     reaching this means the chunker and the fit test disagree about the same text. Raising
     here is the whole point of checking: the alternative is a leaf whose ``embed`` fails
     permanently one rung later, which is the condition :func:`plan_record` exists to close.

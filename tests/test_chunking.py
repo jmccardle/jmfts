@@ -108,13 +108,13 @@ class TestSentencePackedChunking:
     def test_it_packs_several_sentences_into_one_chunk(self):
         # The four sentences are 9, 8, 6 and 8 words. A 20-word budget takes the first
         # two and then the second two.
-        chunks = chunk_text(MULTI_SENTENCE, strategy=ChunkStrategy.sentence_packed, max_tokens=20)
+        chunks = chunk_text(MULTI_SENTENCE, strategy=ChunkStrategy.sentence_packed, max_words=20)
 
         assert len(chunks) == 2
         assert chunks[0].text.count(".") == 2
 
     def test_it_never_splits_a_sentence(self):
-        chunks = chunk_text(MULTI_SENTENCE, strategy=ChunkStrategy.sentence_packed, max_tokens=5)
+        chunks = chunk_text(MULTI_SENTENCE, strategy=ChunkStrategy.sentence_packed, max_words=5)
 
         for chunk in chunks:
             assert chunk.text.rstrip().endswith(".")
@@ -124,7 +124,7 @@ class TestSentencePackedChunking:
         cuts a runaway sentence — a reference list with no end punctuation."""
         long_sentence = " ".join(f"word{i}" for i in range(60)) + "."
         chunks = chunk_text(
-            long_sentence, strategy=ChunkStrategy.sentence_packed, max_tokens=10, max_chars=10_000
+            long_sentence, strategy=ChunkStrategy.sentence_packed, max_words=10, max_chars=10_000
         )
 
         assert len(chunks) == 1
@@ -133,13 +133,13 @@ class TestSentencePackedChunking:
     def test_the_char_cap_still_applies(self):
         text = " ".join(f"word{i}." for i in range(200))
         chunks = chunk_text(
-            text, strategy=ChunkStrategy.sentence_packed, max_tokens=500, max_chars=100
+            text, strategy=ChunkStrategy.sentence_packed, max_words=500, max_chars=100
         )
 
         assert all(len(c.text) <= 100 for c in chunks)
 
     def test_preserves_every_word(self):
-        chunks = chunk_text(MULTI_SENTENCE, strategy=ChunkStrategy.sentence_packed, max_tokens=14)
+        chunks = chunk_text(MULTI_SENTENCE, strategy=ChunkStrategy.sentence_packed, max_words=14)
 
         assert " ".join(c.text for c in chunks).split() == MULTI_SENTENCE.split()
 
@@ -176,11 +176,11 @@ class TestParagraphChunking:
 
 class TestTokenCountChunking:
     def test_splits_into_windows(self):
-        chunks = chunk_text(LONG_TEXT, strategy=ChunkStrategy.token_count, max_tokens=100)
+        chunks = chunk_text(LONG_TEXT, strategy=ChunkStrategy.token_count, max_words=100)
         assert len(chunks) == 5  # 500 words / 100 per chunk
 
-    def test_max_tokens_respected(self):
-        chunks = chunk_text(LONG_TEXT, strategy=ChunkStrategy.token_count, max_tokens=100)
+    def test_max_words_respected(self):
+        chunks = chunk_text(LONG_TEXT, strategy=ChunkStrategy.token_count, max_words=100)
         for chunk in chunks:
             word_count = len(chunk.text.split())
             assert word_count <= 100
@@ -189,13 +189,13 @@ class TestTokenCountChunking:
         no_overlap = chunk_text(
             LONG_TEXT,
             strategy=ChunkStrategy.token_count,
-            max_tokens=100,
+            max_words=100,
             overlap=0,
         )
         with_overlap = chunk_text(
             LONG_TEXT,
             strategy=ChunkStrategy.token_count,
-            max_tokens=100,
+            max_words=100,
             overlap=50,
         )
         assert len(with_overlap) > len(no_overlap)
@@ -204,7 +204,7 @@ class TestTokenCountChunking:
         chunks = chunk_text(
             LONG_TEXT,
             strategy=ChunkStrategy.token_count,
-            max_tokens=100,
+            max_words=100,
             overlap=50,
         )
         # Last 50 words of chunk 0 should appear in chunk 1
@@ -215,7 +215,7 @@ class TestTokenCountChunking:
         assert tail_0 == head_1
 
     def test_small_text_returns_one_chunk(self):
-        chunks = chunk_text(SHORT_TEXT, strategy=ChunkStrategy.token_count, max_tokens=100)
+        chunks = chunk_text(SHORT_TEXT, strategy=ChunkStrategy.token_count, max_words=100)
         assert len(chunks) == 1
 
 
@@ -386,15 +386,13 @@ class TestParagraphPackedRespectsTheAuthorsBoundary:
 
     def test_sentence_packed_fuses_two_paragraphs_and_splits_a_third(self):
         """The behaviour being replaced, pinned so a change to it is deliberate."""
-        chunks = chunk_text(
-            self._document(), strategy=ChunkStrategy.sentence_packed, max_tokens=120
-        )
+        chunks = chunk_text(self._document(), strategy=ChunkStrategy.sentence_packed, max_words=120)
 
         assert [self._sentences_in(c.text) for c in chunks] == ["ABCDEFGHI", "JKLMN"]
 
     def test_paragraph_packed_returns_one_chunk_per_paragraph(self):
         chunks = chunk_text(
-            self._document(), strategy=ChunkStrategy.paragraph_packed, max_tokens=120
+            self._document(), strategy=ChunkStrategy.paragraph_packed, max_words=120
         )
 
         assert [self._sentences_in(c.text) for c in chunks] == ["ABCDE", "FGHIJK", "LMN"]
@@ -404,7 +402,7 @@ class TestParagraphPackedRespectsTheAuthorsBoundary:
         one_long_paragraph = " ".join(self.SENTENCES[c] for c in "ABCDEFGHIJKLMN")
 
         chunks = chunk_text(
-            one_long_paragraph, strategy=ChunkStrategy.paragraph_packed, max_tokens=40
+            one_long_paragraph, strategy=ChunkStrategy.paragraph_packed, max_words=40
         )
 
         assert len(chunks) > 1
@@ -419,7 +417,7 @@ class TestParagraphPackedRespectsTheAuthorsBoundary:
         text = "Short one.\n\nShort two.\n\nShort three."
 
         chunks = chunk_text(
-            text, strategy=ChunkStrategy.paragraph_packed, max_tokens=120, min_chunk_length=1
+            text, strategy=ChunkStrategy.paragraph_packed, max_words=120, min_chunk_length=1
         )
 
         assert [c.text for c in chunks] == ["Short one.", "Short two.", "Short three."]
@@ -453,8 +451,10 @@ class TestChunkCeiling:
             max_chars=1800,
             fits=fits,
         )
+        # One `chunk_text` call over the whole text: one section.
         _, ceiling = _chunk_ceiling(
-            {"extraction.characters": len(text)}, {"min_chunk_length": minimum}
+            {"extraction.characters": len(text), "extraction.section_ceiling": 1},
+            {"min_chunk_length": minimum},
         )
         assert len(chunks) <= ceiling
 
@@ -469,3 +469,159 @@ class TestChunkCeiling:
             fits=lambda piece: len(piece) <= 300,
         )
         assert len(chunks) > len(text) // 1800
+
+    def test_ceiling_holds_across_sections(self):
+        """Issue #5's remainder: `_write_chunks` calls `chunk_text` once PER SECTION.
+
+        Every non-empty section body is at least one chunk however short, so a document of
+        many short sections writes more chunks than any function of its length alone
+        allows. Measured here as the rung measures it: split on headings, chunk each body.
+        """
+        from jmfts_core.structural_splitting import split_on_headings
+        from jmfts_core.structure_tasks import _chunk_ceiling
+
+        # The shortest a section gets: a one-letter title and a one-letter body, 6
+        # characters each. The length-only bound allows about a quarter of that many chunks.
+        text = "# H\nx\n" * 200
+        sections = split_on_headings(text)
+        written = sum(
+            len(chunk_text(s.content, min_chunk_length=1800, max_chars=1800))
+            for s in sections
+            if s.content.strip()
+        )
+        _, ceiling = _chunk_ceiling(
+            {
+                "extraction.characters": len(text),
+                "extraction.section_ceiling": len(sections),
+            },
+            {"min_chunk_length": 1800},
+        )
+        assert written == 200
+        assert written <= ceiling
+
+    @pytest.mark.parametrize("window", [None, 120, 70])
+    @pytest.mark.parametrize("minimum", [1, 50, 1800])
+    def test_multi_call_ceiling_holds_on_mixed_sections(self, window, minimum):
+        """Short and long sections in one document, with and without a splitting `fits`."""
+        from jmfts_core.structural_splitting import section_ceiling, split_on_headings
+        from jmfts_core.structure_tasks import _chunk_ceiling
+
+        bodies = ["x", self._dense_sentences(5), "Two words.", self._dense_sentences(1, 90)]
+        text = "preamble.\n" + "".join(f"## S{i}\n{bodies[i % 4]}\n" for i in range(40))
+        fits = None if window is None else (lambda piece, w=window: len(piece) <= w)
+        written = sum(
+            len(chunk_text(s.content, min_chunk_length=minimum, max_chars=1800, fits=fits))
+            for s in split_on_headings(text)
+            if s.content.strip()
+        )
+        _, ceiling = _chunk_ceiling(
+            {
+                "extraction.characters": len(text),
+                "extraction.section_ceiling": section_ceiling(text),
+            },
+            {"min_chunk_length": minimum},
+        )
+        assert written <= ceiling
+
+    def test_one_call_is_the_single_call_bound(self):
+        """`calls=1` must be exactly 0.6.2's bound, so a one-section document is unchanged."""
+        from jmfts_core.chunking import chunk_count_ceiling
+
+        for characters, minimum in [(1, 1), (5000, 1), (5000, 1800), (123_456, 900)]:
+            effective = min(minimum, 1800)
+            single = min(characters, (2 * characters // effective + 1) + (3 * characters // 64 + 1))
+            assert chunk_count_ceiling(characters, minimum, 1800) == single
+            assert chunk_count_ceiling(characters, minimum, 1800, calls=1) == single
+
+
+class TestSectionCeiling:
+    """`section_ceiling` is an upper bound on what BOTH splitters cut. Issue #5."""
+
+    def test_bounds_heading_split(self):
+        from jmfts_core.structural_splitting import section_ceiling, split_on_headings
+
+        for text in ["no headings at all.", "# A\nbody", "front\n# A\nx\n## B\ny", "# A\n# B\n"]:
+            assert len(split_on_headings(text)) <= section_ceiling(text)
+
+    def test_bounds_outline_split(self):
+        from jmfts_core.structural_splitting import section_ceiling, split_on_outline
+
+        text = "Title page.\nIntroduction\nsome text\nMethods\nmore text\nResults\nend"
+        toc = [[1, "Introduction", 1], [1, "Methods", 1], [1, "Results", 1], [1, "Missing", 1]]
+        sections = split_on_outline(text, toc).sections
+        assert len(sections) == 4  # preamble + three located; the fourth is unplaced
+        assert len(sections) <= section_ceiling(text, toc)
+
+    def test_empty_text_has_no_sections(self):
+        from jmfts_core.structural_splitting import section_ceiling
+
+        assert section_ceiling("   \n") == 0
+
+
+class TestSentenceWindow:
+    """Issue #2: pack whole sentences up to the MEASURED window, not one per chunk."""
+
+    FORTY = " ".join(f"Sentence number {i} says one small thing." for i in range(40))
+
+    @staticmethod
+    def _fits(width):
+        return lambda piece: len(piece) <= width
+
+    def test_packs_forty_sentences_into_passages(self):
+        sentence = ChunkStrategy.sentence
+        window = ChunkStrategy.sentence_window
+        one_each = chunk_text(self.FORTY, strategy=sentence, fits=self._fits(300))
+        packed = chunk_text(self.FORTY, strategy=window, fits=self._fits(300))
+        assert len(one_each) == 40
+        assert len(packed) < len(one_each) // 4
+
+    def test_every_piece_fits_and_no_sentence_is_split(self):
+        fits = self._fits(300)
+        chunks = chunk_text(self.FORTY, strategy=ChunkStrategy.sentence_window, fits=fits)
+        assert all(fits(c.text) for c in chunks)
+        assert all(c.text.endswith(".") for c in chunks)
+        assert " ".join(c.text for c in chunks) == self.FORTY
+
+    def test_each_piece_is_as_full_as_the_window_allows(self):
+        """Greedy: adding the next piece's first sentence would not have fit."""
+        fits = self._fits(300)
+        chunks = chunk_text(self.FORTY, strategy=ChunkStrategy.sentence_window, fits=fits)
+        for here, after in zip(chunks, chunks[1:]):
+            first_next = after.text.split(". ")[0] + "."
+            assert not fits(here.text + " " + first_next)
+
+    def test_respects_max_chars_when_the_window_is_wider(self):
+        chunks = chunk_text(
+            self.FORTY,
+            strategy=ChunkStrategy.sentence_window,
+            fits=self._fits(10_000),
+            max_chars=200,
+        )
+        assert all(len(c.text) <= 200 for c in chunks)
+        assert len(chunks) > 1
+
+    def test_an_oversized_sentence_is_still_split_to_fit(self):
+        long = "word " * 200 + "end."
+        text = f"Short one. {long} Another short one."
+        fits = self._fits(250)
+        chunks = chunk_text(text, strategy=ChunkStrategy.sentence_window, fits=fits)
+        assert all(fits(c.text) for c in chunks)
+
+    def test_requires_fits(self):
+        with pytest.raises(ValueError, match="needs `fits`"):
+            chunk_text(self.FORTY, strategy=ChunkStrategy.sentence_window)
+
+
+class TestChunkRequestRename:
+    """Issue #1 on the wire: `POST /documents/{id}/chunk` takes `max_words`."""
+
+    def test_the_old_field_is_refused_not_ignored(self):
+        """Pydantic drops an unknown field by default, which would chunk at the default
+        and answer 200 for a request that was not carried out."""
+        from pydantic import ValidationError
+
+        from jmfts_client.contracts.document import ChunkRequest
+
+        with pytest.raises(ValidationError, match="max_tokens"):
+            ChunkRequest(max_tokens=50)
+        assert ChunkRequest(max_words=50).max_words == 50

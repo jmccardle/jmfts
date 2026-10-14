@@ -55,6 +55,10 @@ DPI_MAX = 600
 #: request can ask for more than about 75 MB of RGB.
 PIXELS_MAX = 25_000_000
 
+#: The largest coordinate magnitude :func:`parse_bbox` accepts: single precision's range,
+#: rounded down. ``pymupdf.Rect`` holds float32 and raises ``OverflowError`` past it.
+COORDINATE_MAX = 3.4e38
+
 #: What ``@expose`` declares for the two rendering routes, and what the pixmap is encoded as.
 #: PNG and not JPEG: a page of text is line art, where JPEG's ringing lands exactly on the
 #: glyph edges a reader is trying to read.
@@ -119,6 +123,23 @@ def parse_bbox(raw: str) -> tuple[float, float, float, float]:
         raise BadRenderRequest(
             f"bbox {raw!r} is not four numbers; a rectangle is `x0,y0,x1,y1` in PDF points"
         ) from None
+    # `float()` accepts "nan" and "inf", and neither is a coordinate. Left in, a NaN
+    # survives `min`/`max` (both just return whichever operand came first), reaches
+    # `pymupdf.Rect`, and comes back as a PNG of nothing in particular rather than a 400.
+    if not all(math.isfinite(v) for v in (x0, y0, x1, y1)):
+        raise BadRenderRequest(
+            f"bbox {raw!r} has a non-finite value; a rectangle is four finite numbers, "
+            "`x0,y0,x1,y1` in PDF points"
+        )
+    # FINITE IS NOT ENOUGH. `pymupdf.Rect` stores single-precision floats and raises
+    # `OverflowError` past their range, which nothing maps, so `bbox=1e39,0,100,100` was a
+    # 500. No page is anywhere near this size — PDF's own limit is 14,400 points a side.
+    if not all(abs(v) <= COORDINATE_MAX for v in (x0, y0, x1, y1)):
+        raise BadRenderRequest(
+            f"bbox {raw!r} has a value beyond ±{COORDINATE_MAX:g}, the largest coordinate a "
+            "PDF renderer stores (single precision); a rectangle is four numbers within it, "
+            "`x0,y0,x1,y1` in PDF points"
+        )
     # Put the ends in order rather than refusing a reversed one: `x1 < x0` names the same
     # rectangle traversed the other way, and every reader of a PDF rect treats it so.
     return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
@@ -208,12 +229,29 @@ def _check_bounds(width_pt: float, height_pt: float, dpi: int) -> None:
         )
 
 
+def _is_blank_paper(pixmap: pymupdf.Pixmap) -> bool:
+    """Whether every sample of ``pixmap`` is white — paper with nothing printed on it.
+
+    White and not "one colour": a crop inside a filled box, a 1x1-point crop, or the inside
+    of a glyph at 150 dpi is legitimately one colour and is a correct picture of what is
+    there. Paper is what ``alpha=False`` renders the page background as.
+
+    NOT ``Pixmap.is_unicolor``, which is a pure-Python loop over every sample: on a blank
+    8.4 Mpx crop (Letter at 300 dpi) it took 40 seconds and turned a 0.13 s answer into an
+    8.4 s one through REST. One ``bytes`` comparison is a ``memcmp``, against an allocation
+    :data:`PIXELS_MAX` already prices.
+    """
+    samples = pixmap.samples
+    return samples == b"\xff" * len(samples)
+
+
 def render_page(
     pdf: bytes,
     *,
     page: int,
     dpi: int = DPI_DEFAULT,
     clip: Optional[tuple[float, float, float, float]] = None,
+    anchor: bool = False,
 ) -> bytes:
     """One page, or one rectangle of it, as PNG bytes.
 
@@ -227,6 +265,12 @@ def render_page(
     an ordinary anchor on a page whose media box the writer measured differently, and the
     part that is on the page is the answer. A rectangle that misses the page entirely is not
     — there is no picture of it — and that refuses.
+
+    ``anchor`` says ``clip`` is a STORED ``source_anchor``, and only then is a crop of blank
+    paper refused (#38). An anchor is written from where words are, so one that crops white
+    paper edge to edge has missed them, and a 200 with a blank PNG is a confident picture of
+    nothing. A rectangle a caller names is the caller's: blank paper is a correct picture of
+    a margin, so that is answered.
     """
     doc = _open(pdf)
     try:
@@ -255,6 +299,19 @@ def render_page(
         # `alpha=False`: 3 bytes a pixel, which is what PIXELS_MAX is priced in, and a page
         # has nothing to be transparent against.
         pixmap = target.get_pixmap(dpi=dpi, clip=area, alpha=False)
+        if anchor and clip is not None and _is_blank_paper(pixmap):
+            hint = ""
+            if target.rotation:
+                hint = (
+                    f" Page {page} is rotated {target.rotation} degrees. Anchors on rotated "
+                    f"pages written before #38 was fixed were measured on the unrotated page "
+                    f"and land on blank paper; re-derive them by re-running `citation` (text "
+                    f"anchors) or `extract:text` then `extract:tables` (table spans)"
+                )
+            raise BadRenderRequest(
+                f"this node's anchor, bbox {clip} on page {page}, crops blank paper: nothing "
+                f"is printed inside it, so there is no picture of the passage to return.{hint}"
+            )
         return pixmap.tobytes("png")
     finally:
         doc.close()

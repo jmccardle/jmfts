@@ -163,13 +163,25 @@ class TestShape:
         than more writers of it: a ``.docx`` carries both at once, an exact ``ooxml`` address
         and a recovered rectangle, and both tasks are ``subtree``-scoped over the same chunks
         — so one name would not blur the two, it would have the second overwrite the first.
+
+        A SEVENTH TIME, 2026-10-12, and it is one LEAF: ``extraction.section_ceiling``,
+        registered under the same rule ``sheet.measurements.header_row_number`` was — the
+        structure rungs' fan-out bound reads it (issue #5: ``_write_chunks`` calls
+        ``chunk_text`` once per section, and the ceiling has to count the calls). 51 → 52,
+        and the rows, dicts and bare scalars all unmoved, because it lives inside the
+        ``extraction`` row.
+
+        AN EIGHTH TIME, 2026-10-13, and it is one LEAF: ``extraction.tables_found``, the count
+        of tables a PDF's text layer rendered inline, which ``extract:tables``' fan-out bound
+        reads (one node per span). 52 → 53, and the rows, dicts and bare scalars all unmoved,
+        because it lives inside the ``extraction`` row.
         """
         stored = [
             e for e in REGISTRY.values() if e.store.kind == STORE_EVIDENCE and not e.store.path
         ]
         dicts = [e for e in stored if e.type == TYPE_DICT]
         stated = {
-            "registry entries": (len(REGISTRY), 51),
+            "registry entries": (len(REGISTRY), 53),
             "evidence rows": (len(stored), 36),
             "rows that are dicts": (len(dicts), 21),
             "rows that are bare scalars": (len(stored) - len(dicts), 15),
@@ -209,6 +221,7 @@ class TestShape:
             "structure:semantic": "segment",
             "profile:sheet": "profile",
             "extract:sheet": "record",
+            "extract:tables": "table",
         }
 
     def test_a_leaf_inherits_its_blocks_producer(self):
@@ -257,7 +270,17 @@ class TestShape:
         # package, a document reaches exactly one of them, and both write this row when they
         # cannot. One name, two routes to it, which is what `producers` returning a SET is
         # for.
-        assert producers("source_anchor.unresolved") == {"citation", "anchor:source"}
+        #
+        # AND TWO MORE SINCE ISSUE #29, which are the same shape again: a spreadsheet node's
+        # source is a rectangle of cells and it is known when the node is made, so the two
+        # per-sheet tasks write the anchor themselves rather than a third task recovering it.
+        # They write the unresolved row for exactly one case, a sheet holding no cells.
+        assert producers("source_anchor.unresolved") == {
+            "citation",
+            "anchor:source",
+            "profile:sheet",
+            "extract:sheet",
+        }
 
 
 # ---------------------------------------------------------------------------

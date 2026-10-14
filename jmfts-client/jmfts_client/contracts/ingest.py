@@ -27,7 +27,7 @@ class IngestRequest(BaseModel):
         default=None,
         description=(
             "Ingest option overrides: option group -> parameters, e.g. "
-            "{'structure': {'max_tokens': 300}}. Same shape as the `options` field of "
+            "{'structure': {'max_words': 300}}. Same shape as the `options` field of "
             "POST /ingest/file. An unknown group, an unknown option or a value of the "
             "wrong type is a 400."
         ),

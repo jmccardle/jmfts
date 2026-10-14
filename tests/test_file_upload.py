@@ -1350,12 +1350,12 @@ class TestStoreTextAsFile:
         response = IngestService(db_session).store_text_as_file(
             "words words words",
             filename="note",
-            options={"structure": {"max_tokens": 44}},
+            options={"structure": {"max_words": 44}},
         )
 
         node = DocumentRepository(db_session).get(response.document_id)
         recorded = evidence(node)[OPTIONS_KEY]
-        assert recorded["structure"]["max_tokens"] == 44
+        assert recorded["structure"]["max_words"] == 44
 
     def test_a_misspelled_option_is_refused_before_anything_is_written(self, db_session):
         before = _file_node_count(db_session)

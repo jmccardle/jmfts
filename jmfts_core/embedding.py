@@ -7,8 +7,8 @@ Provides matryoshka embeddings using ModernBERT with support for:
 - Truncation to various dimensions (128, 256, 384, 512)
 
 TORCH AND SENTENCE-TRANSFORMERS ARE NOT INSTALLED BY DEFAULT, and this class is split down
-that line. Half of what it does needs no weights — `check_fit`, `fits_token_window` and
-`chunk_to_fit` are the tokenizer, `truncate_embedding` is a numpy slice — and that half is
+that line. Half of what it does needs no weights — `check_fit` and `fits_token_window`
+are the tokenizer, `truncate_embedding` is a numpy slice — and that half is
 base JMFTS. The other half is `model`, `embed_text*` and `embed_*_with_tokens`, and it
 needs the `embed` extra (`pip install 'jmfts[embed]'`, see pyproject.toml).
 
@@ -33,7 +33,6 @@ from dataclasses import dataclass
 if TYPE_CHECKING:  # annotations only; never executed
     from sentence_transformers import SentenceTransformer
 
-from jmfts_core.chunking import ChunkStrategy, chunk_text
 from jmfts_core.config import get_settings
 from jmfts_core.token_selection import (
     TokenSelector,
@@ -276,34 +275,6 @@ class EmbeddingService:
         the model weights.
         """
         return not self.check_fit(text, with_tokens=True, prefix=prefix).truncated
-
-    def chunk_to_fit(
-        self,
-        text: str,
-        strategy: Optional[ChunkStrategy] = None,
-        max_chars: Optional[int] = None,
-        prefix: str = "search_document: ",
-    ) -> list[str]:
-        """Chunk `text` into pieces that each *verifiably* fit the token/maxsim window.
-
-        The measuring is `chunk_text`'s now — it takes the predicate and enforces it on
-        every piece it returns, so the guarantee is the same one every other caller gets
-        by passing `fits`, rather than a second implementation of it that lived here.
-        """
-        if strategy is None:
-            strategy = ChunkStrategy.sentence
-        if max_chars is None:
-            max_chars = get_settings().chunk_max_chars
-
-        return [
-            chunk.text
-            for chunk in chunk_text(
-                text,
-                strategy=strategy,
-                max_chars=max_chars,
-                fits=lambda piece: self.fits_token_window(piece, prefix),
-            )
-        ]
 
     def embed_text(self, text: str, normalize: bool = True, prefix: str = "") -> np.ndarray:
         """
