@@ -121,9 +121,11 @@ class TestSyncCallSite:
     def test_summarize_span_completes_without_an_event_loop(self):
         with llm_stub(content="a span summary") as stub:
             settings = stub.settings()
-            assert rollup_tasks.summarize_span("some span text", settings, "stub-model") == (
-                "a span summary"
-            )
+            completion = rollup_tasks.summarize_span("some span text", settings, "stub-model")
+            assert completion.text == "a span summary"
+            # The endpoint's own count, which `run_summarize_llm` records as `input_tokens`
+            # (Forgejo john/jmfts #7). 11 is what the stub reports.
+            assert rollup_tasks.llm_input_tokens(completion) == 11
 
         request = stub.requests[0]
         assert request.path == "/v1/chat/completions"
@@ -143,9 +145,41 @@ class TestSyncCallSite:
         with llm_stub(content="ok") as stub:
             settings = stub.settings()
             for _ in range(3):
-                assert rollup_tasks.summarize_span("text", settings, "stub-model") == "ok"
+                assert rollup_tasks.summarize_span("text", settings, "stub-model").text == "ok"
 
         assert len(stub.requests) == 3
+
+    def test_an_unreported_input_count_is_recorded_as_none(self):
+        """τ's ``Usage`` reads a missing ``usage`` block as 0 tokens. A summarize prompt is
+        never empty, so that 0 is silence, and recording it would be a measurement nobody
+        made (Forgejo john/jmfts #7)."""
+        silent = llm_client.LlmCompletion(text="s", model="m", usage={"input_tokens": 0})
+        assert rollup_tasks.llm_input_tokens(silent) is None
+        assert rollup_tasks.llm_input_tokens(llm_client.LlmCompletion("s", "m", {})) is None
+
+    def test_input_count_is_the_whole_prompt_not_the_uncached_remainder(self):
+        """τ's ``input_tokens`` is ``prompt_tokens`` minus the cached spans. The evidence is the
+        prompt size the endpoint reported, so the cached spans are added back."""
+
+        def completion(**usage):
+            return llm_client.LlmCompletion(text="s", model="m", usage=usage)
+
+        # prompt_tokens=1234, cached_tokens=1000: τ reports input_tokens=234.
+        partial = completion(input_tokens=234, cache_read_tokens=1000)
+        assert rollup_tasks.llm_input_tokens(partial) == 1234
+        # A full cache hit: τ reports input_tokens=0, which is not "unreported".
+        assert (
+            rollup_tasks.llm_input_tokens(completion(input_tokens=0, cache_read_tokens=500)) == 500
+        )
+        write = completion(input_tokens=100, cache_read_tokens=50, cache_write_tokens=25)
+        assert rollup_tasks.llm_input_tokens(write) == 175
+        # No cache fields: the plain count.
+        assert rollup_tasks.llm_input_tokens(completion(input_tokens=42)) == 42
+        # No usage at all.
+        assert rollup_tasks.llm_input_tokens(completion()) is None
+        assert (
+            rollup_tasks.llm_input_tokens(completion(input_tokens=0, cache_read_tokens=0)) is None
+        )
 
     def test_calling_it_from_a_running_loop_is_refused_by_name(self):
         """Rather than deadlocking or reporting an asyncio internal.

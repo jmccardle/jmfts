@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 from jmfts_core.ingest_tasks import TASK_SUMMARIZE, TASK_SUMMARIZE_LLM
+from jmfts_core.llm_client import LlmCompletion
 from jmfts_core.models.document import SETTLED_SETTLED, Document
 from jmfts_core.models.task_queue import (
     TASK_BATCHED,
@@ -582,7 +583,9 @@ class TestMirrorsTheCoreHandler:
         # by the batch worker below, which would then find the node already summarized,
         # concatenate that summary and overwrite the record under test.
         original = rollup.summarize_span
-        rollup.summarize_span = lambda text, settings, model: SUMMARY
+        rollup.summarize_span = lambda text, settings, model: LlmCompletion(
+            text=SUMMARY, model=model, usage={}
+        )
         try:
             rollup.run_summarize_llm(db_session, _StandInTask(monkeyed.id))
         finally:
