@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import datetime
 import io
+import re
 
 import pytest
 from sqlalchemy import select
@@ -719,8 +720,34 @@ class TestTheCellsAnchor:
 
         anchor = parse_anchor(evidence(record)["source_anchor"])
         assert anchor == CellsAnchor(sheet="Deals", ref="A2:E2")
-        with pytest.raises(RegionNotAddressable, match="addressed at cells 'A2:E2'"):
+        with pytest.raises(RegionNotAddressable, match="addressed at cells 'A2:E2'") as raised:
             DocumentService(db_session)._pdf_anchor(record.id)
+
+        # FOLLOW THE URL THE MESSAGE GIVES. It once named /documents/<record id>/cells, which
+        # answers 409 because /cells serves only sheet nodes.
+        match = re.search(r"GET /documents/(\d+)/cells\?ref=(\S+)", str(raised.value))
+        assert match, str(raised.value)
+        assert int(match.group(1)) == sheet.id
+        cells = DocumentService(db_session).get_document_cells(
+            int(match.group(1)), ref=match.group(2)
+        )
+        assert [row.row for row in cells.rows] == [2]
+        assert cells.rows[0].values[0] == evidence(record)["record"]["Deal ID"]
+
+    def test_a_record_without_an_anchor_does_not_point_at_citation(
+        self, db_session, evidence, workbook_bytes
+    ):
+        """A workbook ingested before anchors were written: the message names the sheet
+        rungs and re-ingest, not `citation`, which only runs over a PDF text layer."""
+        file_node = _ingest(db_session, workbook_bytes)
+        sheet = _sheet_node(db_session, file_node, "Deals")
+        record = _children(db_session, sheet.id, USETYPE_RECORD)[0]
+        EvidenceRepository(db_session).delete(record.id, "source_anchor")
+
+        with pytest.raises(RegionNotAddressable, match="re-ingest") as raised:
+            DocumentService(db_session)._pdf_anchor(record.id)
+        assert "extract:sheet" in str(raised.value)
+        assert "citation" not in str(raised.value)
 
     def test_the_anchor_reads_back_the_row_it_was_written_for(
         self, db_session, evidence, workbook_bytes

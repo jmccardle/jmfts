@@ -1556,6 +1556,33 @@ class DocumentService:
             # wait for a task rather than that their file is the wrong kind.
             raise NotAPdfSource(str(exc)) from exc
 
+    def _sheet_of(self, document_id: int) -> Document | None:
+        """The worksheet node this node is, or sits under (nearest first), or None.
+
+        ``/cells`` is served by the sheet node and refuses every other usetype, so a caller
+        holding the anchor of a record, table or profile needs the sheet's id, not its own.
+        """
+        repo = DocumentRepository(self.session)
+        node = repo.get(document_id)
+        if node is None:
+            return None
+        if node.usetype == USETYPE_SHEET:
+            return node
+        for above in reversed(repo.get_ancestors(document_id)):
+            if above.usetype == USETYPE_SHEET:
+                return above
+        return None
+
+    def _cells_call(self, document_id: int, ref: str) -> str:
+        """The request that answers for a cells anchor: ``/cells`` on the SHEET, with ``ref``."""
+        sheet = self._sheet_of(document_id)
+        if sheet is None:
+            raise SheetSourceUnavailable(
+                f"Document {document_id} carries a cells anchor and has no worksheet node "
+                "at or above it, so there is no node to ask for its cells"
+            )
+        return f"GET /documents/{sheet.id}/cells?ref={ref}"
+
     def _pdf_anchor(self, document_id: int) -> PdfAnchor:
         """This node's own ``source_anchor``, as a page and a rectangle — or why it is not one.
 
@@ -1611,6 +1638,16 @@ class DocumentService:
                     f"Document {document_id} has no rectangle: "
                     f"{unresolved.get('reason')} (code {unresolved.get('code')!r})"
                 )
+            if self._sheet_of(document_id) is not None:
+                # A spreadsheet node ingested before `extract:sheet` / `profile:sheet` wrote
+                # `cells` anchors. `citation` is the wrong pointer: it never runs over a sheet.
+                raise RegionNotAddressable(
+                    f"Document {document_id} carries no {ANCHOR_NAME!r} evidence row, so it is "
+                    "not addressed at any region of its source. For a spreadsheet that anchor "
+                    "is written by `extract:sheet` (records, tables) and `profile:sheet` "
+                    "(profiles), so a workbook ingested before they wrote one has none; "
+                    "re-ingest it to get one"
+                )
             raise RegionNotAddressable(
                 f"Document {document_id} carries no {ANCHOR_NAME!r} evidence row, so it is "
                 "not addressed at any region of its source. `citation` is what writes one "
@@ -1635,7 +1672,7 @@ class DocumentService:
             raise RegionNotAddressable(
                 f"Document {document_id} is addressed at cells {anchor.ref!r} of sheet "
                 f"{anchor.sheet!r}, and a spreadsheet region is served as cells rather than "
-                f"as a picture of cells: GET /documents/{document_id}/cells"
+                f"as a picture of cells: {self._cells_call(document_id, anchor.ref)}"
             )
         if isinstance(anchor, SpanAnchor):
             # Same treatment, different absence: a character range in the extracted markdown
