@@ -38,6 +38,17 @@ views exist, and office documents read, cited and previewed (issue #29). The ver
 is unchanged: three distributions, one number, one tag. Open work is the 0.7.0 milestone
 on the issue tracker; the numbered gaps below are the long-lived ones.
 
+**Read again 2026-10-14.** The rotation rework of #38 is on `master` (`a7cd176`, suite 3256
+passed, 31 skipped, 0 failed): rotated PDF pages anchor in displayed space. What #38 still
+owes is block-granular boxes, and #44 is the open decision on a rotated page that also has a
+CropBox. `worktree-vue-frontend` (`ab2af4a`) now contains `master`, has its Search and Ingest
+views, and was exercised against a real appliance in the dev stack; the document and
+bounding-box preview view is the part not built. Issue #2 has its third arm: at tier 10
+`sentence_window` reads MaxSim recall@10 0.421 against 0.210 for the shipped
+`sentence_packed`/120 (noise floor 0.023, chunk size confounded), so the prose default
+window is a decision, not a settled value. The needle program on `feat/needle-experimental-program`
+is a separate line and is not merged here.
+
 | | |
 |---|---|
 | ~~Released~~ | ~~**0.5.1**, 2026-09-13. `master` is the tag; `jmfts` and `jmfts-client` are both on PyPI~~ |
