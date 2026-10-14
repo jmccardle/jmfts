@@ -17,6 +17,7 @@ const routes: RouteRecordRaw[] = [
   },
   { path: "/search", name: "search", component: () => import("@/views/Search.vue") },
   { path: "/calls", name: "calls", component: Calls },
+  { path: "/ingest", name: "ingest", component: () => import("@/views/Ingest.vue") },
   { path: "/:rest(.*)", redirect: "/" },
 ];
 
