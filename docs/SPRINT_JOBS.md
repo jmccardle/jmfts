@@ -448,7 +448,9 @@ wrong.
 <!-- Updated 2026-09-15 from 44/30/15/15 to 51/36/21/15. The test's own docstring is the
      record of all six moves, and it is the mechanism working: it tells whoever changes the
      registry that this sentence has moved and where. These documents were outside the
-     repository between 0.5.1 and 0.6.0, so nobody who saw the failure could act on it. -->
+     repository between 0.5.1 and 0.6.0, so nobody who saw the failure could act on it.
+     Updated 2026-10-13 from 51 to 52 entries: the leaf `extraction.tables_found`, which
+     `extract:tables`' fan-out bound reads. Rows, dicts and scalars unmoved. -->
 
 
 Four things the build corrected, and 3.1 as written above is wrong about two:

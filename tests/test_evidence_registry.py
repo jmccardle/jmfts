@@ -163,6 +163,11 @@ class TestShape:
         than more writers of it: a ``.docx`` carries both at once, an exact ``ooxml`` address
         and a recovered rectangle, and both tasks are ``subtree``-scoped over the same chunks
         — so one name would not blur the two, it would have the second overwrite the first.
+
+        A SEVENTH TIME, 2026-10-13, and it is one LEAF: ``extraction.tables_found``, the count
+        of tables a PDF's text layer rendered inline, which ``extract:tables``' fan-out bound
+        reads (one node per span). 51 → 52, and the rows, dicts and bare scalars all unmoved,
+        because it lives inside the ``extraction`` row.
         """
         stored = [
             e for e in REGISTRY.values() if e.store.kind == STORE_EVIDENCE and not e.store.path

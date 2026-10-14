@@ -692,7 +692,13 @@ and `pages_with_tables`, which `extract:text` writes (3.3).
      written by probe, not two. `pages_with_tables` is still `extract:text`'s, and the
      sentence about `extract:tables` below is still accurate — nothing re-plans a node
      after extraction. See `ingest_tasks.py`'s comment on the `extract:tables` row. -->
-<!-- Corrected 2026-10-13: something does re-plan now. See below. -->
+ Nothing re-plans a
+node after extraction, so `extract:tables` is not reachable in the queued path
+today and its recorded reason says the honest thing: nobody has looked yet.
+<!-- Superseded 2026-10-13: the sentence above, and the 2026-09-15 note's "still accurate",
+     stopped being true when `extract:tables` landed. `extract:text` re-plans the node after
+     extraction and `extract:tables` is reachable in the queued path; what replaced it is the
+     paragraph below. Left standing because the note above cites it. -->
 At probe time `extract:tables` is not applicable with the reason
 "patterns.pages_with_tables was not measured; extract:text measures it and
 re-plans extract:tables". `ingest_tasks.PATTERN_MEASURED_BY` names the task that
@@ -704,7 +710,13 @@ the same transaction. The guard still reads a patterns dict and options and
 nothing else, so the plan stays a pure function and `EXPLAIN` can be asked the
 same question with `pages_with_tables` supplied. A row gated this way must be
 ordered `after` its measurer and nothing else (`_check_task_rows` rule 6), because
-the re-plan is a batch of its own.
+the re-plan is a batch of its own. Once `extract:text` has run, a format whose
+reader does not measure the name (`.md`, `.docx`) records "was not measured:
+extract:text ran, and it does not measure it for format …" rather than repeating
+probe's promise. The re-plan applies 6.1's attempt diff before enqueuing, so a
+second commit of `extract:text` (a worker that outlived its lease) queues no
+second `extract:tables` row; the handler matches existing children on the natural
+key `p{page}.t{index}` and writes nothing when every key is already there.
 
 #### What shipped: `extract:tables` (2026-10-13)
 
@@ -1754,10 +1766,14 @@ neither should be assumed:
 | pdf | 3 | `probe` only — all three `is_scanned`, so `ocr` skips with Part 4's reason |
 | db / ps / gz / zip / html | 23 | `probe` only |
 
-Zero probe failures across 113 PDFs. 60 of them carry tables, all then
-`deferred` (they are decided after `extract:text` now; see 4.4). **156 files — every `.md` and `.txt` in the corpus — get a file node
+Zero probe failures across 113 PDFs. 60 of them carry tables, all currently
+`deferred`. **156 files — every `.md` and `.txt` in the corpus — get a file node
 and nothing under it.** That is the number this section exists to change, and it
 is now a measurement rather than an expectation.
+<!-- Marked 2026-10-13: "all currently `deferred`" was true of the 2026-08-16 run and is no
+     longer true of the tree. `extract:tables` is decided after `extract:text` now, by the
+     re-plan 4.2 describes, and a PDF whose text layer renders a table gets `table` nodes.
+     The 60 were not re-measured. -->
 
 Two findings that change what gets built, both from the detection half rather
 than the pattern half:

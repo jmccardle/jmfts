@@ -11,6 +11,27 @@ Dates are the release commit's date. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses semantic
 versioning with the caveat that it is pre-1.0, so a minor version may break the wire.
 
+## [Unreleased]
+
+### Added
+
+- **PDF tables become `table` nodes (`extract:tables`).** A table the text layer renders
+  inline is written as a `usetype=table` child of the file node, keyed `p{page}.t{index}`,
+  holding exactly the markdown the file node holds for it, with its page, bbox and
+  `source_span`, and its own `embed`. `extract:text` measures `pages_with_tables` and
+  re-plans the node, which is what makes the row reachable at all: probe cannot measure the
+  pattern, so before this the task was "not measured" forever. A re-run matches existing
+  children on the key and writes no duplicates, and a second commit of `extract:text`
+  enqueues no second `extract:tables`. The table text also stays in the chunk around it, so
+  BM25 sees those cells twice; that is accepted for now. One table whose span does not check
+  out fails the whole document's `extract:tables`.
+
+### Changed
+
+- **The `extract:tables` not-applicable reason after `extract:text` has run** now says the
+  reader ran and does not measure `pages_with_tables` for that format (`.md`, `.docx`),
+  instead of repeating probe's "extract:text measures it and re-plans extract:tables".
+
 ## [0.6.2] — 2026-10-12
 
 **A refused request says why, and a stale field says it was ignored.** The bugs and small
