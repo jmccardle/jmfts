@@ -451,3 +451,35 @@ class TestADocumentWithNoStructureAtAll:
         assert evidence(node)["structure"]["coverage"] == 0.0
         assert evidence(node)["structure"]["gap_regions"] == 1
         assert node.settled == SETTLED_SETTLED
+
+
+class TestATaskQueuedBeforeTheRename:
+    """Issue #1: `structure.max_tokens` became `structure.max_words`, and
+    `migrations/024_max_words.sql` deliberately leaves queued `task_queue.params` alone (the
+    param fingerprint would stop matching). So a task queued under the old name reaches
+    `_build_tree` still carrying it, and must be refused rather than chunked at the default."""
+
+    def test_it_fails_permanent_with_the_rename_message(self, db_session, outlined_pdf):
+        from jmfts_core.ingest_tasks import WRITE_CHILDREN
+        from jmfts_core.repositories.task_queue import TaskQueueRepository
+        from jmfts_core.task_errors import ErrorType
+
+        node = _ingest(db_session, outlined_pdf)
+        before = len(_children(db_session, node.id))
+
+        task = TaskQueueRepository(db_session).enqueue(
+            TASK_STRUCTURE_DECLARED,
+            node.id,
+            WRITE_CHILDREN,
+            params={"chunk_strategy": "sentence_packed", "max_tokens": 80},
+            max_retries=0,
+        )
+        task_id = task.id
+        drain_ingest_queue(db_session)
+
+        task = TaskQueueRepository(db_session).get(task_id)
+        assert task.status == "failed"
+        assert task.error_type == ErrorType.PERMANENT.value
+        assert "max_tokens" in task.error and "max_words" in task.error
+        # Refused, not run at the default budget: nothing was written under the node.
+        assert len(_children(db_session, node.id)) == before

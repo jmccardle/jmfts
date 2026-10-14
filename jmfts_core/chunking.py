@@ -343,7 +343,9 @@ def chunk_text(
         strategy: Chunking strategy (sentence, sentence_packed, paragraph, paragraph_packed,
             token_count, sentence_window). ``sentence_window`` packs to ``fits`` and so
             requires it.
-        max_words: Target word count per chunk (token_count and sentence_packed only).
+        max_words: Target word count per chunk (sentence_packed, paragraph_packed and
+            token_count; sentence and paragraph ignore it, sentence_window is bounded by
+            ``fits`` instead).
         overlap: Word overlap between consecutive chunks (token_count only).
         min_chunk_length: Minimum character length for a chunk.  Shorter
             chunks are merged with the previous chunk, never past `max_chars`.

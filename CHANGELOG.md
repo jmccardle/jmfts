@@ -11,6 +11,23 @@ Dates are the release commit's date. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses semantic
 versioning with the caveat that it is pre-1.0, so a minor version may break the wire.
 
+## [Unreleased]
+
+### Breaking
+
+- **`structure.max_tokens` is now `structure.max_words`** (#1). The option always counted
+  whitespace-separated words, never subword tokens. A request or collection option set
+  still naming `max_tokens` is refused with a hint to rename it, and `/chunk` answers 422
+  to unknown fields. Migration 024 rewrites the stored `options` evidence row; a structure
+  task already queued with `max_tokens` is not rewritten (its param fingerprint would stop
+  matching) and fails PERMANENT with the rename message, so re-ingest the document.
+
+### Added
+
+- **`sentence_window` chunk strategy.** Packs whole sentences up to the embedding model's
+  token window, measured with the real tokenizer through `fits`; it refuses to run without
+  one.
+
 ## [0.6.2] — 2026-10-12
 
 **A refused request says why, and a stale field says it was ignored.** The bugs and small
