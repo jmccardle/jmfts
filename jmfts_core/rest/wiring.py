@@ -253,6 +253,24 @@ def _make_endpoint(spec: ExposeSpec) -> Callable:
     return endpoint
 
 
+def _error_responses(errors: dict[type, int]) -> dict[int, dict]:
+    """The statuses a spec's ``errors`` map can answer with, as OpenAPI ``responses``.
+
+    Without this a binary operation documents 200 and FastAPI's 422 and nothing else, while
+    ``/image`` really answers 400, 404, 409 and 413 — so a generated client has no word for
+    the refusals it will actually meet. ``errors`` and not ``effective_errors``: the 501
+    defaults are true of every operation and documented once, in the client's error
+    vocabulary (``ExposeSpec.effective_errors`` has the reasoning). Each status names the
+    exceptions that map to it, since several share one and the code alone does not say which.
+    """
+    by_status: dict[int, list[str]] = {}
+    for exc_type, status in errors.items():
+        by_status.setdefault(status, []).append(exc_type.__name__)
+    return {
+        status: {"description": ", ".join(names)} for status, names in sorted(by_status.items())
+    }
+
+
 def build_exposed_router() -> APIRouter:
     """Assemble one APIRouter carrying every registered ``@expose`` operation.
 
@@ -268,7 +286,10 @@ def build_exposed_router() -> APIRouter:
             # ``@expose`` refuses media_type alongside response_model, so the None below is
             # a fact about the spec rather than a branch.
             extra["response_class"] = Response
-            extra["responses"] = {200: {"content": {spec.media_type: _BINARY_SCHEMA}}}
+            extra["responses"] = {
+                200: {"content": {spec.media_type: _BINARY_SCHEMA}},
+                **_error_responses(spec.errors),
+            }
         router.add_api_route(
             spec.path,
             _make_endpoint(spec),

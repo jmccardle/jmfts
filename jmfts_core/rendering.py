@@ -119,6 +119,14 @@ def parse_bbox(raw: str) -> tuple[float, float, float, float]:
         raise BadRenderRequest(
             f"bbox {raw!r} is not four numbers; a rectangle is `x0,y0,x1,y1` in PDF points"
         ) from None
+    # `float()` accepts "nan" and "inf", and neither is a coordinate. Left in, a NaN
+    # survives `min`/`max` (both just return whichever operand came first), reaches
+    # `pymupdf.Rect`, and comes back as a PNG of nothing in particular rather than a 400.
+    if not all(math.isfinite(v) for v in (x0, y0, x1, y1)):
+        raise BadRenderRequest(
+            f"bbox {raw!r} has a non-finite value; a rectangle is four finite numbers, "
+            "`x0,y0,x1,y1` in PDF points"
+        )
     # Put the ends in order rather than refusing a reversed one: `x1 < x0` names the same
     # rectangle traversed the other way, and every reader of a PDF rect treats it so.
     return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
