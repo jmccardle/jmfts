@@ -15,6 +15,7 @@ const routes: RouteRecordRaw[] = [
     component: NodeInspector,
     props: (route) => ({ id: Number(route.params.id) }),
   },
+  { path: "/search", name: "search", component: () => import("@/views/Search.vue") },
   { path: "/calls", name: "calls", component: Calls },
   { path: "/:rest(.*)", redirect: "/" },
 ];
