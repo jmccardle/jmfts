@@ -1577,7 +1577,10 @@ class DocumentService:
         """The request that answers for a cells anchor: ``/cells`` on the SHEET, with ``ref``."""
         sheet = self._sheet_of(document_id)
         if sheet is None:
-            raise SheetSourceUnavailable(
+            # RegionNotAddressable, not SheetSourceUnavailable: this is raised inside
+            # `_pdf_anchor`, and /region and /page map only the former (409). Naming the
+            # node's own id instead would name a /cells call that is itself a 409.
+            raise RegionNotAddressable(
                 f"Document {document_id} carries a cells anchor and has no worksheet node "
                 "at or above it, so there is no node to ask for its cells"
             )

@@ -734,6 +734,19 @@ class TestTheCellsAnchor:
         assert [row.row for row in cells.rows] == [2]
         assert cells.rows[0].values[0] == evidence(record)["record"]["Deal ID"]
 
+    def test_a_cells_anchor_with_no_sheet_above_it_is_a_409_not_a_500(self, db_session):
+        """No worksheet at or above the node: there is no ``/cells`` call to name, and the
+        refusal must be one /region maps (409) rather than an unmapped exception."""
+        node = DocumentRepository(db_session).create(
+            title="orphan", content="x", usetype=USETYPE_RECORD, auto_embed=False
+        )
+        db_session.flush()
+        EvidenceRepository(db_session).write(
+            node.id, "source_anchor", {"kind": "cells", "sheet": "Deals", "ref": "A2:E2"}
+        )
+        with pytest.raises(RegionNotAddressable, match="no worksheet node"):
+            DocumentService(db_session)._pdf_anchor(node.id)
+
     def test_a_record_without_an_anchor_does_not_point_at_citation(
         self, db_session, evidence, workbook_bytes
     ):
