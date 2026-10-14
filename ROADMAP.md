@@ -198,16 +198,35 @@ one-off one, which is the difference 0.6.0 step 3 was for.
     not on what lies under it, so a caller with no grants on a private access-control root
     nested under an open root can refresh and learns `total_docs_found` including documents it
     cannot read. Count only; retrieval still filters postings, and it predates this change.
-    `TemplateService.get_template` and
+    ~~`TemplateService.get_template` and
     `render_template` read a template by `session.get(Document, template_id)` with no
-    `can_read`, and a template IS a document. ~~`DocumentService.embed_document` reaches
+    `can_read`, and a template IS a document.~~ **CLOSED 2026-10-13:** both read the
+    template through `can_read`, so a template the caller may not read is "Template not
+    found", held by `tests/test_access_template_reads.py`. ~~`TemplateService.list_templates`
+    ran a raw `db.query(Document)`, so `GET /templates` returned the body of a template
+    that `GET /templates/{id}` answered 404; it reached `require_add_child` through
+    `_get_container_id` and so read as scoped.~~ **CLOSED 2026-10-13:** the query takes
+    `readable_filter`, held over HTTP by the same file. ~~`DocumentService.embed_document` reaches
     `DocumentRepository.embed_document` rather than `.update`, so it misses the
     `require_write` at `repositories/document.py:401`.~~ **CLOSED 2026-10-12 (0.6.2):**
     `DocumentRepository.embed_document` now takes `require_write` (404 for a hidden
     document, 403 for a read-only one), held by `tests/test_access_embed_write.py`; nine
-    verbs remain. `IngestService.file_frontier`
+    verbs remain. ~~`IngestService.file_frontier`
     distinguishes "a document with work under it" from "no such document" for a caller that
-    may read neither. The eleventh gap the audit found became step 35 and is closed.
+    may read neither.~~ **CLOSED 2026-10-13:** it takes `can_read` on the node, so a hidden
+    node is the same 404 as a missing one, held by `tests/test_access_file_frontier.py`.
+    **RESIDUAL, recorded 2026-10-13, not closed:** `nodes_total` and the per-state counts
+    still include descendants the caller cannot read, so a governed caller learns the size
+    of a hidden subtree under a node it may read. The audit cannot list it, because the verb
+    reaches a gate; closing it means counting through `readable_filter`, which is a design
+    decision about what "the frontier" means to a partial reader and not a one-line patch.
+    ~~`OntologyService.create_binding`, listed by the audit for the document reference in a
+    `parent_id` / `document_ids` scope~~ **CLOSED 2026-10-13:** it now refuses a governed
+    caller naming a document it cannot read (404, the same as a missing id;
+    `tests/test_access_binding_scope.py`).
+    **All ten are closed as of 2026-10-13**, the `IndexService` five and the four above
+    landing together for 0.7.0; the two RESIDUAL counts (`refresh_index`, `file_frontier`)
+    stay open. The eleventh gap the audit found became step 35 and is closed.
     **Each is a candidate 0.7.0 step and none is a 0.6.0 step**: eleven is more than Block A
     can absorb without becoming a different sprint.
 

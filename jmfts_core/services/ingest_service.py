@@ -1297,7 +1297,9 @@ class IngestService:
         """
         db = self.session
         node = DocumentRepository(db).get(document_id)
-        if node is None:
+        # A node the caller may not read is the same 404 as no node: otherwise the counts
+        # distinguish "a document with work under it" from "no such document".
+        if node is None or not can_read(db, node):
             raise LookupError(f"Document {document_id} not found")
 
         counts = DocumentRepository(db).settle_frontier(document_id)
