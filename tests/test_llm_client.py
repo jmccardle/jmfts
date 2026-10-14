@@ -157,6 +157,30 @@ class TestSyncCallSite:
         assert rollup_tasks.llm_input_tokens(silent) is None
         assert rollup_tasks.llm_input_tokens(llm_client.LlmCompletion("s", "m", {})) is None
 
+    def test_input_count_is_the_whole_prompt_not_the_uncached_remainder(self):
+        """τ's ``input_tokens`` is ``prompt_tokens`` minus the cached spans. The evidence is the
+        prompt size the endpoint reported, so the cached spans are added back."""
+
+        def completion(**usage):
+            return llm_client.LlmCompletion(text="s", model="m", usage=usage)
+
+        # prompt_tokens=1234, cached_tokens=1000: τ reports input_tokens=234.
+        partial = completion(input_tokens=234, cache_read_tokens=1000)
+        assert rollup_tasks.llm_input_tokens(partial) == 1234
+        # A full cache hit: τ reports input_tokens=0, which is not "unreported".
+        assert (
+            rollup_tasks.llm_input_tokens(completion(input_tokens=0, cache_read_tokens=500)) == 500
+        )
+        write = completion(input_tokens=100, cache_read_tokens=50, cache_write_tokens=25)
+        assert rollup_tasks.llm_input_tokens(write) == 175
+        # No cache fields: the plain count.
+        assert rollup_tasks.llm_input_tokens(completion(input_tokens=42)) == 42
+        # No usage at all.
+        assert rollup_tasks.llm_input_tokens(completion()) is None
+        assert (
+            rollup_tasks.llm_input_tokens(completion(input_tokens=0, cache_read_tokens=0)) is None
+        )
+
     def test_calling_it_from_a_running_loop_is_refused_by_name(self):
         """Rather than deadlocking or reporting an asyncio internal.
 

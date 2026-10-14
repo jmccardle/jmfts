@@ -1070,12 +1070,22 @@ def store_effective_content(
 def llm_input_tokens(completion: LlmCompletion) -> Optional[int]:
     """The prompt size the endpoint reported for ``completion``, or ``None`` if it did not.
 
+    Recorded as ``input_tokens + cache_read_tokens + cache_write_tokens`` of the completion's
+    usage. τ computes ``input_tokens`` as ``prompt_tokens`` MINUS the cached and cache-write
+    spans, so ``input_tokens`` alone is only the uncached remainder: a prompt of 1234 tokens
+    with 1000 served from cache would record 234, and a full cache hit would record nothing.
+    The three partition the prompt, so their sum is the ``prompt_tokens`` the server sent.
+
     τ's ``Usage`` defaults every counter to 0, so a server that sends no ``usage`` block
-    reads as an input of 0 tokens. No request this module makes has an empty prompt — the
-    system prompt alone is tokens — so 0 can only mean "not reported", and recording it
-    would be a measurement nobody made.
+    reads the same as one reporting all zeros; τ keeps no flag that tells them apart. No
+    request this module makes has an empty prompt — the system prompt alone is tokens — so a
+    sum of 0 can only mean "not reported", and recording it would be a measurement nobody
+    made. That is why 0 maps to ``None``.
     """
-    count = completion.usage.get("input_tokens") or 0
+    usage = completion.usage
+    count = sum(
+        usage.get(key) or 0 for key in ("input_tokens", "cache_read_tokens", "cache_write_tokens")
+    )
     return count if count > 0 else None
 
 
