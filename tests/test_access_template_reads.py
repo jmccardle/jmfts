@@ -1,4 +1,4 @@
-"""Subtree RBAC — ``TemplateService.get_template`` and ``render_template`` take the read gate.
+"""Subtree RBAC — the ``TemplateService`` read verbs take the read gate.
 
 A template IS a document (usetype ``template``, under a container node). Both verbs once
 read it by ``session.get(Document, template_id)`` with no ``can_read`` (ROADMAP known gap
@@ -6,6 +6,9 @@ read it by ``session.get(Document, template_id)`` with no ``can_read`` (ROADMAP 
 
     hidden (unreadable) template -> LookupError          (404, existence-hiding)
     reader                       -> allowed
+
+``list_templates`` and ``search_templates`` drop a hidden template from their results
+rather than failing the call.
 """
 
 from contextlib import contextmanager
@@ -118,7 +121,9 @@ def _http(db_session, principal):
         app.dependency_overrides.pop(get_db, None)
 
 
-def _listed_template(session, monkeypatch, *, governed):
+def _listed_template(
+    session, monkeypatch, *, governed, content="SECRET Hello {{name}}", auto_embed=False
+):
     """A template inside the (patched) container; its own ACR for RD when ``governed``."""
     repo = DocumentRepository(session)
     container = repo.create(
@@ -128,11 +133,11 @@ def _listed_template(session, monkeypatch, *, governed):
     monkeypatch.setattr(template_service, "_container_id", container.id)
     tpl = repo.create(
         title="secret greeting",
-        content="SECRET Hello {{name}}",
+        content=content,
         parent_id=container.id,
         usetype=TEMPLATE_USETYPE,
         structured_content={"category": "ideation", "variables": [], "usage_count": 0},
-        auto_embed=False,
+        auto_embed=auto_embed,
     )
     session.flush()
     rd = _principal(session, "RD")
@@ -165,3 +170,32 @@ def test_list_templates_shows_template_to_reader_and_owner(db_session, monkeypat
 def test_list_templates_with_no_acr_shows_everyone(db_session, monkeypatch):
     tid, _, na = _listed_template(db_session, monkeypatch, governed=False)
     assert tid in _list_ids(db_session, na)
+
+
+# --- POST /templates/search ----------------------------------------------------------------
+#
+# From 332ddda. search_templates has no gate of its own and needs none: the hit comes from
+# SearchRepository.vector_search, which ANDs readable_filter into the scored statement. This
+# pins the VERB's contract so that a change of leaf (one that forgot the filter) fails here,
+# rather than a second, post-LIMIT can_read pass in the service that would short the page.
+
+_SECRET_BODY = "the pangolin protocol authorizes zebra maneuvers for {{name}}"
+
+
+def _search_ids(db_session, principal):
+    with _http(db_session, principal) as client:
+        resp = client.post(
+            "/templates/search", json={"query": "pangolin protocol zebra maneuvers", "limit": 10}
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["total"] == len(body["results"])
+    return [r["document"]["id"] for r in body["results"]]
+
+
+def test_search_templates_hides_template_from_non_reader(db_session, monkeypatch):
+    tid, rd, na = _listed_template(
+        db_session, monkeypatch, governed=True, content=_SECRET_BODY, auto_embed=True
+    )
+    assert tid not in _search_ids(db_session, na)
+    assert tid in _search_ids(db_session, rd)
