@@ -93,8 +93,6 @@ CHARACTER_CAPS = {
     "jmfts_core.chunking:chunk_count_ceiling:max_chars",
     "jmfts_core.structure_tasks:_chunk_ceiling:max_chars",
     "jmfts_core.chunking:<module>:_MIN_FIT_CHARS",
-    "jmfts_core.embedder:RemoteEmbedder.chunk_to_fit:max_chars",
-    "jmfts_core.embedding:EmbeddingService.chunk_to_fit:max_chars",
     "jmfts_core.probe:<module>:SCANNED_MAX_CHARS_PER_PAGE",
     "jmfts_core.repositories.view:_snippet_around:max_chars",
     "jmfts_client.contracts.document:ChunkRequest:max_chars",

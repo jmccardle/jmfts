@@ -3,7 +3,7 @@
 ``jmfts_core.embedding.EmbeddingService`` does five things that callers outside it use, and
 only two of them need the model weights:
 
-    check_fit / fits_token_window / chunk_to_fit    the tokenizer, no GPU
+    check_fit / fits_token_window                   the tokenizer, no GPU
     truncate_embedding                              numpy, a slice and a division
     embed_text / embed_with_tokens                  the model, the GPU
 
@@ -163,9 +163,6 @@ class RemoteEmbedder:
 
     def fits_token_window(self, text, prefix="search_document: ") -> bool:
         return self.local.fits_token_window(text, prefix=prefix)
-
-    def chunk_to_fit(self, text, strategy=None, max_chars=None, prefix="search_document: "):
-        return self.local.chunk_to_fit(text, strategy=strategy, max_chars=max_chars, prefix=prefix)
 
     def truncate_embedding(self, embedding, target_dim, normalize=True):
         return self.local.truncate_embedding(embedding, target_dim, normalize=normalize)

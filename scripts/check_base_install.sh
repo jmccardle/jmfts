@@ -77,6 +77,7 @@ print("   no rdflib, no datasketch")
 
 import numpy as np
 
+from jmfts_core.chunking import chunk_text
 from jmfts_core.config import get_settings
 from jmfts_core.embedder import RemoteEmbedder, get_embedder
 from jmfts_core.embedding import EmbeddingService, ModelStackNotInstalled
@@ -88,7 +89,7 @@ service = EmbeddingService()
 fit = service.check_fit("Late interaction scores each query token against every token.")
 assert fit.token_count > 0 and not fit.truncated
 assert service.fits_token_window("hello world") is True
-assert len(service.chunk_to_fit("A sentence. " * 60)) >= 1
+assert len(chunk_text("A sentence. " * 60, fits=service.fits_token_window)) >= 1
 assert service.truncate_embedding(np.arange(768, dtype=np.float32), 256).shape == (256,)
 print(f"   check_fit / chunker / truncate: OK ({fit.token_count} tokens, limit {fit.limit})")
 

@@ -294,9 +294,9 @@ def _split_oversized(
 
     The pieces are cut with the task's ``structure`` options and the window's own
     predicate — the same ``chunk_text`` call the prose rungs make per section (issue #4).
-    It was ``chunk_to_fit``'s fixed default — ``sentence`` until issue #2 made it
-    ``sentence_window`` — which no option reached. The ``structure`` group defaults to
-    ``sentence_packed``, which gives passages.
+    It was ``EmbeddingService.chunk_to_fit``'s fixed default — ``sentence`` — which no
+    option reached; that method had no other caller and is deleted. The ``structure``
+    group defaults to ``sentence_packed``, which gives passages.
 
     Which layers set the group: the usetype default and a collection's options reach every
     transcript; a request's own ``structure`` options reach it only through an entry point

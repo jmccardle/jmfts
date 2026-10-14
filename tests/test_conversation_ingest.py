@@ -186,7 +186,7 @@ def _conversation_ceiling(data: bytes) -> int:
 class TestTheFanoutCeilingHoldsAtTheWorstCase:
     """``SPRINT_0_6_0.md`` step 36, question 4.11 option A, without a database.
 
-    The handler's arithmetic is one node per turn plus one per piece ``chunk_to_fit``
+    The handler's arithmetic is one node per turn plus one per piece ``chunk_text``
     returns for an over-window turn. This drives the same ``chunk_text`` call with the
     adversarial shape for each half: a prompt/response line, which is TWO turns from ONE
     line, and content made of two-character sentences, which the ``sentence`` strategy

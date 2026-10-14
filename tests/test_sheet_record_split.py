@@ -21,7 +21,7 @@ node                 fits the token/maxsim window        does not fit
 ===================  ==================================  =========================
 ``record``           leaf, content, vector + maxsim      container over ``cell``
 ``cell``             leaf, content, vector + maxsim      container over ``chunk``
-``chunk``            always — ``chunk_to_fit`` says so   —
+``chunk``            always — ``chunk_text`` says so     —
 ===================  ==================================  =========================
 
 The builder half is a pure function and is tested without a workbook, which is what
@@ -83,7 +83,7 @@ def _fits(limit: int):
 
 
 def _chunk(size: int):
-    """``chunk`` as ``EmbeddingService.chunk_to_fit`` supplies it: pieces that each fit."""
+    """``chunk`` as ``chunk_text`` given ``fits`` supplies it: pieces that each fit."""
     return lambda text: [text[i : i + size] for i in range(0, len(text), size)]
 
 
