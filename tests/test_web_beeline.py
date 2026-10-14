@@ -32,11 +32,13 @@ feature today and stating it honestly is worth more than a uniform story:
    which of the FOUR absences that is: nothing has paginated the document, a rectangle was
    looked for in a rendition and not found, a rung ran and recorded neither, or nothing ever
    tried to place this node at all.
-4. **``.xlsx``** — no anchor at all. ``CellsAnchor`` is in the contract and ``/cells`` reads
-   one, and NOTHING in the ingest path writes one (``git grep '"kind": "cells"'`` over
-   ``jmfts_core`` finds two comments and no writer). A workbook hit carries no ``source_anchor``,
-   so it ends at the node the row stands for. Recorded here as the gap it is rather than papered
-   over: the last test asserts the page SAYS so.
+4. **``.xlsx``** — ingest now writes ``{kind: "cells", sheet, ref}`` on a sheet's ``table``,
+   each ``record`` and its ``profile`` (issue #29, the write side; ``sheet_tasks._cells_anchor``,
+   pinned in ``tests/test_sheet_records.py::TestTheCellsAnchor``). The fixture here still models
+   a workbook hit that carries NO ``source_anchor`` — deliberately: it is the unanchored
+   response (a row ingested before #29, or any hit whose evidence has none), and what the page
+   does with that is what the last test asserts. It ends at the node the row stands for, and
+   the page SAYS so. A fixture for the anchored workbook hit is separate work.
 
 **The second of those is new, and what it closed was a gap between the appliance and the
 browser rather than a missing capability.** Block G step 33 landed ``anchor:render`` and
@@ -296,9 +298,9 @@ HARNESS = textwrap.dedent("""
         get_back_references: async (a) => { calls.push(["back", a]); return FIXTURE.backs[id]; },
         get_document_evidence: async (a) => {
           calls.push(["evidence", a]);
-          // Answers "no rows at all", which is the truthful answer for the one node that
-          // reaches here — the workbook row, whose beeline ends because nothing writes it an
-          // anchor. What this stub is for is COUNTING: the two anchored hits must not reach it.
+          // Answers "no rows at all" for the one node that reaches here — the workbook row,
+          // which this fixture models as UNANCHORED on purpose (ingest writes cells anchors
+          // since #29). What this stub is for is COUNTING: the anchored hits must not reach it.
           return { document_id: Number(id), evidence: {} };
         },
         get_document_image: async (a) => {
@@ -489,20 +491,17 @@ def test_a_paginated_office_hit_arrives_with_a_rectangle_and_says_whose_page_it_
 
 
 @needs_node
-def test_a_workbook_hit_ends_at_the_row_because_nothing_writes_a_cells_anchor(beeline):
-    """THE GAP, asserted as a gap rather than worked around.
+def test_an_unanchored_workbook_hit_ends_at_the_row(beeline):
+    """The UNANCHORED workbook hit, and what the page does with it.
 
-    ``CellsAnchor`` is in the contract, ``GET /documents/{id}/cells`` reads one, the overlay
-    draws one and ``tests/test_web_document_view.py`` boxes one on a grid. **Nothing in the
-    ingest path writes one.** ``citation`` runs over a PDF text layer and ``anchor:source`` over
-    an OOXML package; a workbook reaches neither, so every spreadsheet hit carries no
-    ``source_anchor`` and the beeline ends at the node the row stands for.
-
-    This test is the record of that, and it is written so that it FAILS THE DAY IT STOPS BEING
-    TRUE — a rung that starts writing cells anchors makes the hit carry one, which makes the
-    fragment carry one, which breaks the first assertion here. That is the intended way to find
-    out. Inventing a client-side anchor from the row's position would have hidden it forever,
-    and it is the fallback this lane was told not to add.
+    Ingest writes ``cells`` anchors now (issue #29, the write side): ``extract:sheet`` and
+    ``profile:sheet`` put ``{kind: "cells", sheet, ref}`` on each record, the table and the
+    profile — see ``tests/test_sheet_records.py::TestTheCellsAnchor``. This test is no longer the
+    record of a gap in the ingest path. Its fixture deliberately models a workbook hit whose
+    response carries no ``source_anchor`` (a row ingested before #29, or any node whose evidence
+    has none), and pins that such a hit ends at the node the row stands for, says so, and pays
+    for exactly one evidence call. Inventing a client-side anchor from the row's position is
+    still the fallback this lane was told not to add.
     """
     route = beeline["landings"]["sheet:route"]
     assert route["params"] == {"id": str(SHEET_DOC)}, (

@@ -55,14 +55,14 @@ of the node above (legal only as a read).
 | `derive:rule` | — | `text@self` | `cpu` |
 | `embed` | `text@self` | `embedding@self` | `model` |
 | `extract:facts` | `text@self`, `text@subtree` | — | `llm` |
-| `extract:sheet` | `sheet@self`, `sheet.measurements@self`, `blob@ancestor` | `sheet.shape@self`, `text@subtree`, `record@children`, `cell@subtree`, `table@children` | `cpu` |
+| `extract:sheet` | `sheet@self`, `sheet.measurements@self`, `blob@ancestor` | `sheet.shape@self`, `text@subtree`, `record@children`, `cell@subtree`, `table@children`, `source_anchor@children` | `cpu` |
 | `extract:text` | `matched@self`, `blob@self` | `text@self`, `extraction@self` | `cpu` |
 | `fetch:arxiv` | `source@self` | `blob@self`, `file@self` | `cpu` |
 | `fetch:path` | `source@self` | `blob@self`, `file@self` | `cpu` |
 | `fetch:url` | `source@self` | `blob@self`, `file@self` | `cpu` |
 | `index:bm25` | `text@self`, `text@subtree` | — | `cpu` |
 | `probe` | `file@self`, `blob@self` | `matched@self` | `cpu` |
-| `profile:sheet` | `sheet@self`, `blob@ancestor` | `sheet.measurements@self`, `profile@children`, `text@children` | `cpu` |
+| `profile:sheet` | `sheet@self`, `blob@ancestor` | `sheet.measurements@self`, `profile@children`, `text@children`, `source_anchor@children` | `cpu` |
 | `propose:links` | `sheet.measurements@children` | `column_links@self` | `cpu` |
 | `render:pdf` | `matched@self`, `blob@self` | `rendition@self` | `cpu` |
 | `structure:conversation` | `matched@self`, `blob@self`, `text@self` | `structure@self`, `structure@subtree`, `text@subtree` | `cpu` |

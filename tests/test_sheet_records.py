@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import datetime
 import io
+import re
 
 import pytest
 from sqlalchemy import select
@@ -37,12 +38,14 @@ pytest.importorskip("openpyxl", reason="the office extra is not installed")
 import openpyxl  # noqa: E402
 
 import jmfts_core.ingest_tasks  # noqa: E402,F401  (import order; see the module cycle)
+from jmfts_client.contracts.anchor import CellsAnchor, parse_anchor  # noqa: E402
 from jmfts_client.contracts.upload import UploadedFile  # noqa: E402
 from jmfts_core.ingest_tasks import TASK_EXTRACT_SHEET  # noqa: E402
 from jmfts_core.ingest_options import resolve_options  # noqa: E402
 from jmfts_core.models.document import (  # noqa: E402
     Document,
     SETTLED_SETTLED,
+    USETYPE_PROFILE,
     USETYPE_RECORD,
     USETYPE_TABLE,
 )
@@ -60,6 +63,10 @@ from jmfts_core.office.sheets import (  # noqa: E402
 from jmfts_core.repositories.document import DocumentRepository  # noqa: E402
 from jmfts_core.repositories.evidence import EvidenceRepository  # noqa: E402
 from jmfts_core.services.ingest_service import IngestService  # noqa: E402
+from jmfts_core.services.document_service import (  # noqa: E402
+    DocumentService,
+    RegionNotAddressable,
+)
 from jmfts_core.sheet_profile import sheet_evidence_block  # noqa: E402
 from jmfts_core.sheet_records import (  # noqa: E402
     SHAPE_RECORDS,
@@ -640,3 +647,151 @@ class TestTheTableShape:
 
         with pytest.raises(ValueError, match="sheet.measurements"):
             run_extract_sheet(db_session, _ScopedTask(node.id))
+
+
+class TestTheCellsAnchor:
+    """Issue #29: the WRITE side of ``OFFICE_SPEC.md`` Part 5's spreadsheet anchor.
+
+    ``CellsAnchor``, ``/cells`` and ``/region``'s 409 have read a ``cells`` anchor for a
+    while, and nothing wrote one, so a workbook hit carried no ``source_anchor`` and a
+    citation ended at the node. The region each node came from is known when it is made.
+    """
+
+    def test_a_record_is_addressed_at_its_worksheet_row(self, db_session, evidence, workbook_bytes):
+        """The row NUMBER, the same one in the title: row 4 is blank, so the third record is
+        row 5 and its anchor says so. Across the sheet's measured width, A to E."""
+        file_node = _ingest(db_session, workbook_bytes)
+        sheet = _sheet_node(db_session, file_node, "Deals")
+        records = _children(db_session, sheet.id, USETYPE_RECORD)
+
+        assert [evidence(node)["source_anchor"] for node in records] == [
+            {"kind": "cells", "sheet": "Deals", "ref": "A2:E2"},
+            {"kind": "cells", "sheet": "Deals", "ref": "A3:E3"},
+            {"kind": "cells", "sheet": "Deals", "ref": "A5:E5"},
+        ]
+
+    def test_the_table_is_addressed_at_the_used_range_it_renders(
+        self, db_session, evidence, workbook_bytes
+    ):
+        file_node = _ingest(db_session, workbook_bytes)
+        sheet = _sheet_node(db_session, file_node, "Deals")
+        table = _children(db_session, sheet.id, USETYPE_TABLE)[0]
+
+        assert evidence(table)["source_anchor"] == {
+            "kind": "cells",
+            "sheet": "Deals",
+            "ref": "A1:E5",
+        }
+
+    def test_a_header_less_sheet_s_table_is_anchored_too(
+        self, db_session, evidence, workbook_bytes
+    ):
+        """`Notes` gets no records and still gets a table, so the table is the only node that
+        can carry its address. B3 is its one value, so the used range is A1:B3."""
+        file_node = _ingest(db_session, workbook_bytes)
+        sheet = _sheet_node(db_session, file_node, "Notes")
+        table = _children(db_session, sheet.id, USETYPE_TABLE)[0]
+
+        assert evidence(table)["source_anchor"] == {
+            "kind": "cells",
+            "sheet": "Notes",
+            "ref": "A1:B3",
+        }
+
+    def test_the_profile_is_addressed_at_the_sheet_it_measured(
+        self, db_session, evidence, workbook_bytes
+    ):
+        file_node = _ingest(db_session, workbook_bytes)
+        sheet = _sheet_node(db_session, file_node, "Deals")
+        profile = _children(db_session, sheet.id, USETYPE_PROFILE)[0]
+
+        assert evidence(profile)["source_anchor"] == {
+            "kind": "cells",
+            "sheet": "Deals",
+            "ref": "A1:E5",
+        }
+
+    def test_what_is_written_is_what_the_reader_parses(self, db_session, evidence, workbook_bytes):
+        """The contract model is the reader, and `/region` is the verb that turns a `cells`
+        anchor into a 409 naming `/cells` — which it can only do once there is one."""
+        file_node = _ingest(db_session, workbook_bytes)
+        sheet = _sheet_node(db_session, file_node, "Deals")
+        record = _children(db_session, sheet.id, USETYPE_RECORD)[0]
+
+        anchor = parse_anchor(evidence(record)["source_anchor"])
+        assert anchor == CellsAnchor(sheet="Deals", ref="A2:E2")
+        with pytest.raises(RegionNotAddressable, match="addressed at cells 'A2:E2'") as raised:
+            DocumentService(db_session)._pdf_anchor(record.id)
+
+        # FOLLOW THE URL THE MESSAGE GIVES. It once named /documents/<record id>/cells, which
+        # answers 409 because /cells serves only sheet nodes.
+        match = re.search(r"GET /documents/(\d+)/cells\?ref=(\S+)", str(raised.value))
+        assert match, str(raised.value)
+        assert int(match.group(1)) == sheet.id
+        cells = DocumentService(db_session).get_document_cells(
+            int(match.group(1)), ref=match.group(2)
+        )
+        assert [row.row for row in cells.rows] == [2]
+        assert cells.rows[0].values[0] == evidence(record)["record"]["Deal ID"]
+
+    def test_a_cells_anchor_with_no_sheet_above_it_is_a_409_not_a_500(self, db_session):
+        """No worksheet at or above the node: there is no ``/cells`` call to name, and the
+        refusal must be one /region maps (409) rather than an unmapped exception."""
+        node = DocumentRepository(db_session).create(
+            title="orphan", content="x", usetype=USETYPE_RECORD, auto_embed=False
+        )
+        db_session.flush()
+        EvidenceRepository(db_session).write(
+            node.id, "source_anchor", {"kind": "cells", "sheet": "Deals", "ref": "A2:E2"}
+        )
+        with pytest.raises(RegionNotAddressable, match="no worksheet node"):
+            DocumentService(db_session)._pdf_anchor(node.id)
+
+    def test_a_record_without_an_anchor_does_not_point_at_citation(
+        self, db_session, evidence, workbook_bytes
+    ):
+        """A workbook ingested before anchors were written: the message names the sheet
+        rungs and re-ingest, not `citation`, which only runs over a PDF text layer."""
+        file_node = _ingest(db_session, workbook_bytes)
+        sheet = _sheet_node(db_session, file_node, "Deals")
+        record = _children(db_session, sheet.id, USETYPE_RECORD)[0]
+        EvidenceRepository(db_session).delete(record.id, "source_anchor")
+
+        with pytest.raises(RegionNotAddressable, match="re-ingest") as raised:
+            DocumentService(db_session)._pdf_anchor(record.id)
+        assert "extract:sheet" in str(raised.value)
+        assert "citation" not in str(raised.value)
+
+    def test_the_anchor_reads_back_the_row_it_was_written_for(
+        self, db_session, evidence, workbook_bytes
+    ):
+        """End to end: the anchor's `ref`, handed to `/cells` on the sheet, serves the very
+        values the record node holds. An address off by one row would pass every test above."""
+        file_node = _ingest(db_session, workbook_bytes)
+        sheet = _sheet_node(db_session, file_node, "Deals")
+        record = _children(db_session, sheet.id, USETYPE_RECORD)[2]
+
+        ref = evidence(record)["source_anchor"]["ref"]
+        cells = DocumentService(db_session).get_document_cells(sheet.id, ref=ref)
+
+        assert [row.row for row in cells.rows] == [5]
+        assert cells.rows[0].values[0] == evidence(record)["record"]["Deal ID"]
+        assert cells.rows[0].values[1] == evidence(record)["record"]["Account"]
+
+    def test_a_sheet_holding_nothing_says_why_its_profile_has_no_anchor(self, db_session, evidence):
+        """The unresolved row, and not a missing one: an empty sheet has no used range, and
+        `/region` has to be able to tell "nothing placed this" from "there is nothing to
+        place"."""
+        workbook = openpyxl.Workbook()
+        workbook.active.title = "Blank"
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        file_node = _ingest(db_session, buffer.getvalue(), "blank.xlsx")
+        sheet = _sheet_node(db_session, file_node, "Blank")
+        profile = _children(db_session, sheet.id, USETYPE_PROFILE)[0]
+
+        found = evidence(profile)
+        assert "source_anchor" not in found
+        assert found["source_anchor.unresolved"]["code"] == "empty_sheet"
+        with pytest.raises(RegionNotAddressable, match="holds? no cells"):
+            DocumentService(db_session)._pdf_anchor(profile.id)
