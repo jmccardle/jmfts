@@ -16,6 +16,7 @@ const routes: RouteRecordRaw[] = [
     props: (route) => ({ id: Number(route.params.id) }),
   },
   { path: "/calls", name: "calls", component: Calls },
+  { path: "/ingest", name: "ingest", component: () => import("@/views/Ingest.vue") },
   { path: "/:rest(.*)", redirect: "/" },
 ];
 

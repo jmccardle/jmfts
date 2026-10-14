@@ -26,7 +26,7 @@ const problem = ref<string | null>(storedAddressProblem.value);
 const ways = [
   { to: "/", label: "Corpus", hint: "What this appliance holds, and the trees it holds it in." },
   { to: null, label: "Search", hint: "Not built yet. The seven methods, side by side." },
-  { to: null, label: "Ingest", hint: "Not built yet. Put a document in and watch it settle." },
+  { to: "/ingest", label: "Ingest", hint: "Put a document in and watch it settle." },
   { to: "/calls", label: "Calls", hint: "Every request this page has made." },
 ];
 
