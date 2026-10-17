@@ -55,6 +55,13 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
   BM25 sees those cells twice; that is accepted for now. One table whose span does not check
   out fails the whole document's `extract:tables`.
 
+- **Two evidence leaves on the `extraction` row**: `extraction.section_ceiling`, the most
+  sections either structure rung can cut the text into (the larger of headings and outline
+  entries, plus one), and `extraction.tables_found`, the tables a PDF's text layer rendered.
+  The first is what the per-section chunk ceiling below reads; the second is what
+  `extract:tables` is planned on. A document extracted before this release has neither until
+  it is re-extracted.
+
 ### Changed
 
 - **The `extract:tables` not-applicable reason after `extract:text` has run** now says the
@@ -77,6 +84,28 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
 - **The import report's `unsupported_terms` is documented as "not summarized in the digest"**,
   not "not enforced": SHACL validation reads the stored source, so `sh:pattern` is enforced
   while listed there.
+
+- **EXPLAIN's chunk ceiling counts one `chunk_text` call per section** (#5).
+  `_write_chunks` chunks each section separately, so 0.6.2's bound, which assumed one call
+  over the whole text, under-reported: it declared 59 for 200 one-letter sections that write
+  200. `chunk_count_ceiling` takes `calls`, and the structure rungs pass
+  `extraction.section_ceiling`; `calls=1` is exactly 0.6.2's bound. Chunk output is
+  unchanged.
+- **Retry policy for an LLM failure inside a queued task is decided by the endpoint's HTTP
+  status** (#8). `classify_exception` reads `LlmCallError.status` with the same table as an
+  httpx status error: a 4xx other than 408 and 429 is PERMANENT, so a prompt over the
+  model's context size fails its task on the first attempt instead of spending three
+  retries being refused identically. 408 is TIMEOUT; 429 and 5xx are RETRYABLE. A failure
+  where nothing answered (refused connection, timeout) carries no status and stays
+  RETRYABLE, as before. The status is still read out of τ 0.12's message text, in one
+  place; it becomes typed with τ 0.13 (#45).
+- **Security floors on three dependencies.** `python-multipart>=0.0.31` (two HIGH DoS
+  advisories below it, GHSA-pp6c-gr5w-3c5g and GHSA-5rvq-cxj2-64vf, and `POST /ingest/file`
+  is a multipart route), `starlette>=1.3.1`, now declared directly (GHSA-82w8-qh3p-5jfq,
+  HIGH, and GHSA-86qp-5c8j-p5mr), and `transformers>=5.10` (GHSA-x9r9-c232-4q39 and
+  GHSA-xrqw-3rrv-vx5w, both HIGH). A fresh resolve already picked safe versions; these stop
+  an existing environment, or a resolver held back by something else, from keeping one that
+  is not.
 
 ### Fixed
 
@@ -102,6 +131,11 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
   pages written before this change carry no marker and are not migrated: re-derive them by
   re-running `citation` (text anchors) and `extract:text` then `extract:tables` (table
   spans).**
+- **`/region` on a `cells` anchor with no worksheet node above it is a 409, not a 500**
+  (#29). It raised an exception neither `/region` nor `/page` maps. The 409 keeps the
+  anchor's `ref`. A sheet node ingested before cells anchors existed now says to re-ingest
+  it (`extract:sheet`, `profile:sheet`) instead of pointing at `citation`, which reads PDFs
+  only.
 - **`/region?anchor=true` refuses an anchor that crops blank paper** with a 400 that says
   so, and on a rotated page names the re-derivation above. Only a stored anchor that renders
   entirely white is refused: a rectangle a caller names, or a crop that is one non-white
@@ -909,13 +943,13 @@ says. Both paragraphs become steps in the 0.6.0 plan, and they are the entry con
 First release with packaging metadata and the tests that make a release possible.
 
 [Unreleased]: https://github.com/jmccardle/jmfts/compare/v0.6.2...HEAD
-[0.6.2]: https://github.com/jmccardle/jmfts/releases/tag/v0.6.2
-[0.6.1]: https://github.com/jmccardle/jmfts/releases/tag/v0.6.1
-[0.6.0]: https://github.com/jmccardle/jmfts/releases/tag/v0.6.0
-[0.5.2]: https://github.com/jmccardle/jmfts/releases/tag/v0.5.2
-[0.5.1]: https://github.com/jmccardle/jmfts/releases/tag/v0.5.1
-[0.5.0]: https://github.com/jmccardle/jmfts/releases/tag/v0.5.0
-[0.3.0]: https://github.com/jmccardle/jmfts/releases/tag/v0.3.0
-[0.2.1]: https://github.com/jmccardle/jmfts/releases/tag/v0.2.1
-[0.2.0]: https://github.com/jmccardle/jmfts/releases/tag/v0.2.0
-[0.1.1]: https://github.com/jmccardle/jmfts/releases/tag/v0.1.1
+[0.6.2]: https://github.com/jmccardle/jmfts/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/jmccardle/jmfts/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/jmccardle/jmfts/compare/v0.5.2...v0.6.0
+[0.5.2]: https://github.com/jmccardle/jmfts/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/jmccardle/jmfts/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/jmccardle/jmfts/compare/v0.3.0...v0.5.0
+[0.3.0]: https://github.com/jmccardle/jmfts/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/jmccardle/jmfts/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/jmccardle/jmfts/compare/0.1.1...v0.2.0
+[0.1.1]: https://github.com/jmccardle/jmfts/compare/0.1.0...0.1.1

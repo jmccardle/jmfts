@@ -1,10 +1,12 @@
 # JMFTS Roadmap
 
-Last updated: 2026-10-13 (the Status section and known gap 12 only). **This file is open work; `CHANGELOG.md` is what shipped.** Where
+Last updated: 2026-10-17 (the Status section, known gaps 11–13, and two citations marked held back). **This file is open work; `CHANGELOG.md` is what shipped.** Where
 the two would say the same thing, this one says nothing and points there.
 
 The 2026-09-17 pass re-read one section — the job system — against `master` at `8e7ccba`, and
-added known gap 12. Everything else carries its 2026-09-13 date and was not re-checked.
+added known gap 12. The 2026-10-17 pass re-read the Status section, gaps 11 and 12, and the
+two citations to files this tree does not carry, against `master` at `ff35838`, and added gap
+13. Everything else carries its 2026-09-13 date and was not re-checked.
 
 **Where this file came from.** It was internal until now. Development moved into the public
 repository at 0.5.1, and this is the first version of it anybody outside the project can
@@ -26,7 +28,21 @@ internal file at its own date and has not been re-checked.
 
 ## Status
 
-**Read 2026-10-13, and it supersedes the two struck rows below.** Released: **0.6.2**
+**Read 2026-10-17, and it supersedes everything below it in this section that names 0.6.0 as
+future work.** Released: **0.6.2**. Next: **0.7.0**, and its plan is the 0.7.0 milestone on
+the issue tracker — there is no `docs/SPRINT_0_7_0.md` and none is planned; `docs/SPRINT_0_6_0.md`
+is the record of a shipped sprint. The suite on `ff35838` read 3138 passed, 149 skipped,
+0 failed (CPU embeddings, 2026-10-16; every skip an absent `node`, `tsc`, LLM server or real
+PDF). Since the 2026-10-14 read: the retry policy of an LLM failure in a queued task follows
+the endpoint's status (#8), three dependencies carry security floors, and gap 11 has a
+measurement and a second defect behind it. The Vue console's three High review findings
+(a markdown link-scheme hole, an Ingest poll that outlives its view, a dev proxy on the wrong
+port) have fix specs, and are fixes owed by `worktree-vue-frontend` before it merges. A sweep of every reachable corpus
+for anchors written on rotated PDF pages before #38's fix found **zero**: no PDF in them has a
+rotated page, so no migration or background sweep is built, and `/region?anchor=true`'s
+blank-crop refusal stays the net for a deployment that holds one.
+
+**Read 2026-10-13, superseded in part by the read above.** Released: **0.6.2**
 (2026-10-12; PyPI carries `jmfts`, `jmfts-client` and `jmfts-web`, all three, on one tag).
 `master` is 0.6.2 plus the 0.7.0 work merged on 2026-10-13, none of it tagged: the
 `max_tokens` → `max_words` rename with `sentence_window` and the per-section chunk ceiling,
@@ -53,8 +69,13 @@ is a separate line and is not merged here.
 |---|---|
 | ~~Released~~ | ~~**0.5.1**, 2026-09-13. `master` is the tag; `jmfts` and `jmfts-client` are both on PyPI~~ |
 | ~~Next~~ | ~~**0.6.0** — `docs/SPRINT_0_6_0.md`. Headline: a **web front end**. Seven blocks, thirty-six steps. Gate M5 closed 2026-09-15 and step 8 answered the same day (`fadbcb4`), so M6 — `CHANGELOG.md`, the bump, the tag — is what is left~~ |
-| Version rule | The two distributions release in lockstep: one number, two wheels, one tag |
-| Changing at 0.6.0 | A **third** distribution, `jmfts-web`, joins the lockstep. `jmfts[web]` depends on it |
+| ~~Version rule~~ | ~~The two distributions release in lockstep: one number, two wheels, one tag~~ |
+| ~~Changing at 0.6.0~~ | ~~A **third** distribution, `jmfts-web`, joins the lockstep. `jmfts[web]` depends on it~~ |
+| Version rule, since 0.6.0 | **Three** distributions release in lockstep — `jmfts`, `jmfts-client`, `jmfts-web` — one number, three wheels, one tag. `jmfts[web]` depends on the third |
+
+*The four paragraphs that follow are 0.6.0's plan as written on 2026-09-13, kept because
+`docs/OFFICE_SPEC.md` Part 12 question 1's retirement is recorded in them. 0.6.0 shipped; read
+them as history.*
 
 **0.6.0's headline is eyes and hands on the appliance**, added to that plan on 2026-09-13: a
 page that takes a dropped file, searches it, and shows the answer boxed on the source
@@ -81,6 +102,7 @@ neither plan finished are the 0.6.0 plan.
 failing test.** Not an argument that something could go wrong, and not a measurement of how
 often it does. This file is not a defect list and does not become one: a gap below is a thing
 somebody has to decide or measure before it can be a step. `docs/archive/KNOWN-DEFECTS.md`
+(held back with the archive, so not in this tree)
 holds D1–D7, all resolved, and is history.
 
 ---
@@ -91,7 +113,8 @@ Items 1–6 were opened by an audit in 2026-08 and re-checked 2026-08-31. Items 
 opened 2026-09-07 by `docs/ANN_INDEX_HEALTH.md` and `docs/STRESS_CORPUS.md` — the first time
 this appliance held a corpus it did not build for itself, and the first time six workers
 drained a queue at once. Item 12 was opened 2026-09-13 by a standing audit rather than by a
-one-off one, which is the difference 0.6.0 step 3 was for.
+one-off one, which is the difference 0.6.0 step 3 was for. Item 13 was opened 2026-10-17 by
+the measurement behind gap 11.
 
 1. ~~Constructive segmentation is conversation-only.~~ **CLOSED 2026-08-29.**
    `jmfts_core/pipeline.py` no longer exists; `structure:semantic` in `rollup_tasks.py` runs
@@ -205,6 +228,29 @@ one-off one, which is the difference 0.6.0 step 3 was for.
     reached through its `source_node_id`, or the duplication could stay and the exclusion be
     documented as required rather than default.
 
+    **CLOSED 2026-10-12 (0.6.2, #17) on the second option**: the duplication stays and
+    `search_exclude_usetypes` is documented as load-bearing (`CHANGELOG.md` 0.6.2, Fixed).
+    **Measured again 2026-10-16, and the closure is open to review — a decision for the
+    owner, not yet taken.** On the stress corpus (`jmfts-stress-pg`, 59,242 documents) there
+    are now 14,829 summary rows, not 13,755; every one with a live source is bit-identical to
+    it, and they are 25.1% of the vectors in `idx_documents_embed`. Filtered recall@10 at
+    `ef_search=40` is 0.967 (0.933 on queries whose source has a twin), so today's app query
+    is protected — by the filter running inside an ef=40 scan. An off-database counterfactual
+    (hnswlib, same M and ef_construction, three seeds) says the duplicates do not damage the
+    graph (0.939 against 0.920 at equal fetch depth, inside seed noise) and do cost candidate
+    slots: a consumer that fetches k=11 and post-filters reads recall 0.665 with them and 0.923
+    without, and 171 of 200 queries come back short. In an unfiltered top-40, 28.6% of slots
+    are summary copies. Storage is under 2% of the database and is not the argument.
+
+    **The same measurement found a defect, which is not a decision:** deleting a source does
+    not delete its summary node. `DocumentRepository.delete` cascades through `parent_id`,
+    and the summary node lives under the derived root, so the `summarizes` edges go and the
+    node stays, titled "Summary of <deleted title>" and carrying the deleted document's
+    vector. 821 such rows on the stress corpus; 583 hold a vector that exists nowhere else in
+    the store, reachable by any search that names `usetype='summary'`. That is retained
+    content after a delete, and it qualifies as a step under Part 0's rule once a test
+    deletes a summarised container and finds its summary node still there.
+
 12. **Ten `@expose`d verbs name a document and consult no principal. OPENED 2026-09-13**, by
     the first run of the audit 0.6.0 step 3 landed. This entry is a pointer and not a copy:
     each one is written out as an `OPEN GAP` string in
@@ -250,8 +296,18 @@ one-off one, which is the difference 0.6.0 step 3 was for.
     **All ten are closed as of 2026-10-13**, the `IndexService` five and the four above
     landing together for 0.7.0; the two RESIDUAL counts (`refresh_index`, `file_frontier`)
     stay open. The eleventh gap the audit found became step 35 and is closed.
-    **Each is a candidate 0.7.0 step and none is a 0.6.0 step**: eleven is more than Block A
-    can absorb without becoming a different sprint.
+    ~~**Each is a candidate 0.7.0 step and none is a 0.6.0 step**: eleven is more than Block A
+    can absorb without becoming a different sprint.~~ Planning text, struck 2026-10-17: every
+    one landed for 0.7.0 as written above.
+
+13. **A single-child container inherits its child's vector, and both are retrievable. OPENED
+    2026-10-17**, found by the gap 11 measurement and independent of it. Among non-summary
+    rows on the stress corpus there are 5,985 groups of exact-duplicate vectors, 7,202
+    redundant rows; 5,453 of those rows have a parent carrying the identical vector — a
+    `section` with one `chunk`, a `file` with one `section`. Unlike gap 11 neither usetype is
+    excluded, so on those queries default search returns the same vector twice today, and a
+    summarised section makes it three copies. A decision before it is a step: skip embedding
+    a container with exactly one child, or collapse identical vectors at search time.
 
 ---
 
@@ -384,7 +440,7 @@ The insight the memory framing rests on: a conversation's branch history and a d
 document are the *same* tree — a sequence of text nodes where parent→child means
 containment-or-derivation. The agent verb catalogue that followed from it has shipped; the
 write-path benchmark is the part that is still thin. An initial benchmark landed and is in
-`benchmarks/RESULTS.md`; broadening it to cover idempotent replay and incremental-IDF
+`benchmarks/RESULTS.md`, which is held back and not in this tree (noted 2026-10-17); broadening it to cover idempotent replay and incremental-IDF
 correctness is what would keep the memory path as honest as BEIR keeps the retrieval path.
 
 ---
