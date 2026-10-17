@@ -16,7 +16,9 @@
 -- "Summary of <a deleted document>", and 583 held a vector that existed nowhere else in the
 -- store. That is content retained after the delete meant to remove it.
 -- `DocumentRepository.delete` removes them from this release on; this removes the ones
--- already there.
+-- already there. A summary node with NO `source_node_id` at all counts as an orphan here
+-- too: the join back to its source finds nothing, and a node with no key to follow is
+-- unreachable by the design this migration finishes.
 --
 -- NO BACKUP TABLE, and that is the point rather than an omission. The orphans are deleted
 -- BECAUSE they retain deleted content; copying them into a backup table first would keep
