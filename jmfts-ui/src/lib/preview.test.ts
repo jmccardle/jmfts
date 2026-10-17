@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { offersPreview, overlayBox, pageLabel, pagePoints, readAnchor } from "./preview";
+import { offersPreview, overlayBox, pageLabel, pagePoints, readAnchor, refusalOf } from "./preview";
 
 // The rectangles below are not invented. They are the `source_anchor` rows the appliance wrote
 // when four generated PDFs of the same three paragraphs were ingested: Letter (612 x 792) upright,
@@ -163,5 +163,28 @@ describe("offersPreview", () => {
     expect(offersPreview("chunk", {})).toBe(false);
     expect(offersPreview("chunk", null)).toBe(false);
     expect(offersPreview("chunk", { source_anchor: { kind: "cells", sheet: "S", ref: "A1" } })).toBe(false);
+  });
+});
+
+describe("refusalOf", () => {
+  it("returns the server's detail verbatim, without the client's path-and-status wrapper", () => {
+    const detail =
+      "this node's anchor, bbox (1.0, 2.0, 3.0, 4.0) on page 0, crops blank paper: nothing is printed inside it";
+    const failure = Object.assign(new Error(`GET /documents/9/region — HTTP 400: ${detail}`), {
+      event: { status: 400, response: { detail } },
+    });
+    expect(refusalOf(failure)).toEqual({ status: 400, detail });
+  });
+
+  it("keeps a structured detail as the JSON the server sent", () => {
+    const failure = { event: { status: 422, response: { detail: [{ loc: ["query", "dpi"] }] } } };
+    expect(refusalOf(failure)).toEqual({ status: 422, detail: '[{"loc":["query","dpi"]}]' });
+  });
+
+  it("has no status for a call that never reached the appliance", () => {
+    expect(refusalOf(new Error("Failed to fetch"))).toEqual({
+      status: null,
+      detail: "Failed to fetch",
+    });
   });
 });

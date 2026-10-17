@@ -14,6 +14,8 @@
 // is the one thing the numbers can prove; a rectangle that is on the page and still on the
 // wrong words is what the appliance's own crop, shown beside it, lets a person see.
 
+import { detailOf } from "@jmfts/client/transport.js";
+
 /** A stored anchor that names a rectangle of a PDF page, parsed. */
 export interface PdfAnchor {
   /** 0-based, as the appliance stores it. Label it `page + 1` for a person. */
@@ -181,4 +183,29 @@ export function offersPreview(
   evidence: Record<string, unknown> | null | undefined
 ): boolean {
   return usetype === "file" || readAnchor(evidence).state === "pdf";
+}
+
+/** What the appliance said when it refused, or what stopped the call from reaching it. */
+export interface Refusal {
+  /** The HTTP status; null when the request never got a response. */
+  status: number | null;
+  /** The server's `detail`, character for character. Never reworded here. */
+  detail: string;
+}
+
+/**
+ * The refusal a failed call carries, with the server's message untouched.
+ *
+ * The generated client's `JmftsHttpError.message` wraps the detail in `GET /path — HTTP 400:`,
+ * which is right for a log and wrong for a person who needs to read what the appliance said and
+ * act on it (the stale-anchor 400 says which tasks to re-run). The detail is taken from the
+ * call event's own response with the client's `detailOf`, so what is shown is what was sent.
+ * Anything that is not an HTTP answer keeps its own message and no status.
+ */
+export function refusalOf(failure: unknown): Refusal {
+  const event = (failure as { event?: { status?: unknown; response?: unknown } } | null)?.event;
+  if (event && typeof event.status === "number" && event.status > 0) {
+    return { status: event.status, detail: detailOf(event.response) };
+  }
+  return { status: null, detail: failure instanceof Error ? failure.message : String(failure) };
 }
