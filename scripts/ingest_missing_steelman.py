@@ -3,6 +3,7 @@
 Usage: python -m scripts.ingest_missing_steelman
 """
 
+import os
 import sys
 import time
 import httpx
@@ -33,13 +34,16 @@ def ingest_document(project_name: str, filename: str) -> dict:
         "title": title,
         "usetype": "markdown",
         "parent_id": STEELMAN_ROOT,
-        "pipeline_config": {
-            "summarize": True,
-            "extract_facts": False,
-        },
+        # The queue's vocabulary. This sent `pipeline_config` until 2026-10-17, which
+        # `POST /ingest` has refused with a 400 since the synchronous pipeline was deleted;
+        # summarize is not an option any more (the queue always runs it), so only the
+        # fact-extraction switch carries over.
+        "options": {"facts": {"enabled": False}},
     }
 
-    resp = httpx.post(f"{API}/ingest", json=payload, timeout=300)
+    token = os.environ.get("JMFTS_API_TOKEN", "")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    resp = httpx.post(f"{API}/ingest", json=payload, headers=headers, timeout=300)
     resp.raise_for_status()
     result = resp.json()
 

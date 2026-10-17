@@ -42,6 +42,9 @@ SETTINGS_NOT_IN_ENV_EXAMPLE: dict[str, str] = {}
 ENV_EXAMPLE_NOT_SETTINGS: dict[str, str] = {
     "JMFTS_WORKER_ID": "read from the environment by jmfts_core/worker.py, not via Settings",
     "JMFTS_WORKER_BADGE": "read from the environment by jmfts_core/worker.py, not via Settings",
+    "JMFTS_LOG_LEVEL": "read from the environment by jmfts_core/worker.py, not via Settings",
+    "JMFTS_ALLOW_LOCAL_FETCHES": "read from the environment by jmfts_core/url_fetch.py, not via "
+    "Settings",
 }
 
 

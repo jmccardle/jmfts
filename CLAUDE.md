@@ -299,7 +299,7 @@ a rung means registering a handler.
 
 `docs/INGEST_SPEC.md` is the normative specification for the pipeline and
 `docs/SPRINT_JOBS.md` for the declaration machinery; between them they are cited by around
-370 source comments (read 2026-10-12), by part and section, and **both are in this repository** — so a
+390 source comments (391 read 2026-10-17; around 370 on 2026-10-12), by part and section, and **both are in this repository** — so a
 citation to 5.3 or to Phase 3 resolves. Read each one's dated review note first: they are the
 working record, and what has moved under them is marked in place rather than edited out.
 
@@ -436,8 +436,8 @@ Around seven hundred source comments cite a `docs/` file by part and section. Co
 rather than trusting the number below, which is a reading and not a rule:
 
 ```bash
-git grep -hoE "(research/)?[A-Z][A-Z0-9_-]*\.md" -- \
-    jmfts_core jmfts-client jmfts_batch plugin scripts tests .github .githooks |
+git grep -hoE "(research/|archive/)?[A-Z][A-Z0-9_-]*\.md" -- \
+    jmfts_core jmfts-client jmfts_batch jmfts-web plugin scripts tests .github .githooks |
   sort | uniq -c | sort -rn
 ```
 
@@ -459,6 +459,18 @@ it — the bare `KNOWN-DEFECTS D1` form names an anchor, not a path, and was lef
 `research/INTERMEDIATE_FORMATS.md` have not had a review pass; `KNOWN-DEFECTS.md`,
 `ROADMAP_HISTORY.md` and `SPRINT_0_4_0_DRAFT.md` are the archive, which 4.5 holds with the
 three sprint plans — the split the README's note makes.
+
+**Read again 2026-10-17**, on `claude/awesome-planck-xkqumb`, with `jmfts-web` added to
+the command (it ships and its comments cite; until this reading the grep left it out) and
+`archive/` recognised as a prefix. Resolving: `INGEST_SPEC.md` 196, `SPRINT_JOBS.md` 195,
+`OFFICE_SPEC.md` 174, `SPRINT_0_6_0.md` 141, `STRESS_CORPUS.md` 39, `ANN_INDEX_HEALTH.md` 33,
+`ROADMAP.md` 18, `CORPUS.md` 13, `MEASURE_BM25_BOUNDARY.md` 9, `MEASURE_SHACL_SCOPE.md` 8,
+`MEASURE_TYPED_WALK.md` 6, `MEASURE_MAXSIM_MARGIN.md` 2. Held by 4.5: `SPRINT_0_5_0.md` 93,
+`SPRINT_0_3_0.md` 85, `SPRINT_0_4_0.md` 52 — 230. Held, not yet reviewed: `RELEASING.md` 12,
+`AGENTIC_KNOWLEDGEBASE.md` 4, `RERANKER_CRITIQUE.md` 1, `INTERMEDIATE_FORMATS.md` 2 (one
+with the `research/` prefix, one without). The archive: `KNOWN-DEFECTS.md` 7 (six with the
+`archive/` prefix), `archive/ROADMAP_HISTORY.md` 2, `archive/SPRINT_0_4_0_DRAFT.md` 1. The
+2026-10-12 reading above is kept as it was read.
 
 The command also reports
 `README.md`, `CLAUDE.md`, `CHANGELOG.md` and `INVENTORY-2026-04-05.md`; the first three

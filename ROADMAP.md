@@ -596,6 +596,7 @@ the table is not pruned.
 | 2026-04 | Quantization tolerance hypothesis | **Confirmed**: MaxSim aggregation absorbs 4-bit noise; 0.260 point-query recall ≠ 1 pt multi-hop loss | — |
 | 2026-09 | `link_type` index on `document_links`, 48 configurations | **Do not build it**: faster in 3, slower in 8, indistinguishable in 37 | — |
 | 2026-09 | Container nodes versus their descendants, 10 queries × 12 containers | The container outscored every descendant it contains 53 of 59 times — which is why containers are projected rather than excluded | 188e973 |
+| 2026-10 | Prose chunk window, issue #2 third arm: `sentence_window` against the shipped `sentence_packed`/120, MaxSim at tier 10 | recall@10 **0.421** against **0.210**, noise floor 0.023 — but chunk size was not held constant between the arms, so this is not yet a reading of the strategy alone. The prose default is a decision, not a settled value. Copied here 2026-10-17 from the 2026-10-14 status read, which is rewritten every read; the arms' setup is on issue #2 | — |
 
 **One decision this log exists to explain: JMFTS owns no GPU model.** Summarization,
 read-side synthesis and fact extraction are calls to an injectable external
