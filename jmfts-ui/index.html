@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>JMFTS</title>
+    <!-- Inline, as a data URI: this console is expected to run beside an air-gapped appliance,
+         so nothing it draws comes off the network. Three rules, for the three structures a node
+         belongs to at once. -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%2327456b'/%3E%3Cg stroke='%23edeee9' stroke-width='1.4'%3E%3Cpath d='M3 4h10M3 8h7M3 12h4'/%3E%3C/g%3E%3C/svg%3E"
+    />
+    <script>
+      // Where the appliance is, for a BUILT bundle. Set it here when this page is served from
+      // somewhere other than the appliance itself; a reader can also type an address into the
+      // bar, and what they type is remembered for the tab and wins over this value.
+      //
+      // In development this stays undefined: Vite proxies the appliance's prefixes, which keeps
+      // the page same-origin so the appliance needs no CORS header to develop against.
+      // window.__JMFTS_BASE__ = "http://appliance.local:8100";
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
