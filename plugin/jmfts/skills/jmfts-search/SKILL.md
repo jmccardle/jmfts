@@ -1,13 +1,16 @@
 ---
 name: jmfts-search
-description: Use when looking up information that may exist in the knowledgebase — prior conversations, ingested articles, agent-saved findings, related work the agent might already have notes on. Wraps the five retrieval methods and the synthesis endpoint that can compose an LLM-backed answer from results.
+description: Use when looking up information that may exist in the knowledgebase — prior conversations, ingested articles, agent-saved findings, related work the agent might already have notes on. Wraps the five retrieval methods plus the `auto` router, and the synthesis endpoint that can compose an LLM-backed answer from results.
 ---
 
 # Searching the knowledgebase
 
 Always search before assuming the knowledgebase doesn't have something.
-Idempotent ingest only catches exact-content duplicates; a similar topic
-might already be there under a different title.
+Ingest deduplication only catches exact duplicates (same bytes, or the same
+URL); a similar topic might already be there under a different title.
+
+The scripts read `JMFTS_API_TOKEN` and send it as `Authorization: Bearer
+<token>`; without it the server answers 401.
 
 ## Quick reference
 
@@ -28,6 +31,8 @@ python -m scripts.jmfts_search "query" --exclude-types chunk summary
 ```
 
 ## Picking a method
+
+Five methods plus `auto`, which routes to one of them:
 
 | Query shape | Method | Why |
 |---|---|---|
@@ -63,10 +68,16 @@ so lower `--top-k` rather than expecting the context to be trimmed.
 
 - `--parent-id N` — search inside the subtree rooted at `N`. Useful when
   the agent has a designated root.
-- `--exclude-types` — server has a default exclude set (typically
-  `chunk`, `summary`); pass an explicit list to override, or `--exclude-types`
-  with no values to disable exclusion.
-- Chunks rarely have useful titles; if results look noisy, exclude them.
+- `--exclude-types` — the server holds out `entity`, `entities`,
+  `summary` and `derived` by default (`JMFTS_SEARCH_EXCLUDE_USETYPES`,
+  `Settings.search_exclude_usetypes` in `jmfts_core/config.py`). Those are
+  derived nodes, and a `summary` carries the same vector as its source, so
+  including them returns answers twice. Pass an explicit list to replace the
+  default, or `--exclude-types` with no values to disable exclusion.
+  Chunks are NOT excluded by default.
+- Chunks rarely have useful titles; if results look noisy, exclude them
+  (`--exclude-types chunk entity entities summary derived` keeps the default
+  set as well).
 
 ## What you get back
 

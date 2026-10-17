@@ -11,8 +11,8 @@ plugin/jmfts/
 ├── README.md          (this file)
 └── skills/
     ├── jmfts/         orientation — explains the substrate, routes
-    ├── jmfts-search/  retrieval (5 methods + LLM synthesis)
-    ├── jmfts-ingest/  7 ingest pipelines + idempotency model
+    ├── jmfts-search/  retrieval (5 methods + auto, LLM synthesis)
+    ├── jmfts-ingest/  7 ingest usetypes, upload, options, dedup rule
     ├── jmfts-read/    /view/{id} composite reader
     ├── jmfts-explore/ tree + link + triple navigation
     └── jmfts-analyze/ centrality, communities, lint
@@ -32,6 +32,10 @@ The skills assume:
 
 - `JMFTS_API_BASE_URL` env var (default `http://localhost:8100`) points
   to a running JMFTS instance.
+- `JMFTS_API_TOKEN` holds that instance's API token. The scripts send it as
+  `Authorization: Bearer <token>`, and the `curl` examples in the skills pass
+  it explicitly. Every route except `/health` and the API docs needs it; with
+  it unset, the scripts exit with a 401 that names the variable.
 - The agent can `cd` to the JMFTS install directory and run
   `python -m scripts.<name>`. If the JMFTS install lives somewhere
   non-default, set `JMFTS_HOME` (advisory; not currently consumed by
@@ -52,11 +56,14 @@ don't pick one for the user.
 
 A given Claude installation can connect to different JMFTS instances on
 different machines (or different ports). The plugin doesn't pin a URL;
-each agent run sets `JMFTS_API_BASE_URL` for the instance it should hit.
+each agent run sets `JMFTS_API_BASE_URL` (and that instance's
+`JMFTS_API_TOKEN`) for the instance it should hit.
 
 ## Underlying system
 
 The plugin describes the agent surface. The underlying server lives at
-`https://github.com/<owner>/jmfts` (or wherever installed). See
-`AGENTIC_KNOWLEDGEBASE.md` in the repo for architecture and the
-server-vs-client decision rule that motivated this skill set.
+`https://github.com/jmccardle/jmfts` (or wherever installed). The design
+document that motivated this skill set, `docs/AGENTIC_KNOWLEDGEBASE.md`
+(architecture and the server-vs-client decision rule), is **held back** and
+not in the public repository. The repository's `README.md` and
+`docs/reference/` describe the server.
