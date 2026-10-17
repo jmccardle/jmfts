@@ -126,6 +126,9 @@ PUBLISHED = (
     "docs/MEASURE_SHACL_SCOPE.md",
     "docs/MEASURE_TYPED_WALK.md",
     "docs/STRESS_CORPUS.md",
+    # The release runbook. Reviewed and committed 2026-10-17 (three wheels, one history,
+    # step 3 retired); it was held back until then. One-way, like the others.
+    "docs/RELEASING.md",
     "jmfts-client/",
     # The THIRD distribution, added 2026-09-13 with `docs/SPRINT_0_6_0.md` Block F step 19.
     # Published for the reason `jmfts-client/` is: it is a distribution living in this tree,

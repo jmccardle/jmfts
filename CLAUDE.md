@@ -107,8 +107,9 @@ Activate the hook once per clone:
 git config core.hooksPath .githooks
 ```
 
-`docs/RELEASING.md` is the full runbook for cutting a release. It is held back — not in
-this tree — and has not had a review pass.
+`docs/RELEASING.md` is the full runbook for cutting a release. It was held back until
+2026-10-17, when it had its review pass and was published; the readings of its citation
+count further down predate that and still list it as held.
 
 ### Auditing for dead code
 

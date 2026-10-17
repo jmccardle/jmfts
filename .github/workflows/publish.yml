@@ -13,8 +13,10 @@
 # `github.com/jmccardle/jmfts`. Run from the internal git remote it has no identity to
 # exchange, and no amount of configuration here changes that.
 #
-# THE BOOTSTRAP IS DONE FOR `jmfts` AND `jmfts-client`: both exist on PyPI and each carries
-# a trusted publisher under the project itself.
+# THE BOOTSTRAP IS DONE FOR `jmfts`, `jmfts-client` AND `jmfts-web`: all three exist on PyPI.
+# The first two carry a trusted publisher under the project itself; `jmfts-web` was created
+# by its pending publisher when the v0.6.0 tag ran (2026-10-12). Whether its row has since
+# become an ordinary publisher is read on PyPI, not here — docs/RELEASING.md step 5.
 #
 # A name that has never been published is registered as a *pending* publisher, and the
 # first trusted upload creates the project and consumes the pending row. No hand upload is
@@ -85,15 +87,15 @@ jobs:
       matrix:
         # THE LIST OF DISTRIBUTIONS THIS REPOSITORY RELEASES.
         #
-        # Two entries, and they are list entries rather than copied jobs so that the two
+        # Three entries, and they are list entries rather than copied jobs so that the three
         # can never drift into being built, checked or uploaded differently.
         #
-        # THE TWO RELEASE IN LOCKSTEP: one number, two wheels, one `v*` tag. That is what
+        # THE THREE RELEASE IN LOCKSTEP: one number, three wheels, one `v*` tag. That is what
         # makes the version check below correct as written — it compares the tag against
         # EVERY entry, which is only honest if every entry carries the same number.
-        # `./bump-version.sh` sets both, and
-        # tests/test_packaging.py::test_the_two_distributions_release_in_lockstep fails if
-        # they drift. If a future distribution in this tree needs its own cadence, that
+        # `./bump-version.sh` sets all of them, and
+        # tests/test_packaging.py::test_the_server_and_client_release_in_lockstep and
+        # tests/test_web_distribution.py fail if they drift. If a future distribution in this tree needs its own cadence, that
         # needs a tag namespace per distribution and a filter here — not a loosened check.
         #
         # PUBLISHING, since 0.3.0 on 2026-09-03. The two steps between the note above and

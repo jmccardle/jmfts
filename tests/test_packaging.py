@@ -188,8 +188,8 @@ def _client_pin() -> str:
     return next(d for d in declared if d.replace("_", "-").startswith("jmfts-client"))
 
 
-def test_the_two_distributions_release_in_lockstep():
-    """One number, two wheels — and the pin says the same number.
+def test_the_server_and_client_release_in_lockstep():
+    """One number for the server and the client — and the pin says the same number.
 
     The versions are deliberately NOT independent. ``jmfts-client/jmfts_client/_verbs.py``
     is generated from this server's resolved route table, so a client built from a

@@ -147,8 +147,8 @@ Do not add a `version = "..."` literal to any `pyproject.toml` to fix a mismatch
 `::test_the_client_version_has_exactly_one_home` forbid the second copy;
 `tests/test_web_distribution.py::test_the_three_distributions_carry_one_version` and
 `::test_the_web_extra_pins_the_exact_version` hold the third wheel and its pin;
-`tests/test_packaging.py::test_the_two_distributions_release_in_lockstep` holds the server,
-the client and the client pin (its name still says "two"; it predates the third wheel).
+`tests/test_packaging.py::test_the_server_and_client_release_in_lockstep` holds the server,
+the client and the client pin (renamed 2026-10-17 from `..._the_two_distributions_...`, which predates the third wheel).
 
 **The script does not touch the README.** `tests/test_doc_drift.py` holds the README's
 quoted `jmfts-client==` pin to `pyproject.toml`. So after the bump run
