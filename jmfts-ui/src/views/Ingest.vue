@@ -65,6 +65,7 @@ import {
   TERMINAL,
   type RungState,
 } from "@/lib/ingestPlan";
+import { createPoller } from "@/lib/poller";
 import type { Tone } from "@/lib/vocab";
 
 const route = useRoute();
@@ -451,51 +452,51 @@ const frontier = ref<IngestFrontierResponse | null>(null);
 const evidence = ref<Record<string, unknown> | null>(null);
 const watchError = ref<string | null>(null);
 const polling = ref(false);
-let timer: ReturnType<typeof setTimeout> | null = null;
-
-function stopPolling() {
-  if (timer !== null) clearTimeout(timer);
-  timer = null;
-  polling.value = false;
-}
-
-function startWatching(documentId: number, existing: boolean) {
-  stopPolling();
-  watching.value = documentId;
-  watchedExisting.value = existing;
-  frontier.value = null;
-  evidence.value = null;
-  void read();
-}
-
-async function read() {
-  const id = watching.value;
-  if (id === null) return;
-  timer = null;
-  polling.value = true;
-  watchError.value = null;
-  try {
+// The loop itself is `lib/poller.ts`, which owns the timer and a generation counter, so that a
+// read still in flight when the page unmounts or re-watches is disowned rather than allowed to
+// schedule a successor. This page keeps only the refs it draws.
+const poller = createPoller({
+  read: async (id: number) => {
     const [f, e] = await Promise.all([
       client.file_frontier({ document_id: id }),
       client.get_document_evidence({ document_id: id }),
     ]);
-    if (watching.value !== id) return;
-    frontier.value = f;
-    evidence.value = e.evidence;
-    if (TERMINAL.has(ingestionState(f).status)) {
-      polling.value = false;
-    } else {
-      timer = setTimeout(() => void read(), POLL_MS);
-    }
-  } catch (failure) {
-    // Shown and stopped. A reading that failed once is not retried behind the reader's back;
-    // "Ask again" is one click and the reason stays on the page.
+    return { frontier: f, evidence: e.evidence };
+  },
+  isTerminal: (reading) => TERMINAL.has(ingestionState(reading.frontier).status),
+  intervalMs: POLL_MS,
+  onBegin: () => {
+    polling.value = true;
+    watchError.value = null;
+  },
+  onResult: (_id, reading) => {
+    frontier.value = reading.frontier;
+    evidence.value = reading.evidence;
+  },
+  // Shown and stopped. A reading that failed once is not retried behind the reader's back;
+  // "Ask again" is one click and the reason stays on the page.
+  onError: (_id, failure) => {
     watchError.value = errorOf(failure);
+  },
+  onIdle: () => {
     polling.value = false;
-  }
+  },
+});
+
+function startWatching(documentId: number, existing: boolean) {
+  watching.value = documentId;
+  watchedExisting.value = existing;
+  frontier.value = null;
+  evidence.value = null;
+  poller.start(documentId);
 }
 
-onBeforeUnmount(stopPolling);
+/** "Ask again": the same watch, read now, keeping what is on the page until the answer lands. */
+function askAgain() {
+  if (watching.value !== null) poller.start(watching.value);
+}
+
+onBeforeUnmount(() => poller.stop());
 
 const ingestion = computed(() =>
   watching.value === null ? null : ingestionState(frontier.value, watchedExisting.value)
@@ -882,7 +883,7 @@ watch(
       </p>
       <p v-if="watchError" class="bad">{{ watchError }}</p>
       <div class="actions">
-        <button v-if="!polling" type="button" class="ghost" @click="read">Ask again</button>
+        <button v-if="!polling" type="button" class="ghost" @click="askAgain">Ask again</button>
         <template v-if="ingestion && ingestion.status === 'settled'">
           <RouterLink :to="`/node/${watching}`" class="go">Open node {{ watching }}</RouterLink>
           <RouterLink to="/" class="go">The corpus</RouterLink>
