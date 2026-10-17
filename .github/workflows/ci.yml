@@ -269,10 +269,12 @@ jobs:
 
       # WHAT THIS GATE COVERS, and why it is not the whole tree.
       #
-      # The scope is the two distributions plus the suite that proves them: everything
+      # The scope is the three distributions plus the suite that proves them: everything
       # that goes into a wheel, and everything that decides whether the wheel is right.
       # It was green when this scope was set — 27 files formatted and 26 findings fixed
-      # in one commit, of which five were genuinely dead code in jmfts_core/.
+      # in one commit, of which five were genuinely dead code in jmfts_core/. jmfts_batch/
+      # (in the jmfts wheel) and jmfts-web/ (the third wheel) were outside it until
+      # 2026-10-17, when they joined already clean.
       #
       # Outside it are jmfts-needle/, scripts/, benchmarks/ and analysis/: research code
       # that is not in tests/test_readme_links.py::PUBLISHED and never reaches a user.
@@ -287,9 +289,9 @@ jobs:
       - name: black --check
         run: |
           set -euo pipefail
-          black --line-length 100 --check jmfts_core jmfts-client tests
+          black --line-length 100 --check jmfts_core jmfts_batch jmfts-client jmfts-web tests
 
       - name: ruff check
         run: |
           set -euo pipefail
-          ruff check jmfts_core jmfts-client tests
+          ruff check jmfts_core jmfts_batch jmfts-client jmfts-web tests

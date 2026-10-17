@@ -31,10 +31,12 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-# The gated scope: both distributions, plus the suite. Mirrors ci.yml's lint job.
+# The gated scope: everything that goes into one of the three wheels, plus the suite.
+# Mirrors ci.yml's lint job. jmfts_batch/ and jmfts-web/ joined on 2026-10-17; both were
+# already clean, so the claim "everything in a wheel" became true rather than being edited.
 # jmfts-needle/, scripts/, benchmarks/ and analysis/ are outside it on purpose — see the
 # comment above that job for the reasoning.
-SCOPE=(jmfts_core jmfts-client tests)
+SCOPE=(jmfts_core jmfts_batch jmfts-client jmfts-web tests)
 
 PY="${JMFTS_HOOK_PYTHON:-python3}"
 
