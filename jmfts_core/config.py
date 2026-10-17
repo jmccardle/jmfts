@@ -23,6 +23,12 @@ class LlmNotConfiguredError(RuntimeError):
         )
 
 
+#: The default embedding model and the Hub commit its corpus vectors were produced with
+#: (the snapshot in the maintainer's HF cache, refs/main at pin time).
+DEFAULT_EMBEDDING_MODEL = "nomic-ai/modernbert-embed-base"
+DEFAULT_EMBEDDING_REVISION = "d556a88e332558790b210f7bdbe87da2fa94a8d8"
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables"""
 
@@ -191,7 +197,15 @@ class Settings(BaseSettings):
     MIN_LEASE_TO_HEARTBEAT_RATIO: ClassVar[float] = 3.0
 
     # Embedding model
-    embedding_model: str = "nomic-ai/modernbert-embed-base"
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL
+    #: Hub commit the embedding model is loaded at. Without it the Hub's ``main`` is loaded,
+    #: and an upstream push would change every vector under an unchanged JMFTS version.
+    #: The default is the commit the corpus vectors were produced with, and it belongs to
+    #: ``DEFAULT_EMBEDDING_MODEL`` ONLY: if ``JMFTS_EMBEDDING_MODEL`` names another repo and
+    #: this is not set explicitly, that model loads UNPINNED (WARNING, once per process) --
+    #: the default model's sha is never applied to a different repo. Set it to pin that one.
+    #: Changing it changes the vectors: re-embed before mixing old and new.
+    embedding_revision: str = DEFAULT_EMBEDDING_REVISION
     embedding_device: str = "cpu"  # "cuda" for GPU-accelerated bulk ingestion
     token_batch_size: int = 32  # Documents per batch for token-level embedding
 

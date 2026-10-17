@@ -24,6 +24,7 @@ failure has to say which of the two it is rather than reading as a missing depen
 
 from __future__ import annotations
 
+import logging
 import threading
 
 import numpy as np
@@ -33,11 +34,36 @@ from dataclasses import dataclass
 if TYPE_CHECKING:  # annotations only; never executed
     from sentence_transformers import SentenceTransformer
 
-from jmfts_core.config import get_settings
+from jmfts_core.config import DEFAULT_EMBEDDING_MODEL, get_settings
 from jmfts_core.token_selection import (
     TokenSelector,
     get_token_selector,
 )
+
+logger = logging.getLogger(__name__)
+
+_warned_unpinned: set[str] = set()
+
+
+def resolve_embedding_revision(settings, model_name: str) -> Optional[str]:
+    """The Hub revision to load ``model_name`` at, or None (unpinned, with one WARNING).
+
+    ``settings.embedding_revision`` defaults to the default model's sha, so it applies to
+    the default model, or to any model when the operator set it explicitly. A different
+    model with the revision left at its default must not inherit another repo's sha.
+    """
+    explicit = "embedding_revision" in settings.model_fields_set
+    if model_name == DEFAULT_EMBEDDING_MODEL or explicit:
+        return settings.embedding_revision or None
+    if model_name not in _warned_unpinned:
+        _warned_unpinned.add(model_name)
+        logger.warning(
+            "Embedding model %s is not the default and JMFTS_EMBEDDING_REVISION is unset: "
+            "loading it UNPINNED (the Hub's main branch). Set JMFTS_EMBEDDING_REVISION to a "
+            "commit sha so an upstream push cannot change your vectors.",
+            model_name,
+        )
+    return None
 
 
 class ModelStackNotInstalled(ImportError):
@@ -184,6 +210,7 @@ class EmbeddingService:
         settings = get_settings()
         self.model_name = model_name or settings.embedding_model
         self.device = device or settings.embedding_device
+        self.revision = resolve_embedding_revision(settings, self.model_name)
         self.token_top_percent = token_top_percent or settings.token_top_percent
 
         self._model: Optional[SentenceTransformer] = None
@@ -216,6 +243,7 @@ class EmbeddingService:
                         device=self.device,
                         trust_remote_code=True,
                         model_kwargs={"attn_implementation": "eager"},
+                        revision=self.revision,
                     )
         return self._model
 
@@ -241,7 +269,9 @@ class EmbeddingService:
             from transformers import AutoTokenizer
 
             try:
-                self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+                self._tokenizer = AutoTokenizer.from_pretrained(
+                    self.model_name, revision=self.revision
+                )
             except OSError as exc:
                 raise TokenizerNotCached(self.model_name, exc) from exc
         return self._tokenizer
