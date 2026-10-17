@@ -25,8 +25,12 @@ with RemoteJmftsClient("http://localhost:8100", token="...") as jmfts:
         print(hit.document_id, hit.score)
 ```
 
-Errors arrive as exceptions carrying the status: `JmftsNotFound`, `JmftsBadRequest`,
-`JmftsConflict`, `JmftsUnprocessable`, `JmftsServerError`. All descend from `JmftsError`.
+Errors arrive as exceptions carrying the status: `JmftsBadRequest` (400),
+`JmftsUnauthorized` (401 — no token, or one the appliance does not accept),
+`JmftsForbidden` (403 — authenticated, but not permitted on that document or subtree),
+`JmftsNotFound` (404), `JmftsConflict` (409), `JmftsUnprocessable` (422) and
+`JmftsServerError` (5xx). Every appliance is token-gated, so 401 and 403 are the ones a new
+caller usually meets first. All descend from `JmftsError` and import from `jmfts_client`.
 A request that never reached the server raises `JmftsTransportError`.
 
 ## Where the methods come from
