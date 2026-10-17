@@ -19,7 +19,7 @@ const RESOLVED = {
 describe("option fields", () => {
   it("come from the resolved options, typed by their resolved value", () => {
     expect(fieldKind(true)).toBe("boolean");
-    expect(fieldKind(120)).toBe("integer");
+    expect(fieldKind(120)).toBe("number");
     expect(fieldKind(0.1)).toBe("number");
     expect(fieldKind("sentence")).toBe("text");
     expect(fieldKind(null)).toBe("json");
@@ -54,13 +54,22 @@ describe("parseOptions", () => {
 
   it("refuses a value of the wrong type rather than coercing it", () => {
     const { problems } = parseOptions(
-      { "structure.max_words": "60.5", "structure.overlap": "x", "facts.model": "{" },
+      { "structure.max_words": "sixty", "structure.overlap": "x", "facts.model": "{" },
       RESOLVED
     );
     expect(problems).toHaveLength(3);
-    expect(problems[0]).toMatch(/max_words must be a whole number/);
+    expect(problems[0]).toMatch(/max_words must be a number/);
     expect(problems[1]).toMatch(/overlap must be a number/);
     expect(problems[2]).toMatch(/facts.model must be JSON/);
+  });
+
+  it("lets a float option that resolved to a whole value take a fraction", () => {
+    // JSON.parse("1.0") === 1; the form cannot tell rollup.penalty from a count.
+    const resolved = { rollup: { penalty: 1 } };
+    expect(parseOptions({ "rollup.penalty": "0.5" }, resolved)).toEqual({
+      options: { rollup: { penalty: 0.5 } },
+      problems: [],
+    });
   });
 
   it("refuses the renamed max_tokens and names max_words", () => {

@@ -77,7 +77,10 @@ const capsError = ref<string | null>(null);
 const contexts = ref<SearchContextResponse[] | null>(null);
 const contextsError = ref<string | null>(null);
 
+let metaAsk = 0;
+
 async function loadMeta() {
+  const mine = ++metaAsk;
   caps.value = null;
   capsError.value = null;
   contexts.value = null;
@@ -90,6 +93,8 @@ async function loadMeta() {
     client.capabilities({ corpus: true }),
     client.list_contexts(),
   ]);
+  // The appliance or token changed while this was in flight: the answer is for the old one.
+  if (mine !== metaAsk) return;
   if (c.status === "fulfilled") caps.value = c.value;
   else capsError.value = errorText(c.reason);
   // A context list that failed costs the context control and nothing else; it says why there.

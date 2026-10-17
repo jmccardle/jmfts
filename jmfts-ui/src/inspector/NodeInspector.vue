@@ -23,7 +23,14 @@ import Panel from "@/components/Panel.vue";
 import Rendered from "@/components/Rendered.vue";
 import ScopeTrail from "@/components/ScopeTrail.vue";
 import Tag from "@/components/Tag.vue";
-import { baseUrl, client, token, type DocumentResponse, type ViewResponse } from "@/api";
+import {
+  baseUrl,
+  client,
+  token,
+  type DocumentResponse,
+  type ViewChildStub,
+  type ViewResponse,
+} from "@/api";
 import { count, glossUsetype } from "@/lib/vocab";
 
 const props = defineProps<{ id: number }>();
@@ -35,24 +42,44 @@ const evidenceError = ref<string | null>(null);
 const error = ref<string | null>(null);
 const loading = ref(false);
 
+// `/view/{id}` returns at most this many child stubs and does not say how many there are. A page
+// that fills the limit therefore cannot know it has them all, and says so, with a way to ask for
+// the next page from `/view/{id}/expand-children`.
+const CHILD_PAGE = 60;
+const moreChildren = ref<ViewChildStub[]>([]);
+const childrenExhausted = ref(false);
+const loadingMore = ref(false);
+const moreError = ref<string | null>(null);
+
+// Navigating from node A to node B while A is still loading must not let A's answer land on B's
+// route, so each load takes a number and only the latest may write.
+let ask = 0;
+
 async function load(id: number) {
+  const mine = ++ask;
   loading.value = true;
   error.value = null;
   evidenceError.value = null;
   view.value = null;
   node.value = null;
   evidence.value = null;
+  moreChildren.value = [];
+  childrenExhausted.value = false;
+  loadingMore.value = false;
+  moreError.value = null;
 
   try {
     // The two that must succeed. An error here is shown, never swallowed: a page that renders
     // as though it had an answer is worse than a page that says it has none.
     const [viewed, document_] = await Promise.all([
-      client.view_document({ document_id: id, limit_children: 60 }),
+      client.view_document({ document_id: id, limit_children: CHILD_PAGE }),
       client.get_document({ document_id: id }),
     ]);
+    if (mine !== ask) return;
     view.value = viewed;
     node.value = document_;
   } catch (failure) {
+    if (mine !== ask) return;
     error.value = (failure as Error).message;
     loading.value = false;
     return;
@@ -62,12 +89,36 @@ async function load(id: number) {
   // reported where the evidence would have been, rather than rendering as "no evidence".
   try {
     const recorded = await client.get_document_evidence({ document_id: id });
+    if (mine !== ask) return;
     evidence.value = recorded.evidence as Record<string, unknown>;
   } catch (failure) {
+    if (mine !== ask) return;
     evidenceError.value = (failure as Error).message;
   }
 
   loading.value = false;
+}
+
+async function loadMoreChildren() {
+  const mine = ask;
+  const id = props.id;
+  loadingMore.value = true;
+  moreError.value = null;
+  try {
+    const page = await client.expand_children({
+      document_id: id,
+      offset: children.value.length,
+      limit: CHILD_PAGE,
+    });
+    if (mine !== ask) return;
+    moreChildren.value = [...moreChildren.value, ...page];
+    if (page.length < CHILD_PAGE) childrenExhausted.value = true;
+  } catch (failure) {
+    if (mine !== ask) return;
+    moreError.value = (failure as Error).message;
+  } finally {
+    if (mine === ask) loadingMore.value = false;
+  }
 }
 
 // The node is asked for again when the appliance or the token changes, not only the id.
@@ -82,7 +133,12 @@ const linkHandling = computed(() => view.value?.presentation.link_handling ?? "f
 // not true of every field in this API and is worth saying: it is true of these because
 // `ViewResponse` builds each one with `default_factory=list`.
 const ancestors = computed(() => view.value?.ancestors ?? []);
-const children = computed(() => view.value?.children_stubs ?? []);
+const children = computed(() => [...(view.value?.children_stubs ?? []), ...moreChildren.value]);
+// A full page may be all of them or the first of several; a short one is certainly all.
+const mayHaveMoreChildren = computed(
+  () =>
+    !childrenExhausted.value && children.value.length > 0 && children.value.length % CHILD_PAGE === 0
+);
 const outbound = computed(() => view.value?.outbound_links ?? []);
 const inbound = computed(() => view.value?.inbound_links ?? []);
 const triples = computed(() => view.value?.triples ?? []);
@@ -184,6 +240,14 @@ const showChildren = computed(
               :preview="stub.preview"
               :trailing="stub.child_count > 0 ? `${stub.child_count} inside` : null"
             />
+            <p v-if="mayHaveMoreChildren" class="empty">
+              Showing {{ children.length }}. The appliance does not say how many there are, so
+              there may be more.
+              <button type="button" class="overrule" :disabled="loadingMore" @click="loadMoreChildren">
+                {{ loadingMore ? "Asking…" : `Show the next ${CHILD_PAGE}` }}
+              </button>
+            </p>
+            <p v-if="moreError" class="failed-line">{{ moreError }}</p>
           </template>
         </Panel>
 
@@ -315,6 +379,11 @@ h1 {
 .overrule:hover {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+.failed-line {
+  color: var(--alarm);
+  font-size: var(--t-small);
 }
 
 .waiting,

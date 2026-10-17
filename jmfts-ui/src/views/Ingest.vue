@@ -91,17 +91,22 @@ const capabilities = ref<CapabilitiesResponse | null>(null);
 const pipelines = ref<PipelineInfo[]>([]);
 const aboutError = ref<string | null>(null);
 
+let aboutAsk = 0;
+
 async function loadAbout() {
+  const mine = ++aboutAsk;
   aboutError.value = null;
   try {
     const [caps, entry] = await Promise.all([
       client.capabilities(),
       client.list_registered_pipelines(),
     ]);
+    if (mine !== aboutAsk) return;
     capabilities.value = caps;
     pipelines.value = entry;
     if (!usetype.value && entry.length) usetype.value = entry[0].name;
   } catch (failure) {
+    if (mine !== aboutAsk) return;
     aboutError.value = errorOf(failure);
   }
 }
@@ -274,11 +279,18 @@ const planFresh = computed(() =>
     : explained.value !== null && explainKey.value === requestKey.value
 );
 
+// Generation counters: an answer that arrives after a newer question (or after another file was
+// chosen) describes something the page is no longer asking about, and must not be shown as if it
+// did. Same device as `parentAsk` above and the one Search.vue uses.
+let analyzeAsk = 0;
+let explainAsk = 0;
+
 async function analyze() {
   // A request that does not validate is not sent; the button that calls this is disabled
   // for the same reason, and this is the same check for the call `choose()` makes.
   if (!file.value || problems.value.length) return;
   const key = requestKey.value;
+  const ask = ++analyzeAsk;
   analyzing.value = true;
   analyzeError.value = null;
   try {
@@ -288,21 +300,29 @@ async function analyze() {
       parent_id: parent.id ?? undefined,
       private: isPrivate.value,
     });
+    if (ask !== analyzeAsk) return;
     analysis.value = answer;
     analysisKey.value = key;
   } catch (failure) {
-    analysis.value = null;
+    if (ask !== analyzeAsk) return;
+    // The key goes, so the plan reads as stale and nothing can be submitted from it. The
+    // analysis stays: it is what the option fields are built from, and dropping it removed
+    // the fields and left the user no way to correct the edit that failed except re-picking
+    // the file. A different file clears it in `choose()`.
     analysisKey.value = null;
     analyzeError.value = errorOf(failure);
   } finally {
-    analyzing.value = false;
+    if (ask === analyzeAsk) analyzing.value = false;
   }
 }
 
 function choose(chosen: File | null | undefined) {
   if (!chosen) return;
   file.value = chosen;
-  // The previous answer described previous bytes, and its options were resolved for them.
+  // The previous answer described previous bytes, and its options were resolved for them. An
+  // analysis still in flight is for the previous file too: bumping the counter discards it.
+  analyzeAsk++;
+  analyzing.value = false;
   analysis.value = null;
   analysisKey.value = null;
   resetAll();
@@ -326,10 +346,11 @@ function onDrop(event: DragEvent) {
 async function explainEntry() {
   if (!pipeline.value || source.value !== "content") return;
   const key = requestKey.value;
+  const ask = ++explainAsk;
   explaining.value = true;
   explainError.value = null;
   try {
-    explained.value = await client.explain_ingest({
+    const answer = await client.explain_ingest({
       request: {
         format: "text",
         options: mergeOptions(
@@ -339,13 +360,16 @@ async function explainEntry() {
         patterns: null,
       },
     });
+    if (ask !== explainAsk) return;
+    explained.value = answer;
     explainKey.value = key;
   } catch (failure) {
+    if (ask !== explainAsk) return;
     explained.value = null;
     explainKey.value = null;
     explainError.value = errorOf(failure);
   } finally {
-    explaining.value = false;
+    if (ask === explainAsk) explaining.value = false;
   }
 }
 
@@ -737,7 +761,7 @@ watch(
               :id="`opt-${f.key}`"
               class="value"
               type="text"
-              :inputmode="f.kind === 'integer' || f.kind === 'number' ? 'decimal' : undefined"
+              :inputmode="f.kind === 'number' ? 'decimal' : undefined"
               :value="fieldValue(f.key, f.resolved)"
               @input="setField(f.key, ($event.target as HTMLInputElement).value)"
             />

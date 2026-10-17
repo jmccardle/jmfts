@@ -45,8 +45,14 @@ async function probe() {
 function submit() {
   problem.value = null;
   try {
-    if (applianceField.value.trim() !== baseUrl.value) pointAt(applianceField.value.trim());
-    connect(entry.value);
+    // The address and the token are two separate things this one form sets. Changing only the
+    // address must not demand the token again (the held one is kept, and is visibly still held
+    // by the "Forget token" button), and an address that was changed is probed even when the
+    // token field is blank, or the header would keep naming the appliance it just left.
+    const address = applianceField.value.trim();
+    const moved = address !== baseUrl.value;
+    if (moved) pointAt(address);
+    if (entry.value.trim() || !moved) connect(entry.value);
     entry.value = "";
     void probe();
   } catch (failure) {

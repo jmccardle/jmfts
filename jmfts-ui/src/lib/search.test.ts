@@ -181,8 +181,21 @@ describe("which methods can answer here", () => {
     const c = caps({ embeds: false });
     expect(cannotAnswer("vector", c)).toMatch(/cannot embed a query/);
     expect(cannotAnswer("maxsim", c)).toMatch(/cannot embed a query/);
+    // hybrid_search raises ModelStackNotInstalled (501) for the whole request when a fused
+    // method needs the embedder, so it is refused rather than described as degraded.
+    expect(cannotAnswer("hybrid", c)).toMatch(/whole request fails with 501/);
+    expect(defaultMethods(c, "hybrid")).not.toContain("hybrid");
+  });
+
+  it("names the fused methods that contribute nothing when hybrid can still answer", () => {
+    const c = caps({ corpus: { documents_with_vectors: 0 } });
     expect(cannotAnswer("hybrid", c)).toBeNull();
     expect(hybridCaveats(c)).toEqual([expect.stringMatching(/^vector contributes nothing/)]);
+  });
+
+  it("still lets hybrid answer without the model when nothing it fuses embeds", () => {
+    const c = caps({ embeds: false, defaults: ["fulltext", "bm25"] });
+    expect(cannotAnswer("hybrid", c)).toBeNull();
   });
 
   it("judges quick by the method it is asked to run", () => {

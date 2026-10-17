@@ -27,11 +27,15 @@ export const RENAMED: Record<string, string> = {
 };
 
 /** What kind of field an option gets, decided by the type of its resolved value. */
-export type FieldKind = "boolean" | "integer" | "number" | "text" | "json";
+export type FieldKind = "boolean" | "number" | "text" | "json";
 
 export function fieldKind(resolved: unknown): FieldKind {
   if (typeof resolved === "boolean") return "boolean";
-  if (typeof resolved === "number") return Number.isInteger(resolved) ? "integer" : "number";
+  // No "integer" kind, on purpose: JSON.parse turns the server's `1.0` into `1`, so a float
+  // option that resolved to a whole value is indistinguishable here from a count. Deciding by
+  // Number.isInteger refused `0.5` for `rollup.penalty`. The appliance validates each option's
+  // type (ingest_options.py) and its message is shown when it refuses.
+  if (typeof resolved === "number") return "number";
   if (typeof resolved === "string") return "text";
   // null, a list, an object: there is no type to hold the edit to except "valid JSON".
   return "json";
@@ -107,10 +111,6 @@ export function parseField(kind: FieldKind, text: string): unknown {
       if (trimmed === "true") return true;
       if (trimmed === "false") return false;
       throw new Error("must be true or false");
-    case "integer": {
-      if (!/^-?\d+$/.test(trimmed)) throw new Error("must be a whole number");
-      return Number(trimmed);
-    }
     case "number": {
       const n = Number(trimmed);
       if (trimmed === "" || !Number.isFinite(n)) throw new Error("must be a number");

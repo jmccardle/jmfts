@@ -21,17 +21,24 @@ const loading = ref(true);
 // Asked again whenever the answer could differ: a different appliance, or a token that was
 // missing a moment ago. A page that loads once and keeps its first failure after the reader
 // has fixed the cause reports a problem that no longer exists.
+// A slower earlier answer (the previous appliance, or the token before it was fixed) must not
+// overwrite a newer one, so each load takes a number and only the latest may write.
+let ask = 0;
+
 async function load() {
+  const mine = ++ask;
   loading.value = true;
   error.value = null;
   try {
     const [s, r] = await Promise.all([client.get_stats(), client.get_root_documents()]);
+    if (mine !== ask) return;
     stats.value = s;
     roots.value = r;
   } catch (failure) {
+    if (mine !== ask) return;
     error.value = (failure as Error).message;
   } finally {
-    loading.value = false;
+    if (mine === ask) loading.value = false;
   }
 }
 

@@ -315,6 +315,17 @@ export function cannotAnswer(
   if (id === "hybrid") {
     // Fusion answers if ANY method it fuses by default can. When none can, say which and why.
     const fused = caps.retrieval.default_methods;
+    // Fusion does not skip a method that cannot embed: SearchRepository.hybrid_search calls
+    // vector_search_text / maxsim, which raise ModelStackNotInstalled (HTTP 501) for the whole
+    // request. So one embedding method in the fused list is enough to refuse.
+    const needsEmbedding = fused.filter((m) => m === "vector" || m === "maxsim");
+    if (!embeds && needsEmbedding.length > 0) {
+      return (
+        `hybrid fuses ${needsEmbedding.join(" and ")} by default, and this appliance cannot ` +
+        "embed a query (the embed extra is not installed here), so the whole request fails " +
+        "with 501 rather than fusing the rest"
+      );
+    }
     const reasons = fused.map((m) => [m, own(m)] as const);
     if (fused.length > 0 && reasons.every(([, r]) => r !== null)) {
       return `every method it fuses by default cannot answer here — ${reasons
