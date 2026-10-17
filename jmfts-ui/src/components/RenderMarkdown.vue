@@ -3,7 +3,7 @@
 
 import { computed, h, type VNode } from "vue";
 import { RouterLink } from "vue-router";
-import { parseMarkdown, type Block, type Inline } from "@/lib/markdown";
+import { parseMarkdown, safeHref, type Block, type Inline } from "@/lib/markdown";
 
 // `/view/{id}` is how the appliance writes a link to another node inside `rendered_content` —
 // the footnotes and inline citations it renders from `link_handling` all point that way. Those
@@ -29,6 +29,9 @@ function inline(nodes: Inline[]): (VNode | string)[] {
         if (internal) {
           return h(RouterLink, { to: `/node/${internal[1]}` }, () => inline(node.c));
         }
+        // The parser already refuses an unsafe target; this holds for an `Inline` built by hand
+        // that never went through it. Its words survive, the anchor does not.
+        if (safeHref(node.href) === null) return h("span", inline(node.c));
         // Everything else points outside the appliance. `noopener` because a new tab with a
         // handle on this one is a way out of it.
         return h(

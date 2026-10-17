@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseInline, parseMarkdown, parseTranscript } from "./markdown";
+import { parseInline, parseMarkdown, parseTranscript, safeHref } from "./markdown";
 
 const text = (v: string) => ({ t: "text", v }) as const;
 
@@ -50,6 +50,29 @@ describe("parseInline", () => {
     ]);
   });
 
+  // A bound `href` is not sanitised by Vue, so the parser is where a script URL stops. These are
+  // the spellings a hand regex misses; the WHATWG parser normalises all of them to `javascript:`.
+  // (`java\nscript:` never reaches the check here: the target pattern stops at whitespace, so it
+  // reads as a relative link to `java`. `safeHref` is tested against it directly below.)
+  it.each([
+    "javascript:alert(1)",
+    "JaVaScRiPt:alert(1)",
+    "\u0001javascript:alert(1)",
+    "data:text/html,<script>alert(1)</script>",
+    "vbscript:msgbox(1)",
+    "file:///etc/passwd",
+  ])("keeps a link to %j as its literal text", (target) => {
+    const source = `[x](${target})`;
+    expect(parseInline(source)).toEqual([text(source)]);
+  });
+
+  it.each(["https://x.org", "http://x.org/a?b=c#d", "mailto:a@b", "/view/42", "#sec", "other.md"])(
+    "keeps a link to %j, its href unchanged",
+    (target) => {
+      expect(parseInline(`[x](${target})`)).toEqual([{ t: "link", href: target, c: [text("x")] }]);
+    }
+  );
+
   it("keeps raw HTML as text", () => {
     expect(parseInline("<script>alert(1)</script>")).toEqual([text("<script>alert(1)</script>")]);
   });
@@ -67,6 +90,31 @@ describe("parseInline", () => {
 
   it.fails("KNOWN DEFECT: keeps an asterisk followed by a space as text", () => {
     expect(parseInline("2 * 3 * 4")).toEqual([text("2 * 3 * 4")]);
+  });
+});
+
+describe("safeHref", () => {
+  it.each(["https://x.org", "http://x.org", "mailto:a@b", "/view/42", "#sec", "other.md", "../a"])(
+    "allows %j, returned unchanged",
+    (raw) => {
+      expect(safeHref(raw)).toBe(raw);
+    }
+  );
+
+  it.each([
+    "javascript:alert(1)",
+    "JaVaScRiPt:alert(1)",
+    " javascript:alert(1)",
+    "\u0001javascript:alert(1)",
+    "java\tscript:alert(1)",
+    "java\nscript:alert(1)",
+    "data:text/html,x",
+    "vbscript:x",
+    "file:///etc/passwd",
+    "blob:https://x.org/1",
+    "http://[",
+  ])("refuses %j", (raw) => {
+    expect(safeHref(raw)).toBeNull();
   });
 });
 
