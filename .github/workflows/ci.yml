@@ -2,7 +2,7 @@
 # push and every pull request — and reusable, so publish.yml can *require* it instead of
 # trusting that somebody remembered.
 #
-# Three jobs, because they fail for three different reasons and cost three different
+# Four jobs, because they fail for four different reasons and cost four different
 # amounts:
 #
 #   suite      the whole test suite against a real pgvector, on the floor interpreter.
@@ -10,6 +10,8 @@
 #   packaging  the release guards, on every interpreter pyproject.toml claims. Needs no
 #              database, no model and no torch, which is what makes four of them cheap.
 #   lint       black and ruff, exactly as the runbook states them.
+#   console    jmfts-ui: type-check, unit tests and the production build, from the lockfile.
+#              Needs no database, no Python and no appliance.
 #
 # "Fail Early" (CLAUDE.md): there is no `continue-on-error`, no `|| true`, and no step
 # anywhere in this file that turns a failure into a warning. Shell steps run under
@@ -295,3 +297,50 @@ jobs:
         run: |
           set -euo pipefail
           ruff check jmfts_core jmfts_batch jmfts-client jmfts-web tests
+
+  console:
+    name: Console (jmfts-ui, node 20)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: jmfts-ui
+    steps:
+      # The whole checkout, not jmfts-ui alone: the console imports the generated client IN
+      # PLACE from ../jmfts-web/jmfts_web/static/client (the `@jmfts/client` alias in
+      # vite.config.ts and tsconfig.json), so a sparse checkout would fail the type-check
+      # for a reason that has nothing to do with the console.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Exact, as the python jobs pin their interpreter. Vite 6 needs 20.19 or later;
+          # this is the version the lockfile was last installed and run under.
+          node-version: "20.20.1"
+          cache: npm
+          cache-dependency-path: jmfts-ui/package-lock.json
+
+      - name: Install from the lockfile
+        run: |
+          set -euo pipefail
+          # `npm ci`, never `npm install`: it refuses a package.json the lockfile does not
+          # satisfy, and never rewrites the lockfile, so what is tested is what is locked.
+          npm ci
+
+      - name: Type-check
+        run: |
+          set -euo pipefail
+          # This is the only thing that checks the console against the generated client's
+          # types. A route that changes on master regenerates the client and keeps
+          # tests/test_ts_client_codegen.py green while the console stops compiling; this
+          # step is where that is found.
+          npm run typecheck
+
+      - name: Unit tests
+        run: |
+          set -euo pipefail
+          npm test
+
+      - name: Production build
+        run: |
+          set -euo pipefail
+          npm run build
