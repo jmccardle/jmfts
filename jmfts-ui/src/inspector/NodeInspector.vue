@@ -32,6 +32,7 @@ import {
   type ViewResponse,
 } from "@/api";
 import { count, glossUsetype } from "@/lib/vocab";
+import { offersPreview } from "@/lib/preview";
 
 const props = defineProps<{ id: number }>();
 
@@ -124,6 +125,8 @@ async function loadMoreChildren() {
 // The node is asked for again when the appliance or the token changes, not only the id.
 watch([() => props.id, baseUrl, token], () => load(props.id), { immediate: true });
 
+// Offered only where there is a page to show: a file node, or a node anchored to a PDF rectangle.
+const canPreview = computed(() => offersPreview(node.value?.usetype, evidence.value));
 const usetypeGloss = computed(() => glossUsetype(node.value?.usetype)?.meaning ?? null);
 const childHandling = computed(() => view.value?.presentation.child_handling ?? "collapsed");
 const linkHandling = computed(() => view.value?.presentation.link_handling ?? "footnotes");
@@ -201,6 +204,9 @@ const showChildren = computed(
               :value="view.can_write ? 'edit this' : 'read this only'"
               meaning="Asked of the appliance rather than discovered by trying and being refused."
             />
+            <RouterLink v-if="canPreview" :to="`/node/${node.id}/preview`" class="term">
+              See it on the page
+            </RouterLink>
           </div>
           <p v-if="usetypeGloss" class="gloss">{{ usetypeGloss }}</p>
         </header>
