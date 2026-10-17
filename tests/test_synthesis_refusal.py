@@ -197,3 +197,19 @@ class TestTheTypedError:
         with pytest.raises(llm_client.LlmCallError) as caught:
             self._call(settings)
         assert caught.value.status is None
+
+    def test_a_context_length_refusal_fails_a_queued_task_on_its_first_attempt(self):
+        """Forgejo #8, end to end from the wire: the 400 a llama-server sends for an
+        over-long prompt reaches ``classify_exception`` as PERMANENT, so the task queue
+        settles the node instead of spending its retry budget on a request that is refused
+        identically every time. One request, because τ 0.12 does not retry either."""
+        from jmfts_core.task_errors import ErrorType, classify_exception
+
+        too_long = "the request (9000 tokens) exceeds the available context size (8192)"
+        with llm_stub(status=400, error_message=too_long) as stub:
+            with pytest.raises(llm_client.LlmCallError) as caught:
+                self._call(stub.settings())
+            requests = len(stub.requests)
+        assert requests == 1
+        assert caught.value.status == 400
+        assert classify_exception(caught.value) is ErrorType.PERMANENT

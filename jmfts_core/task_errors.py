@@ -36,6 +36,8 @@ from enum import Enum
 
 import httpx
 
+from jmfts_core.llm_client import LlmCallError
+
 
 class ErrorType(str, Enum):
     """Why a task failed, which is what decides whether it runs again.
@@ -102,12 +104,21 @@ def classify_exception(exception: BaseException) -> ErrorType:
     # 408 (Request Timeout) joins it for the same reason, and is given TIMEOUT so it reads
     # in the attempt log as what it is.
     if isinstance(exception, httpx.HTTPStatusError):
-        status_code = exception.response.status_code
-        if status_code == 408:
-            return ErrorType.TIMEOUT
-        if status_code == 429 or status_code >= 500:
-            return ErrorType.RETRYABLE
-        return ErrorType.PERMANENT
+        return _classify_status(exception.response.status_code)
+
+    # The SAME RULE for an LLM endpoint's answer, which reaches us through τ rather than
+    # httpx (Forgejo #8). `status` is None when nothing answered — a refused connection, a
+    # timeout, a response τ could not read — and that falls through to the RETRYABLE
+    # default below, which is what it got before this arm existed. A status that IS present
+    # is what the endpoint said, and a 400 for "exceeds the available context size" is said
+    # identically on every attempt: before this arm it burned the whole retry budget first.
+    #
+    # The status is read out of τ's message text, once, in `llm_client._TAU_HTTP_STATUS`;
+    # this arm reads the typed attribute, so spec 3.4 — policy by classification, never by
+    # a string match here — still holds. Safe on τ 0.12.x, which retries nothing itself, so
+    # the task queue is the only retry layer; τ 0.13's own retries are Forgejo #45.
+    if isinstance(exception, LlmCallError) and exception.status is not None:
+        return _classify_status(exception.status)
 
     # Data and programming errors. See the module docstring: this includes our own bugs
     # on purpose, because retrying a bug three times only delays noticing it.
@@ -145,3 +156,12 @@ def classify_exception(exception: BaseException) -> ErrorType:
         return ErrorType.RETRYABLE if "No space left" in str(exception) else ErrorType.PERMANENT
 
     return ErrorType.RETRYABLE
+
+
+def _classify_status(status_code: int) -> ErrorType:
+    """An HTTP status, read as a retry policy. See the comment above its first caller."""
+    if status_code == 408:
+        return ErrorType.TIMEOUT
+    if status_code == 429 or status_code >= 500:
+        return ErrorType.RETRYABLE
+    return ErrorType.PERMANENT

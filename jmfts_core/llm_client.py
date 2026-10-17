@@ -59,6 +59,13 @@ That is a string match, made once, pinned by a test, and kept out of retry *poli
 queued tasks: ``classify_exception`` does not branch on ``LlmCallError`` yet, so what the
 paragraph above says about the worker is still true. The synthesis request path retries a
 502/503/504 inside a small budget of its own (``synthesis.synthesize``).
+
+**2026-10-17, 0.7.0 (Forgejo #8).** ``classify_exception`` now branches on
+``LlmCallError.status``, with the same table as an ``httpx.HTTPStatusError``: a 4xx other
+than 408/429 is ``PERMANENT``, so a context-length 400 fails its task on the first attempt.
+The two paragraphs above are history from here on, except for the timeout: τ still reports
+one as a bare message with no status, so it is ``status=None`` and stays ``RETRYABLE``
+rather than ``TIMEOUT``. The regex goes when τ 0.13 carries the status itself (#45).
 """
 
 from __future__ import annotations
