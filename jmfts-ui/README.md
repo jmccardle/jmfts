@@ -5,16 +5,18 @@ with `jmfts`, and it points at an API base URL you choose at runtime.
 
 ```bash
 npm install
-JMFTS_URL=http://127.0.0.1:8110 npm run dev     # http://localhost:5183
+npm run dev                                     # http://localhost:5183
 npm run build                                   # dist/, static files
 npm run typecheck
 npm test                                        # vitest, the pure functions in src/lib/
 ```
 
-`JMFTS_URL` only affects the dev server, which proxies the appliance's route prefixes so the
-page stays same-origin and the appliance needs no CORS header to develop against. A built
-bundle reads `window.__JMFTS_BASE__` from the host page, and whatever address you type into the
-bar wins over it for that tab.
+The dev server talks to `http://127.0.0.1:8100`, the API the repository's `docker-compose.yml`
+publishes; point it elsewhere with `JMFTS_URL=http://host:port npm run dev`. `JMFTS_URL` only
+affects the dev server, which proxies the appliance's route prefixes so the page stays
+same-origin and the appliance needs no CORS header to develop against. A built bundle reads
+`window.__JMFTS_BASE__` from the host page, and whatever address you type into the bar wins
+over it for that tab.
 
 The token lives in `sessionStorage`, never in `localStorage` and never in the URL. A closed tab
 has forgotten it; a pasted address does not carry it.

@@ -20,7 +20,10 @@ const generatedClient = fileURLToPath(
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  const appliance = env.JMFTS_URL || "http://127.0.0.1:8110";
+  // The compose stack's published API port (`../docker-compose.yml`), which is what the README
+  // and `CLAUDE.md` tell a developer to start. Another instance is what `JMFTS_URL` is for.
+  // `tests/test_ui_dev_proxy.py` fails if this and the compose file disagree.
+  const appliance = env.JMFTS_URL || "http://127.0.0.1:8100";
 
   return {
     plugins: [vue()],
@@ -37,11 +40,16 @@ export default defineConfig(({ mode }) => {
       fs: { allow: [searchForWorkspaceRoot(process.cwd()), generatedClient] },
       proxy: Object.fromEntries(
         // Every prefix the appliance answers on. Listed rather than globbed, because a
-        // catch-all would swallow Vite's own `/@vite` and `/src` paths.
+        // catch-all would swallow Vite's own `/@vite` and `/src` paths. Listed by hand, so
+        // `tests/test_ui_dev_proxy.py` holds it against the first segment of every path in the
+        // live OpenAPI document plus the three doc routes; a prefix missing here is a page that
+        // works against a built bundle and 404s from Vite in development.
         [
           "/access",
           "/capabilities",
+          "/config",
           "/conversations",
+          "/docs",
           "/documents",
           "/graph",
           "/health",
@@ -50,6 +58,8 @@ export default defineConfig(({ mode }) => {
           "/ontologies",
           "/openapi.json",
           "/rdf",
+          "/redoc",
+          "/runner",
           "/search",
           "/search-contexts",
           "/shape-bindings",
