@@ -1,6 +1,6 @@
 # JMFTS Roadmap
 
-Last updated: 2026-10-17 (the Status section, known gaps 11–13, and two citations marked held back). **This file is open work; `CHANGELOG.md` is what shipped.** Where
+Last updated: 2026-10-17 (the Status section, known gaps 11–13 — gap 11 decided the same day — and two citations marked held back). **This file is open work; `CHANGELOG.md` is what shipped.** Where
 the two would say the same thing, this one says nothing and points there.
 
 The 2026-09-17 pass re-read one section — the job system — against `master` at `8e7ccba`, and
@@ -34,8 +34,9 @@ the issue tracker — there is no `docs/SPRINT_0_7_0.md` and none is planned; `d
 is the record of a shipped sprint. The suite on `ff35838` read 3138 passed, 149 skipped,
 0 failed (CPU embeddings, 2026-10-16; every skip an absent `node`, `tsc`, LLM server or real
 PDF). Since the 2026-10-14 read: the retry policy of an LLM failure in a queued task follows
-the endpoint's status (#8), three dependencies carry security floors, and gap 11 has a
-measurement and a second defect behind it. The Vue console's three High review findings
+the endpoint's status (#8), three dependencies carry security floors, and gap 11 is
+decided and built — summary-tree nodes carry no vector and die with their source
+(migration 025). The Vue console's three High review findings
 (a markdown link-scheme hole, an Ingest poll that outlives its view, a dev proxy on the wrong
 port) have fix specs, and are fixes owed by `worktree-vue-frontend` before it merges. A sweep of every reachable corpus
 for anchors written on rotated PDF pages before #38's fix found **zero**: no PDF in them has a
@@ -230,8 +231,14 @@ the measurement behind gap 11.
 
     **CLOSED 2026-10-12 (0.6.2, #17) on the second option**: the duplication stays and
     `search_exclude_usetypes` is documented as load-bearing (`CHANGELOG.md` 0.6.2, Fixed).
-    **Measured again 2026-10-16, and the closure is open to review — a decision for the
-    owner, not yet taken.** On the stress corpus (`jmfts-stress-pg`, 59,242 documents) there
+    **Measured again 2026-10-16, and REOPENED and CLOSED AGAIN 2026-10-17 on the first
+    option** — the owner's rule: a vector belongs on a node when there is a semantic
+    retrieval reason to reach that node, and duplicate vectors are fine where different
+    contexts should each be reachable. Neither held here: same text, same access key, and the
+    source is in every default result set the summary node is held out of. `summarize:tree`
+    now writes no vector, migration 025 clears the copies and rebuilds `idx_documents_embed`,
+    and `search_exclude_usetypes`' `summary` entry is an ordinary default again. The
+    measurement it was decided on: On the stress corpus (`jmfts-stress-pg`, 59,242 documents) there
     are now 14,829 summary rows, not 13,755; every one with a live source is bit-identical to
     it, and they are 25.1% of the vectors in `idx_documents_embed`. Filtered recall@10 at
     `ef_search=40` is 0.967 (0.933 on queries whose source has a twin), so today's app query
@@ -249,7 +256,12 @@ the measurement behind gap 11.
     vector. 821 such rows on the stress corpus; 583 hold a vector that exists nowhere else in
     the store, reachable by any search that names `usetype='summary'`. That is retained
     content after a delete, and it qualifies as a step under Part 0's rule once a test
-    deletes a summarised container and finds its summary node still there.
+    deletes a summarised container and finds its summary node still there. **FIXED
+    2026-10-17:** `DocumentRepository.delete` removes the summary nodes whose
+    `source_node_id` is in the deleted subtree, held by
+    `tests/test_derived_tree_rollup.py::TestTheDerivedNode::test_deleting_a_source_deletes_its_summary_node`
+    (which fails without it); migration 025 deletes the orphans already stored, with no
+    backup, because a backup would retain exactly the deleted content it removes.
 
 12. **Ten `@expose`d verbs name a document and consult no principal. OPENED 2026-09-13**, by
     the first run of the audit 0.6.0 step 3 landed. This entry is a pointer and not a copy:

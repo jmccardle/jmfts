@@ -65,10 +65,10 @@ USETYPE_SHEET = "sheet"
 #: A summary written by a model, or a roll-up standing in for the nodes it names. Held out
 #: of every default result set by `Settings.search_exclude_usetypes` and
 #: `bm25_exclude_usetypes`, which is right for the two things that carry it: a
-#: `summarize:tree` node's vector is byte-identical to its source node's (13,755 of 13,755
-#: pairs at cosine distance 0.000000 on the reference corpus), so admitting them would
-#: return every answer twice, and an LLM summary's text is reachable on the node it
-#: summarises through `effective_content`.
+#: `summarize:tree` node carries no vector at all from 0.7.0 (it used to carry a
+#: byte-identical copy of its source's — 13,755 of 13,755 pairs on the reference corpus —
+#: which is ROADMAP gap 11 and migration 025), and an LLM summary's text is reachable on the
+#: node it summarises through `effective_content`.
 USETYPE_SUMMARY = "summary"
 
 #: What `profile:sheet` writes under a sheet — the measured description of a worksheet

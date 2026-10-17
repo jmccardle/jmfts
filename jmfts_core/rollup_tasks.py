@@ -1219,6 +1219,16 @@ def run_summarize_tree(session: Session, task: TaskQueue) -> TaskOutcome:
     replaces its outgoing ``summarizes`` edges wholesale. Two summary nodes for one source
     node would make the projection ambiguous and neither copy wrong.
 
+    **It carries no vector** (ROADMAP gap 11, 2026-10-17). Until 0.7.0 it held a copy of its
+    source node's, on the reasoning that "the vector is what the summary IS for retrieval".
+    But the copy was bit-identical — both are the embedding of the same effective content —
+    and the source already carries it, under the same access key, in every default result
+    set; the summary node was held out of every one. So the copy answered no query the
+    source does not, and measured on a 59k-document corpus it took 25% of the HNSW index
+    and 29–38% of an unfiltered top-40. A vector belongs on a node only when there is a
+    retrieval reason to reach THAT node; a search over the summary tree is a search over the
+    sources joined back by :data:`SOURCE_NODE_KEY`.
+
     **The derived node is flat under the root, and the nesting is in the edges.** A summary
     of a container cannot be created under the summary of that container's PARENT, because
     the walk rolls up from the leaves and the parent's summary does not exist yet; building
@@ -1255,8 +1265,8 @@ def run_summarize_tree(session: Session, task: TaskQueue) -> TaskOutcome:
             status="skipped",
             detail={
                 "reason": (
-                    "this node has effective_content but no document vector, so there is "
-                    "nothing to copy onto the derived node and no way to retrieve it"
+                    "this node has effective_content but no document vector, so a summary "
+                    "node reached through it would be reachable by no vector search"
                 ),
                 "method": record.get("method"),
             },
@@ -1310,9 +1320,8 @@ def run_summarize_tree(session: Session, task: TaskQueue) -> TaskOutcome:
             parent_id=root_id,
             usetype=USETYPE_SUMMARY,
             structured_content=structured,
-            # The vector is copied below. `auto_embed=True` would run the model over the
-            # summary text a second time — and over NOTHING at all in the concatenated
-            # case, where this node has no content of its own.
+            # No vector: see the docstring. `auto_embed=True` would also run the model over
+            # the summary text a second time, producing the source's vector again.
             auto_embed=False,
             produced_by=TASK_SUMMARIZE_TREE,
         )
@@ -1320,7 +1329,9 @@ def run_summarize_tree(session: Session, task: TaskQueue) -> TaskOutcome:
         node.title = f"Summary of {label}"
         node.content = content
         node.structured_content = structured
-    node.embed = list(doc.embed)
+    # Cleared on a re-run too, so a node written by a release that copied the vector loses
+    # it the next time its source is summarised (migration 025 clears the rest at once).
+    node.embed = None
     session.flush()
 
     _rewrite_member_links(session, node.id, members)

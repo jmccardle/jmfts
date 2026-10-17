@@ -502,6 +502,13 @@ CREATE INDEX idx_documents_usetype ON documents(usetype);
 -- MAJORITY of an ingested tree, so the exclusion would buy nothing and would stop the index
 -- answering "which children here did a person assert" (9.4). See migration 016.
 CREATE INDEX idx_documents_produced_by ON documents(parent_id, produced_by);
+-- Which `summarize:tree` nodes stand for something in a subtree being deleted
+-- (`DocumentRepository.delete`). A summary node lives under a derived root, so the
+-- `parent_id` cascade never reaches it; this is the lookup that does. Partial, because only
+-- `summarize:tree` writes the key. See migration 025 and ROADMAP.md gap 11.
+CREATE INDEX idx_documents_summary_source ON documents
+    (((structured_content ->> 'source_node_id')::int))
+    WHERE produced_by = 'summarize:tree';
 
 -- Containers — a settled node with no `content` of its own, whose text is its children's.
 -- PARTIAL because the query only ever asks this direction, and `content` is the widest
@@ -942,7 +949,8 @@ INSERT INTO schema_migrations (name, applied_at, source) VALUES
     ('021_profile_usetype.sql', NOW(), 'schema'),
     ('022_token_embed_256_hnsw.sql', NOW(), 'schema'),
     ('023_document_renditions.sql', NOW(), 'schema'),
-    ('024_max_words.sql', NOW(), 'schema');
+    ('024_max_words.sql', NOW(), 'schema'),
+    ('025_summary_tree_no_vector.sql', NOW(), 'schema');
 -- END MIGRATION LEDGER
 
 -- ============================================================================

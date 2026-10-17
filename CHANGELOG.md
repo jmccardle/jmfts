@@ -64,6 +64,15 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
 
 ### Changed
 
+- **A `summarize:tree` node carries no vector** (ROADMAP gap 11). It held a bit-identical
+  copy of its source node's: the same text, the same access, and the source is in every
+  default result set the summary node is held out of, so the copy answered nothing the
+  source does not while taking about a quarter of `idx_documents_embed` and of an
+  unfiltered top-40 on a 59k-document corpus. Reach a summary node through its source
+  (`structured_content.source_node_id`). **Apply migration 025**, which clears the stored
+  copies, deletes orphaned summary nodes (below) and rebuilds `idx_documents_embed` under
+  a write lock on `documents`; it aborts, changing nothing, if any summary vector differs
+  from its source's. `summary` stays in `search_exclude_usetypes` as an ordinary default.
 - **The `extract:tables` not-applicable reason after `extract:text` has run** now says the
   reader ran and does not measure `pages_with_tables` for that format (`.md`, `.docx`),
   instead of repeating probe's "extract:text measures it and re-plans extract:tables".
@@ -109,6 +118,12 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
 
 ### Fixed
 
+- **Deleting a document deletes the summary-tree nodes that stood for it** (ROADMAP gap 11).
+  A summary node lives under a derived root, so the tree cascade never reached it: the
+  source and its `summarizes` edges went, and the node stayed, titled after the deleted
+  document and holding its vector — retained content, reachable by any search naming
+  `usetype=summary`. 821 such nodes on the stress corpus; migration 025 deletes the ones
+  already stored.
 - **Ten operations that ignored subtree access now respect it** (#30, ROADMAP known gap 12).
   The five `IndexService` verbs that name a document (`index_document`, add and remove a root,
   `get_index_roots`, `refresh_index`), template get, render **and list**, `file_frontier`, and
