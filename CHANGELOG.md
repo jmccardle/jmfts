@@ -20,7 +20,9 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
   still naming `max_tokens` is refused with a hint to rename it, and `/chunk` answers 422
   to unknown fields. Migration 024 rewrites the stored `options` evidence row; a structure
   task already queued with `max_tokens` is not rewritten (its param fingerprint would stop
-  matching) and fails PERMANENT with the rename message, so re-ingest the document.
+  matching) and fails PERMANENT with the rename message, so re-ingest the document. The
+  migration refuses to run while such a task could still run (pending, claimed, running,
+  batched, or failed and retryable): drain the queue or delete those rows first.
 - **A queued `structure:conversation` row from before this release fails PERMANENT** (#4). Such
   rows carry `{}` for their parameters, and the task now reads the whole `structure` group from
   its row; one missing a key is refused, naming the keys and saying to re-ingest the document,

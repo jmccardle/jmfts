@@ -23,7 +23,13 @@
 --   (spec 6.1) would be comparing against a value nothing can recompute. Such a task is
 --   REFUSED instead: `_build_tree` raises on a `max_tokens` parameter, PERMANENT, naming the
 --   rename, rather than reading the default and chunking at a budget nobody asked for.
---   Drain the queue before upgrading and there is nothing to refuse.
+--   Drain the queue before upgrading and there is nothing to refuse. The migration ENFORCES
+--   that: it stops, before it changes anything, if a structure task that could still run
+--   carries `max_tokens` (see the PRE-FLIGHT block). "Could still run" is pending, claimed,
+--   running, batched, or failed-and-retryable under its cap; completed and permanently
+--   failed rows are history and do not stop it. Clear them by draining the worker or by
+--   deleting the rows, then re-ingest the documents; the migration changes nothing on a
+--   refusal, so it can be re-run.
 -- * Completed attempts and their recorded `params`. They are the record of what ran, under
 --   the name it ran with; editing them into agreement would stop them being evidence.
 --
@@ -35,6 +41,24 @@
 -- migrated row refuses `max_words` as unknown — loudly, the same 400 a typo gets.
 
 BEGIN;
+
+-- PRE-FLIGHT: the queue must hold no runnable structure task naming `max_tokens`.
+DO $$
+DECLARE
+    stuck INTEGER;
+BEGIN
+    SELECT count(*) INTO stuck
+    FROM task_queue
+    WHERE task_type LIKE 'structure:%'
+      AND params ? 'max_tokens'
+      AND (status IN ('pending', 'claimed', 'running', 'batched')
+           OR (status = 'failed' AND retryable AND retry_count < max_retries));
+    IF stuck > 0 THEN
+        RAISE EXCEPTION '% structure task(s) in task_queue still carry max_tokens and '
+            'could run; drain the queue (or delete those rows and re-ingest the documents) '
+            'before applying 024', stuck;
+    END IF;
+END $$;
 
 DO $$
 BEGIN
