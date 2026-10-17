@@ -11,7 +11,12 @@ Dates are the release commit's date. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses semantic
 versioning with the caveat that it is pre-1.0, so a minor version may break the wire.
 
-## [Unreleased]
+## [0.7.0] — 2026-10-17
+
+**Chunks are measured in words, and a summary stops outliving its source.** The `max_words`
+rename and the chunking work around it, PDF tables and spreadsheet cells as anchored nodes,
+summary-tree nodes with no vector of their own, ten operations brought under subtree access,
+and a standalone console (`jmfts-ui`, unpackaged) with a page preview of a node's anchor.
 
 ### Breaking
 
@@ -32,6 +37,18 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
   same guarantee.
 
 ### Added
+
+- **`jmfts-ui`, a standalone Vue console** (#11): Corpus, a node inspector, Search (the
+  retrieval methods side by side) and Ingest (explain before upload, then watch it settle).
+  It is not packaged and not part of any wheel; `jmfts-web` at `/app` is unchanged. CI gains
+  a `console` job (typecheck, test, build).
+- **A page preview of a node's anchor** (`/node/:id/preview` in `jmfts-ui`): the source
+  page with the anchor's rectangle drawn on it, beside the appliance's own crop. A refused
+  anchor shows the server's 400 detail verbatim and no picture.
+- **`JMFTS_EMBEDDING_REVISION`** pins the default embedding model to a Hub commit
+  (`d556a88e332558790b210f7bdbe87da2fa94a8d8`), for the model and its tokenizer. An
+  overridden `JMFTS_EMBEDDING_MODEL` with no revision loads unpinned and logs one WARNING.
+  The reranker is not pinned yet.
 
 - **`sentence_window` chunk strategy.** Packs whole sentences up to the embedding model's
   token window, measured with the real tokenizer through `fits`; it refuses to run without
@@ -188,6 +205,7 @@ to what the suite runs on, and ten dead items the restored dead-code scan found.
   `inner.shade`, `items[].hue`) and the server logs one WARNING per route and field set.
   tectum's `max_context_tokens`, dropped silently since 0.6.0, is the case that found it.
   Rejecting such fields (`extra="forbid"`) is planned for 0.7.0 (#33).
+  *(Corrected 2026-10-17: moved to 0.8.0, for every request contract — #47.)*
 - **`llm_error` on the synthesize response:** `{reason: not_configured|refused|failed,
   status, message, attempts}`. `llm_available` is unchanged on the wire (#32).
 - **A 502, 503 or 504 from the LLM is retried during synthesis**, the wait doubling from

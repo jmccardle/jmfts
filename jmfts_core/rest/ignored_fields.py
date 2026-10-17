@@ -5,7 +5,8 @@ does not recognise. A caller on an older wire format — tectum still sends
 ``max_context_tokens``, which 0.6.0 removed — therefore gets a 200 for a request part of
 which was never read, with nothing to say so.
 
-This is a SIGNAL, not a rejection. ``extra="forbid"`` is the 0.7.0 half of the issue, and it
+This is a SIGNAL, not a rejection. ``extra="forbid"`` is the 0.7.0 half of the issue
+(corrected 2026-10-17: moved to 0.8.0, on every request contract, #47), and it
 changes what validates; this changes nothing about what validates. The response carries
 
     X-JMFTS-Ignored-Fields: max_context_tokens, filters.colour

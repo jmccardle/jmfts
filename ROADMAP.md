@@ -28,6 +28,12 @@ internal file at its own date and has not been re-checked.
 
 ## Status
 
+**Released: 0.7.0, 2026-10-17.** `CHANGELOG.md` is what it carries. Deferred out of it: the
+reranker revision pin, collection-level options (#46), `extra="forbid"` on every request
+contract (#47, 0.8.0), the `QUERIES` floor measurement (`docs/MEASURE_MAXSIM_MARGIN.md`
+Part 3.3's extrapolation does not hold at 96 queries), and the console's open Medium review
+findings. The paragraphs below are the readings that led up to it.
+
 **Read 2026-10-17, and it supersedes everything below it in this section that names 0.6.0 as
 future work.** Released: **0.6.2**. Next: **0.7.0**, and its plan is the 0.7.0 milestone on
 the issue tracker — there is no `docs/SPRINT_0_7_0.md` and none is planned; `docs/SPRINT_0_6_0.md`
