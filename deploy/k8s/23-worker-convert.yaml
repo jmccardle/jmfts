@@ -13,12 +13,23 @@
 # conversion should not compete with ingest for the same workers.
 #
 # THE BADGE IS OPTIONAL AND IT IS A COMMITMENT. `jmfts_core.task_routing.CONVERT_POLICY`
-# routes the two task types at the `convert` badge; applying it (JMFTS_TASK_BADGES in
-# 10-config.yaml) says the cluster HAS this pool, because badges are asymmetric — a badged
-# task is claimed by no un-badged worker, so a cluster that routes and does not run the pool
-# stalls silently, and `render:pdf` being advisory means the document settles without its
-# rendition and without a failure anybody can see. Leave it unset and every worker with the
-# URL takes the work.
+# routes the two task types at the `convert` badge, and applying it (JMFTS_TASK_BADGES in
+# 10-config.yaml) says the cluster HAS a pool that answers that badge. Badges are asymmetric
+# (`claim_next` in jmfts_core/repositories/task_queue.py; deploy/README.md, "The one way
+# this can stall"). A badged worker claims its own badges plus un-badged work and nothing
+# else. An UN-badged worker claims anything, `convert` tasks included. So:
+#
+#   * Routed, with this pool's badge uncommented: the work comes here. Correct.
+#   * Routed, and no worker anywhere answers `convert` or runs un-badged: nothing claims
+#     the task. It stalls silently, and because `render:pdf` is advisory the document
+#     settles without its rendition and without a failure anybody can see.
+#   * Routed, but this pool left UN-badged: it does take the `convert` work, and with it
+#     every other pool's work too, including `embed` (see the image note below).
+#   * Not routed: any worker takes the work, and it succeeds only where JMFTS_CONVERT_URL
+#     is set. Elsewhere it fails PERMANENTLY with a message naming that setting.
+#
+# (Corrected 2026-10-17. This said a badged task is claimed by no un-badged worker. That
+# is not what `claim_next` does: an un-badged worker claims everything.)
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -118,8 +129,8 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             # Uncomment together with JMFTS_TASK_BADGES in 10-config.yaml. Both or neither:
-            # a badged worker with an unrouted queue idles, and a routed queue with no badged
-            # worker stalls.
+            # a badged worker with an unrouted queue idles, and with a routed queue an
+            # un-badged pod here claims EVERY pool's work, not just `convert` (header above).
             # - name: JMFTS_WORKER_BADGE
             #   value: "convert"
             - name: JMFTS_CONVERT_URL
