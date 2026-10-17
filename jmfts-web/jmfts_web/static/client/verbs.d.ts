@@ -254,7 +254,7 @@ export interface AutoSearchRequest {
    */
   usetype?: string | Array<string> | null;
   /**
-   * Exclude documents with these usetypes. When omitted, the server default applies (entity, summary). Pass [] to disable all exclusion.
+   * Exclude documents with these usetypes. When omitted, the server default applies (JMFTS_SEARCH_EXCLUDE_USETYPES; entity, entities, summary, derived out of the box). Pass [] to disable all exclusion.
    */
   exclude_types?: Array<string> | null;
   parent_id?: number | null;
@@ -1129,7 +1129,7 @@ export interface HybridSearchRequest {
    */
   usetype?: string | Array<string> | null;
   /**
-   * Exclude documents with these usetypes. When omitted, the server default applies (entity, summary). Pass [] to disable all exclusion.
+   * Exclude documents with these usetypes. When omitted, the server default applies (JMFTS_SEARCH_EXCLUDE_USETYPES; entity, entities, summary, derived out of the box). Pass [] to disable all exclusion.
    */
   exclude_types?: Array<string> | null;
   parent_id?: number | null;
@@ -1238,11 +1238,11 @@ export interface IngestFrontierResponse {
  */
 export interface IngestRequest {
   /**
-   * Raw text content to ingest
+   * What to ingest: the text itself for conversation, markdown, raw and transcript; a locator (URL, arXiv id, PDF path) for wiki:url, wiki:arxiv and wiki:pdf
    */
   content: string;
   /**
-   * Pipeline name: conversation, markdown, raw, transcript
+   * Ingest entry point, which selects option defaults rather than stages: conversation, markdown, raw, transcript, wiki:url, wiki:arxiv, wiki:pdf. GET /ingest/pipelines lists them with their resolved options
    */
   usetype: string;
   /**
@@ -2099,7 +2099,7 @@ export interface SearchRequest {
    */
   usetype?: string | Array<string> | null;
   /**
-   * Exclude documents with these usetypes. When omitted, the server default applies (entity, summary). Pass [] to disable all exclusion.
+   * Exclude documents with these usetypes. When omitted, the server default applies (JMFTS_SEARCH_EXCLUDE_USETYPES; entity, entities, summary, derived out of the box). Pass [] to disable all exclusion.
    */
   exclude_types?: Array<string> | null;
   parent_id?: number | null;

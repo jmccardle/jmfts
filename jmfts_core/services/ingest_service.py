@@ -415,9 +415,11 @@ class IngestService:
         is a 400 rather than a node that quietly ignores them — see
         :meth:`_place_existing_file` again, and spec 6.1.
 
-        This is the FIRST asynchronous pipeline in JMFTS. ``POST /ingest`` and every
-        registered text pipeline keep their synchronous behaviour unchanged: they run to
-        completion inside the request and return a finished tree.
+        This was the FIRST asynchronous pipeline in JMFTS, and it is now the only one.
+        ``POST /ingest`` once ran its text pipelines synchronously beside it; since the
+        synchronous ``execute_pipeline`` was deleted, ``POST /ingest`` stores its content
+        through :meth:`store_text_as_file` — the node this method would make — and drains
+        the queue inside the request (:meth:`_ingest_through_the_queue`). Noted 2026-10-17.
 
         ``options`` are this request's overrides — ``{"structure": {"max_words": 60}}`` —
         over the task defaults and any profile ``jmfts_core.ingest_options`` registers for

@@ -330,7 +330,7 @@ class HybridSearchRequest(BaseModel):
     usetype: Optional[UsetypeFilter] = Field(default=None, description=USETYPE_FIELD_DESCRIPTION)
     exclude_types: Optional[list[str]] = Field(
         default=None,
-        description="Exclude documents with these usetypes. When omitted, the server default applies (entity, summary). Pass [] to disable all exclusion.",
+        description="Exclude documents with these usetypes. When omitted, the server default applies (JMFTS_SEARCH_EXCLUDE_USETYPES; entity, entities, summary, derived out of the box). Pass [] to disable all exclusion.",
     )
     parent_id: Optional[int] = None
     index_name: str = "default"
@@ -486,7 +486,7 @@ class SearchRequest(BaseModel):
     usetype: Optional[UsetypeFilter] = Field(default=None, description=USETYPE_FIELD_DESCRIPTION)
     exclude_types: Optional[list[str]] = Field(
         default=None,
-        description="Exclude documents with these usetypes. When omitted, the server default applies (entity, summary). Pass [] to disable all exclusion.",
+        description="Exclude documents with these usetypes. When omitted, the server default applies (JMFTS_SEARCH_EXCLUDE_USETYPES; entity, entities, summary, derived out of the box). Pass [] to disable all exclusion.",
     )
     parent_id: Optional[int] = None
     threshold: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -513,7 +513,7 @@ class AutoSearchRequest(BaseModel):
     usetype: Optional[UsetypeFilter] = Field(default=None, description=USETYPE_FIELD_DESCRIPTION)
     exclude_types: Optional[list[str]] = Field(
         default=None,
-        description="Exclude documents with these usetypes. When omitted, the server default applies (entity, summary). Pass [] to disable all exclusion.",
+        description="Exclude documents with these usetypes. When omitted, the server default applies (JMFTS_SEARCH_EXCLUDE_USETYPES; entity, entities, summary, derived out of the box). Pass [] to disable all exclusion.",
     )
     parent_id: Optional[int] = None
 
