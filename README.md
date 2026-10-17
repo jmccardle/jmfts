@@ -11,14 +11,19 @@ triples with supersession instead of deletion. Five retrieval methods sit on
 top: `vector`, `bm25`, `fulltext`, `maxsim`, and `hybrid` (a weighted/RRF
 combination), plus an `auto` router. Ingestion has seven entry points — the
 `usetype` a request names: `markdown`, `conversation`, `raw`, `transcript`,
-`wiki:url`, `wiki:arxiv`, `wiki:pdf` — and is idempotent on
-`(content_hash, parent_id)`. An entry point selects defaults, not a sequence of
-stages: which tasks run is decided from what probing the bytes measured.
+`wiki:url`, `wiki:arxiv`, `wiki:pdf`. Sending bytes that are already stored, and
+that you can read, stores nothing: you get the existing node back, attached to the
+`parent_id` you named by a `contains` link rather than copied. The same bytes with
+different ingest options are a 400, not a silent hit. An entry point selects
+defaults, not a sequence of stages: which tasks run is decided from what probing
+the bytes measured.
 
 Uploaded files are identified by their bytes, not their extension, and each
 format is read into markdown before anything indexes it. Today that is `.pdf`,
 plain text and markdown, HTML, and — with the `office` extra — `.docx` and
-`.pptx`. An `.xlsx` is identified and described but not yet read. What a given
+`.pptx`. An `.xlsx` (also `office`, through `openpyxl`) is the exception: it is
+read into a table node per sheet and a record node per row, each anchored to its
+cells, and is not turned into markdown. What a given
 file would do is a question you can ask before uploading it: `POST /ingest/explain`
 returns the plan, task by task, with the reason for every row that will not run.
 
@@ -61,12 +66,24 @@ does not install or manage it.
 ```bash
 pip install jmfts                # base: no torch, cannot embed by itself
 pip install 'jmfts[embed]'       # + the model stack, for a single appliance
+pip install 'jmfts[office]'      # + .docx/.pptx/.xlsx readers (python-docx, python-pptx, openpyxl)
 pip install 'jmfts[rdf]'         # + Turtle in and out, and SHACL shapes
+pip install 'jmfts[sketch]'      # + MinHash per column (datasketch), for propose:links
+pip install 'jmfts[convert]'     # + the unoserver CLIENT; LibreOffice itself is a worker image
+pip install 'jmfts[web]'         # + the browser console, served at /app
 jmfts-init-db                    # create the database and load the schema
 jmfts-server                     # serve on 0.0.0.0:8100
 jmfts-server --port 9000         # ...or override one setting for this run
 jmfts-server --help              # what the JMFTS_* defaults currently resolve to
+jmfts-worker                     # drain the ingest queue in its own process
+jmfts-batch-worker --help        # summarize:llm through a provider's batch API
 ```
+
+With `[web]` installed, `http://localhost:8100/app/` is a console over the same REST API any
+client calls: search, upload and watch an ingest, read a document with its source anchors
+boxed on the page, browse the tree, edit search presets, read what the appliance can do, and
+a log of every call the page made. It has no Python dependencies and computes nothing the
+call log does not show; `jmfts-web/README.md` says how that is held.
 
 ### Upgrading a database that already holds data
 
@@ -105,14 +122,16 @@ From a checkout, for development:
 
 ```bash
 pip install -e ./jmfts-client    # the client distribution; jmfts depends on it
+pip install -e ./jmfts-web       # the console distribution, for /app; [dev] does not imply it
 pip install -e ".[dev]"          # editable, with pytest/black/ruff; implies [embed],
                                  # [office], [rdf] and [sketch] — the suite exercises all four
 uvicorn jmfts_core.rest.main:app --host 0.0.0.0 --port 8100 --reload
 ```
 
-This tree builds two distributions, and the first line is not optional. `jmfts` declares
-`jmfts-client==0.6.2` with `==`, so the second line alone resolves that exact version
-from PyPI and shadows the checkout you meant to work in.
+This tree builds three distributions, and the first line is not optional. `jmfts` declares
+`jmfts-client==0.6.2` with `==`, so the third line alone resolves that exact version
+from PyPI and shadows the checkout you meant to work in. The second line is optional for
+the same reason in reverse: without it there is no `/app`, and nothing else is missing.
 
 ### Reading and driving the API
 
@@ -231,6 +250,7 @@ jmfts_core/        the library: services, repositories, ORM models, office reade
 jmfts_core/rest/   FastAPI surface — routers generated from the @expose registry
 jmfts_core/sql/    schema.sql and the incremental migrations, shipped in the package
 jmfts-client/      the second distribution: wire contracts + the generated HTTP client
+jmfts-web/         the third distribution: the browser console mounted at /app
 jmfts_batch/       batch summarization over an OpenAI- or Anthropic-style batch API
 scripts/           CLI clients over the REST API
 deploy/            Kubernetes manifests for a worker fleet, and KEDA scaling on queue depth
@@ -261,14 +281,16 @@ tests/             pytest suite against an ephemeral database, plus the fidelity
   concept overview.
 - **The batch worker**: `jmfts_batch/README.md` — consuming `summarize:llm`
   through an external batch API.
+- **The browser console**: `jmfts-web/README.md` — install `[web]` and open `/app/`;
+  why it is a separate distribution, and the one generated client it talks through.
 - **Calling JMFTS from Python**: `jmfts-client/README.md` — the second
   distribution, and what a generated verb is generated from.
 
 ## A note on documentation
 
 **Ten of the documents this code was written against are now in this
-repository, under docs/ — including the ingest specification that 184 source
-comments cite by section number.** Nine landed on 2026-09-15, each after the
+repository, under docs/ — including the ingest specification that nearly two
+hundred source comments cite by section number.** Nine landed on 2026-09-15, each after the
 review pass described below. The tenth, `docs/MEASURE_MAXSIM_MARGIN.md`, was
 committed the same day as a new measurement record, outside that pass, and has
 been public since; its review note is dated 2026-10-12. What is here:
@@ -314,7 +336,8 @@ already summarises.
 do so.** It is here, at the top level: what is open, what is deferred and what
 gates each, and the Experiment Log — including the negative results, which are
 the reason several things are *not* in the tree. `docs/SPRINT_0_6_0.md` is the
-current sprint plan and is here for the same reason.
+plan 0.6.0 shipped against and is here for the same reason; 0.7.0's plan is its milestone
+on the issue tracker, not a document.
 
 Held-back names are deliberately not written as links. There is nothing in this
 tree for them to point at, and marking them up as paths would promise
