@@ -18,15 +18,24 @@ task, and as a place to file conclusions worth keeping.
 - **Temporal triples** — subject-predicate-object claims with optional
   `valid_from` / `valid_until` and a `fact_type` (atemporal | static |
   dynamic). Supersession invalidates older claims rather than deleting.
-- **Five retrieval methods** — `auto` (router picks), `vector`, `bm25`,
-  `fulltext`, `maxsim` (late interaction), `hybrid` (RRF combination).
-- **Pipelines** for ingestion: `markdown`, `conversation`, `raw`,
-  `transcript`, `wiki:url`, `wiki:arxiv`, `wiki:pdf`. All idempotent on
-  `(content_hash, parent_id)`.
+- **Five retrieval methods plus `auto`** — `vector`, `bm25`, `fulltext`,
+  `maxsim` (late interaction), `hybrid` (RRF combination); `auto` routes to
+  one of them and says why.
+- **Seven ingest usetypes** for `POST /ingest`: `markdown`, `conversation`,
+  `raw`, `transcript`, `wiki:url`, `wiki:arxiv`, `wiki:pdf`, plus file upload
+  (`POST /ingest/file`). Every one stores the content, queues its tasks and
+  drains them. Dedup is by sha256 across every file node the caller can read,
+  not per parent: the same bytes under a new parent are linked there rather
+  than copied, and the same bytes with different options are a 400. URL,
+  arXiv and path sources dedup on the locator instead. See **jmfts-ingest**.
 
 ## Connection
 
 - `JMFTS_API_BASE_URL` — which instance (default `http://localhost:8100`).
+- `JMFTS_API_TOKEN` — the API token, sent as `Authorization: Bearer <token>`.
+  Required: every route except `/health` and the API docs answers 401 without
+  it. A server whose own `JMFTS_API_TOKEN` is blank prints a fresh token at
+  every startup, so a token that worked yesterday may not work today.
 - Scripts live under `$JMFTS_HOME/scripts/` (default
   `~/Development/jmfts/scripts/`); invoke with `python -m scripts.<name>`
   from that directory.
@@ -62,13 +71,16 @@ something, then ingest a derived analysis).
 
 ## Architectural reference
 
-`docs/AGENTIC_KNOWLEDGEBASE.md` is the design document (status: shipped).
-Read it when the user asks why JMFTS is shaped a particular way, or when
-deciding whether new functionality belongs server-side or client-side.
+`docs/AGENTIC_KNOWLEDGEBASE.md` is the design document behind this skill
+set, and it is **held back**: it is not in the public repository (see the
+README's "A note on documentation"), so do not go looking for it. For why
+JMFTS is shaped the way it is, read `docs/INGEST_SPEC.md` and
+`docs/SPRINT_JOBS.md` for ingest, and `docs/reference/` for what the
+appliance accepts, indexes and retrieves.
 
 ## Operating principles
 
-1. **Search before ingesting.** Idempotency catches exact dupes, but
+1. **Search before ingesting.** Deduplication catches exact dupes, but
    semantically-similar duplicates won't be caught — check first.
 2. **Specific over abstract.** Link to the most specific document that
    makes sense; tree paths handle the path-to-root.

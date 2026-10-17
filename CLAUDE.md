@@ -17,6 +17,7 @@ JMFTS (John McCardle's Fusion Tree Search) is a research-focused retrieval appli
 # the tree you are working in. (0.2.0 is on PyPI; earlier wording here said the name was
 # not published, which stopped being true when step 5 of docs/RELEASING.md first ran.)
 pip install -e ./jmfts-client
+pip install -e ./jmfts-web  # only for /app; nothing else needs it and [dev] does not imply it
 
 pip install -e .            # base: 586 MB, tokenizer only, cannot embed by itself
 pip install -e ".[embed]"   # + torch and sentence-transformers (5.2 GB total)
@@ -24,13 +25,19 @@ pip install -e ".[office]"  # + python-docx/python-pptx/openpyxl (44 MB, pulls l
 pip install -e ".[rdf]"     # + rdflib/pyshacl; Turtle in, Turtle out, SHACL shapes
 pip install -e ".[sketch]"  # + datasketch; MinHash per column, for propose:links
 pip install -e ".[convert]" # + the unoserver CLIENT only; the LibreOffice tier is an image
+pip install -e ".[web]"     # + jmfts-web, the console at /app (install ./jmfts-web first)
 pip install -e ".[dev]"     # + pytest/black/ruff; implies [embed] [office] [rdf] [sketch]
 
 # Database setup
 jmfts-init-db
+jmfts-init-db --pending     # shipped migrations THIS database has not applied (exit 1 if any)
 
 # Run API server
 uvicorn jmfts_core.rest.main:app --host 0.0.0.0 --port 8100 --reload
+jmfts-server                # the same app, installed entry point; --help shows resolved settings
+
+# Batch summarization through a provider's batch API (jmfts_batch/README.md)
+jmfts-batch-worker --help
 
 # Interactive API docs, generated from the live route table — Swagger UI at /docs, ReDoc at
 # /redoc, the document at /openapi.json. All three answer without a token; Authorize with
@@ -73,11 +80,11 @@ pytest path/to/test_file.py::test_fn  # single test
 # empty venv and checks there.
 ./scripts/check_base_install.sh
 
-# Formatting & linting. THESE THREE PATHS, not `.` — see "The gate" below.
-black --line-length 100 jmfts_core jmfts-client tests
-ruff check jmfts_core jmfts-client tests
+# Formatting & linting. THESE FIVE PATHS, not `.` — see "The gate" below.
+black --line-length 100 jmfts_core jmfts_batch jmfts-client jmfts-web tests
+ruff check jmfts_core jmfts_batch jmfts-client jmfts-web tests
 
-# Benchmarks (internal; not in the public tree)
+# Benchmarks (in scripts/, outside the gate; they need datasets/, which is local)
 python -m scripts.benchmark_multihop --quick
 python -m scripts.benchmark_multihop
 python -m scripts.benchmark_centroid_recall
@@ -85,9 +92,12 @@ python -m scripts.benchmark_centroid_recall
 
 ### The gate
 
-`black` and `ruff` run over `jmfts_core jmfts-client tests` — everything that goes into a
-wheel, plus the suite that proves it. `.githooks/pre-commit` and
-`.github/workflows/ci.yml` run the same three paths, so the three cannot disagree.
+`black` and `ruff` run over `jmfts_core jmfts_batch jmfts-client jmfts-web tests` —
+everything that goes into one of the three wheels, plus the suite that proves it.
+`.githooks/pre-commit` and `.github/workflows/ci.yml` run the same five paths, so the
+three cannot disagree. (Until 2026-10-17 it was three paths, and "everything in a wheel"
+was false: `jmfts_batch` ships in the `jmfts` wheel and `jmfts-web` is a wheel. Both joined
+already clean.)
 `scripts/` is outside the gate on purpose — it is tooling and one-off research, not a
 wheel — and `ruff check .` reports findings there; that is expected.
 
@@ -97,7 +107,8 @@ Activate the hook once per clone:
 git config core.hooksPath .githooks
 ```
 
-`docs/RELEASING.md` is the full runbook for cutting a release.
+`docs/RELEASING.md` is the full runbook for cutting a release. It is held back — not in
+this tree — and has not had a review pass.
 
 ### Auditing for dead code
 
@@ -168,19 +179,27 @@ Services                     → jmfts_core/services/ (document, search, ingest,
 Repository Layer             → jmfts_core/repositories/ (search.py, document.py, task_queue.py)
 Domain logic                 → jmfts_core/embedding.py, token_selection.py, chunking.py
 Office readers               → jmfts_core/office/ — the only door to the `office` extra
-ORM Models                   → jmfts_core/models/ (document.py, token_embedding.py, search_index.py)
+ORM Models                   → jmfts_core/models/ (document, document_blob, document_evidence,
+                               document_rendition, token_embedding, search_index,
+                               search_context, task_queue, triple, ontology, principal,
+                               derived_root, entity_root, usetype_presentation)
 Infrastructure               → jmfts_core/config.py, jmfts_core/database.py, unit_of_work.py
 Database                     → PostgreSQL + pgvector (HNSW indexes), jmfts_core/sql/
+Batch summarization          → jmfts_batch/ — `jmfts-batch-worker`, ships in the jmfts wheel
+Browser console              → jmfts-web/jmfts_web/static/ — a THIRD distribution, mounted at
+                               /app when installed; no Python dependencies
 ```
 
-### Two distributions
+### Three distributions
 
-This tree builds two wheels, and `jmfts` depends on `jmfts-client`:
+This tree builds three wheels. `jmfts` depends on `jmfts-client`, and `jmfts[web]` on
+`jmfts-web`. (This heading said "two" until 2026-10-17, a release after `jmfts-web` joined.)
 
 | distribution | holds | dependencies |
 |---|---|---|
 | `jmfts` | the appliance | the full stack |
 | `jmfts-client` | `jmfts_client/contracts/` + a generated `RemoteJmftsClient` | httpx, pydantic |
+| `jmfts-web` | the browser console's static files, served at `/app` | none |
 
 The direction is server → client and it is deliberate. The contracts are the SINGLE
 definition of every request and response shape, and both `LocalJmftsClient` (in-process)
@@ -225,8 +244,8 @@ by hand before it can be published.
 **`jmfts-web/jmfts_web/static/client/` is generated too, and it is the THIRD generated
 artefact with the same seal.** Four files — the operation table, the verb class and their two
 `.d.ts` declarations — rendered from `/openapi.json` rather than from the route table, because
-the document carries the corrected `security` block and all 115 mounted operations, seven of
-which are hand-written routes with no `ExposeSpec` and therefore no `_verbs.py` method.
+the document carries the corrected `security` block and all mounted operations (121, read
+2026-10-17; 115 when this was written), seven of which are hand-written routes with no `ExposeSpec` and therefore no `_verbs.py` method.
 
 ```bash
 python -m scripts.generate_ts_client           # rewrite the bundle's client
@@ -280,7 +299,7 @@ a rung means registering a handler.
 
 `docs/INGEST_SPEC.md` is the normative specification for the pipeline and
 `docs/SPRINT_JOBS.md` for the declaration machinery; between them they are cited by around
-370 source comments (read 2026-10-12), by part and section, and **both are in this repository** — so a
+390 source comments (391 read 2026-10-17; around 370 on 2026-10-12), by part and section, and **both are in this repository** — so a
 citation to 5.3 or to Phase 3 resolves. Read each one's dated review note first: they are the
 working record, and what has moved under them is marked in place rather than edited out.
 
@@ -331,8 +350,8 @@ All settings use `JMFTS_` prefix. See `.env.example` for the full list. Key grou
 
 ## Search Repository (jmfts_core/repositories/search.py)
 
-This is the most complex file (1958 lines, read 2026-09-10; it was ~1666 on 2026-09-06 and
-1906 before this session's merges — it grows every sprint and the number is a reading, not
+This is the most complex file (2075 lines, read 2026-10-17; 1958 on 2026-09-10, ~1666 on
+2026-09-06, 1906 before that session's merges — it grows every sprint and the number is a reading, not
 a budget). It implements:
 - **Vector search**: HNSW-indexed cosine similarity on document embeddings
 - **MaxSim**: Late interaction scoring — sum of per-query-token max similarities against document tokens
@@ -370,13 +389,14 @@ pytest tests/corpus -q             # no database, no optional dependency
 
 - MultiHop-RAG dataset, symlinked into `datasets/`. The symlink target is a local
   choice; `datasets/` is gitignored so every machine points it at its own copy.
-- Local test documents in `test_docs/` for development
+- ~~Local test documents in `test_docs/` for development~~ — no such directory exists in
+  this tree (checked 2026-10-17); a few scripts still name it. Use `tests/corpus/` fixtures.
 
 ## Documentation
 
 `docs/` is the working record, and **most of the load-bearing half of it is now published**.
 What this repository carries is `README.md`, `CLAUDE.md`, `CHANGELOG.md`, `ROADMAP.md`, the
-current sprint plan (`docs/SPRINT_0_6_0.md`), the generated `docs/reference/` pages, and —
+0.6.0 sprint plan (`docs/SPRINT_0_6_0.md`, shipped; 0.7.0 has a tracker milestone instead), the generated `docs/reference/` pages, and —
 since 2026-09-15, `SPRINT_0_6_0.md` Block E — the three specifications and the seven
 measurement records:
 
@@ -416,8 +436,8 @@ Around seven hundred source comments cite a `docs/` file by part and section. Co
 rather than trusting the number below, which is a reading and not a rule:
 
 ```bash
-git grep -hoE "(research/)?[A-Z][A-Z0-9_-]*\.md" -- \
-    jmfts_core jmfts-client jmfts_batch plugin scripts tests .github .githooks |
+git grep -hoE "(research/|archive/)?[A-Z][A-Z0-9_-]*\.md" -- \
+    jmfts_core jmfts-client jmfts_batch jmfts-web plugin scripts tests .github .githooks |
   sort | uniq -c | sort -rn
 ```
 
@@ -439,6 +459,18 @@ it — the bare `KNOWN-DEFECTS D1` form names an anchor, not a path, and was lef
 `research/INTERMEDIATE_FORMATS.md` have not had a review pass; `KNOWN-DEFECTS.md`,
 `ROADMAP_HISTORY.md` and `SPRINT_0_4_0_DRAFT.md` are the archive, which 4.5 holds with the
 three sprint plans — the split the README's note makes.
+
+**Read again 2026-10-17**, on `claude/awesome-planck-xkqumb`, with `jmfts-web` added to
+the command (it ships and its comments cite; until this reading the grep left it out) and
+`archive/` recognised as a prefix. Resolving: `INGEST_SPEC.md` 196, `SPRINT_JOBS.md` 195,
+`OFFICE_SPEC.md` 174, `SPRINT_0_6_0.md` 141, `STRESS_CORPUS.md` 39, `ANN_INDEX_HEALTH.md` 33,
+`ROADMAP.md` 18, `CORPUS.md` 13, `MEASURE_BM25_BOUNDARY.md` 9, `MEASURE_SHACL_SCOPE.md` 8,
+`MEASURE_TYPED_WALK.md` 6, `MEASURE_MAXSIM_MARGIN.md` 2. Held by 4.5: `SPRINT_0_5_0.md` 93,
+`SPRINT_0_3_0.md` 85, `SPRINT_0_4_0.md` 52 — 230. Held, not yet reviewed: `RELEASING.md` 12,
+`AGENTIC_KNOWLEDGEBASE.md` 4, `RERANKER_CRITIQUE.md` 1, `INTERMEDIATE_FORMATS.md` 2 (one
+with the `research/` prefix, one without). The archive: `KNOWN-DEFECTS.md` 7 (six with the
+`archive/` prefix), `archive/ROADMAP_HISTORY.md` 2, `archive/SPRINT_0_4_0_DRAFT.md` 1. The
+2026-10-12 reading above is kept as it was read.
 
 The command also reports
 `README.md`, `CLAUDE.md`, `CHANGELOG.md` and `INVENTORY-2026-04-05.md`; the first three
@@ -490,18 +522,19 @@ like one.
 | What the measurements behind a decision actually read | the four `docs/MEASURE_*`, `ANN_INDEX_HEALTH.md`, `STRESS_CORPUS.md`, `CORPUS.md` — **all published 2026-09-15** |
 | What is 0.4.0 | `docs/SPRINT_0_4_0.md` — **held, permanently** (4.5) |
 | What is 0.5.0 | `docs/SPRINT_0_5_0.md` — **held, permanently** (4.5) |
-| What was cut, and what verified a scope decision | `docs/ROADMAP_PLANS_AFTER_0_3_0.md` |
-| What is beyond 0.5.0 | the same file, tiers 3 through 6 |
-| What shipped | `CHANGELOG.md`, and `docs/archive/ROADMAP_HISTORY.md` behind it |
+| What was cut, and what verified a scope decision | `docs/ROADMAP_PLANS_AFTER_0_3_0.md` — **held back** |
+| What is beyond 0.5.0 | the same file, tiers 3 through 6 — **held back** |
+| What shipped | `CHANGELOG.md`, and `docs/archive/ROADMAP_HISTORY.md` behind it — the archive is **held** (4.5) |
+| What is 0.7.0 | the 0.7.0 milestone on the issue tracker; there is no sprint document |
 | What the appliance accepts, indexes and retrieves | `docs/reference/`, generated and published |
 
 **An open defect is a numbered step in the current sprint plan, and the entry condition
 is a failing test.** Not an argument that something could go wrong, and not a measurement
 of how often it does. There is no standing defect file: `docs/archive/KNOWN-DEFECTS.md`
-holds D1–D7, all resolved, and is history. `docs/SPRINT_0_6_0.md` Part 0 states the rule and
+(held, with the archive) holds D1–D7, all resolved, and is history. `docs/SPRINT_0_6_0.md` Part 0 states the rule and
 works three live cases through it, and it is published — so the rule is now readable from
 outside the project rather than only cited.
 
-`docs/archive/SPRINT_0_4_0_DRAFT.md` and `docs/archive/SPRINT_0_5_0_DRAFT.md` are
-2026-08-24 drafts of those release numbers that plan different sprints. Their step
+`docs/archive/SPRINT_0_4_0_DRAFT.md` and `docs/archive/SPRINT_0_5_0_DRAFT.md` (both held,
+with the archive) are 2026-08-24 drafts of those release numbers that plan different sprints. Their step
 numbers are not the shipped ones, and neither shipped plan uses them.

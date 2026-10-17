@@ -312,14 +312,51 @@ class TestTheDerivedNode:
         assert [link.link_metadata["position"] for link in links] == [0, 1, 2, 3]
         assert {link.derived_by for link in links} == {TASK_SUMMARIZE_TREE}
 
-    def test_the_vector_is_the_one_summarize_computed(self, db_session):
-        """Copied, not recomputed: it stands for exactly the text `summarize` embedded, so a
-        second forward pass would spend the model to arrive at the same numbers."""
+    def test_the_summary_node_carries_no_vector_and_its_source_keeps_one(self, db_session):
+        """ROADMAP gap 11. The vector this node used to carry was a bit-identical copy of its
+        source's, answered no query the source does not, and took a quarter of the HNSW
+        index on a real corpus. The source keeps the one `summarize` computed."""
         chapter = _chapter(db_session)
         _summarized(db_session, chapter)
+        computed = list(chapter.embed)
 
         summary = db_session.get(Document, _run(db_session, chapter).detail["derived_node_id"])
-        assert list(summary.embed) == list(chapter.embed)
+        assert summary.embed is None
+        assert list(db_session.get(Document, chapter.id).embed) == computed
+
+    def test_a_rerun_clears_a_vector_an_earlier_release_copied(self, db_session):
+        """A node written before 0.7.0 holds the copy; re-summarising its source removes it,
+        so the next re-derivation converges with what migration 025 does in bulk."""
+        chapter = _chapter(db_session)
+        _summarized(db_session, chapter)
+        summary_id = _run(db_session, chapter).detail["derived_node_id"]
+        db_session.get(Document, summary_id).embed = list(chapter.embed)
+        db_session.flush()
+
+        assert _run(db_session, chapter).detail["derived_node_id"] == summary_id
+        assert db_session.get(Document, summary_id).embed is None
+
+    def test_deleting_a_source_deletes_its_summary_node(self, db_session):
+        """ROADMAP gap 11's second finding. The summary node lives under the derived root,
+        so the `parent_id` cascade never reached it: the source went, its `summarizes` edges
+        went, and the node stayed, titled after a deleted document. Deleting an ANCESTOR of
+        the source removes it too, and a summary of an unrelated node is left alone."""
+        repo = DocumentRepository(db_session)
+        book = repo.create(title="book", content=None, auto_embed=False)
+        chapter = _chapter(db_session, parent_id=book.id)
+        other = _chapter(db_session)
+        _summarized(db_session, chapter)
+        _summarized(db_session, other)
+        mine = _run(db_session, chapter).detail["derived_node_id"]
+        kept = _run(db_session, other).detail["derived_node_id"]
+
+        assert repo.delete(book.id)
+        db_session.flush()
+
+        assert db_session.get(Document, mine) is None
+        assert _links(db_session, mine) == []
+        assert db_session.get(Document, kept) is not None
+        assert _derived_node(db_session, other.id).id == kept
 
     def test_a_concatenated_summary_gives_the_node_no_content(self, db_session):
         """The module's "nothing here writes content" rule, one node over. A concatenation
@@ -692,7 +729,7 @@ class TestTheQueueBuildsIt:
         assert by_source, "the queue produced no derived summary node"
         for source_id, summary in by_source.items():
             assert summary.usetype == USETYPE_SUMMARY
-            assert summary.embed is not None
+            assert summary.embed is None
             assert [link.target_id for link in _links(db_session, summary.id)] == child_ids(
                 db_session, source_id
             )

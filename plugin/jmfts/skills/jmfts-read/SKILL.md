@@ -10,6 +10,9 @@ me everything I'd need to understand this page."
 
 ## Quick reference
 
+The scripts read `JMFTS_API_TOKEN` and send it as a bearer token; the `curl`
+lines pass it explicitly. Without it the server answers 401.
+
 ```bash
 # Pretty-print to terminal (markdown, breadcrumbs, footnotes, child stubs)
 python -m scripts.wiki_view_terminal 1234
@@ -18,13 +21,13 @@ python -m scripts.wiki_view_terminal 1234
 python -m scripts.wiki_render_html 1234 > /tmp/page.html
 
 # Just the breadcrumb chain
-curl "$JMFTS_API_BASE_URL/view/breadcrumbs/1234" | jq
+curl -s -H "Authorization: Bearer $JMFTS_API_TOKEN" "$JMFTS_API_BASE_URL/view/breadcrumbs/1234" | jq
 
 # Who cites / triples-into this document
-curl "$JMFTS_API_BASE_URL/view/back-references/1234?limit=20" | jq
+curl -s -H "Authorization: Bearer $JMFTS_API_TOKEN" "$JMFTS_API_BASE_URL/view/back-references/1234?limit=20" | jq
 
 # Lazy-load more children
-curl "$JMFTS_API_BASE_URL/view/1234/expand-children?offset=20&limit=20" | jq
+curl -s -H "Authorization: Bearer $JMFTS_API_TOKEN" "$JMFTS_API_BASE_URL/view/1234/expand-children?offset=20&limit=20" | jq
 ```
 
 ## What `/view/{id}` returns

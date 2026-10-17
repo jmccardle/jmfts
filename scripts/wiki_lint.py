@@ -3,14 +3,18 @@
 Three output modes:
 - ``--pretty`` (default for terminal): grouped, color-coded summary.
 - bare: raw JSON to stdout.
-- ``--format markdown``: produces a wiki:analysis-shaped markdown report.
-  With ``--ingest-as wiki:analysis --parent-id <id>`` it ingests the report
-  back into the wiki it just audited (closing the loop).
+- ``--format markdown``: produces a markdown report.
+  With ``--ingest-as markdown --parent-id <id>`` it ingests the report
+  back into the wiki it just audited (closing the loop), with fact extraction
+  off -- a lint report's claims are about the corpus, not facts in it.
+
+``--ingest-as`` takes a ``POST /ingest`` usetype (``GET /ingest/pipelines``). Examples
+before 2026-10-17 used ``wiki:analysis``, which was never one and is a 400.
 
 Examples:
     python -m scripts.wiki_lint --pretty
     python -m scripts.wiki_lint --format markdown > /tmp/lint.md
-    python -m scripts.wiki_lint --format markdown --ingest-as wiki:analysis --parent-id 0
+    python -m scripts.wiki_lint --format markdown --ingest-as markdown --parent-id 0
 """
 
 from __future__ import annotations
@@ -29,7 +33,6 @@ from scripts._jmfts_client import (
     die,
     emit_json,
 )
-
 
 _SEVERITY_ORDER = ["error", "warning", "info"]
 
@@ -59,14 +62,10 @@ def _to_markdown(report: dict, base_url: str) -> str:
         lines.append(f"## {category.title()} ({len(items)})")
         lines.append("")
         for f in items[:50]:
-            doc_links = ", ".join(
-                f"[#{d}]({base_url}/view/{d})" for d in f.get("document_ids", [])
-            )
+            doc_links = ", ".join(f"[#{d}]({base_url}/view/{d})" for d in f.get("document_ids", []))
             triple_ids = f.get("triple_ids") or []
             triple_str = (
-                f" — triples: {', '.join(str(t) for t in triple_ids)}"
-                if triple_ids
-                else ""
+                f" — triples: {', '.join(str(t) for t in triple_ids)}" if triple_ids else ""
             )
             lines.append(f"- **{f['severity']}** — {f['message']}")
             if doc_links:
@@ -119,7 +118,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--ingest-as",
         default=None,
-        help="With --format markdown: ingest the report back as a wiki document.",
+        help=(
+            "With --format markdown: ingest the report back through POST /ingest under "
+            "this usetype (normally `markdown`)."
+        ),
     )
     add_base_url_arg(parser)
     add_pretty_arg(parser)
@@ -151,16 +153,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         if args.format == "markdown":
             md = _to_markdown(report, base_url=client.base_url)
             if args.ingest_as:
-                ingest_resp = client.ingest(
-                    content=md,
-                    usetype=args.ingest_as,
-                    title=f"Wiki Lint Report {datetime.now(timezone.utc).date().isoformat()}",
-                    parent_id=args.parent_id,
-                    pipeline_config={
-                        "summarize": {"enabled": False},
-                        "extract_facts": {"enabled": False},
-                    },
-                )
+                try:
+                    ingest_resp = client.ingest(
+                        content=md,
+                        usetype=args.ingest_as,
+                        title=f"Wiki Lint Report {datetime.now(timezone.utc).date().isoformat()}",
+                        parent_id=args.parent_id,
+                        options={"facts": {"enabled": False}},
+                    )
+                except httpx.HTTPStatusError as e:
+                    die(f"{e.response.status_code} {e.response.text[:300]}")
+                except httpx.HTTPError as e:
+                    die(f"transport error: {e}")
                 if args.pretty:
                     print(
                         f"ingested as #{ingest_resp.get('source_document_id')} "

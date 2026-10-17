@@ -580,6 +580,35 @@ class TestClassifyException:
         )
         assert classify_exception(bad_model) is ErrorType.PERMANENT
 
+    @pytest.mark.parametrize(
+        "status,expected",
+        [
+            (400, ErrorType.PERMANENT),
+            (404, ErrorType.PERMANENT),
+            (408, ErrorType.TIMEOUT),
+            (429, ErrorType.RETRYABLE),
+            (500, ErrorType.RETRYABLE),
+            (503, ErrorType.RETRYABLE),
+        ],
+    )
+    def test_an_llm_status_is_read_like_an_http_status(self, status, expected):
+        """Forgejo #8. τ hands JMFTS an LLM endpoint's answer as ``LlmCallError`` rather
+        than an httpx error, and before this arm every status took the RETRYABLE default —
+        so a context-length 400 burned the whole retry budget before failing the node. The
+        table is the httpx one: what the endpoint said decides, not what carried it."""
+        from jmfts_core.llm_client import LlmCallError
+
+        exc = LlmCallError(f"HTTP {status} from model 'm' at 'http://x/v1': no", status=status)
+        assert classify_exception(exc) is expected
+
+    def test_an_llm_call_nothing_answered_keeps_the_retryable_default(self):
+        """``status=None`` is a refused connection, a timeout or an unreadable response —
+        facts about the moment, not the request. It was RETRYABLE before #8 and stays so;
+        τ 0.12 gives a timeout no status, so it cannot be told apart and read TIMEOUT."""
+        from jmfts_core.llm_client import LlmCallError
+
+        assert classify_exception(LlmCallError("LLM down", status=None)) is ErrorType.RETRYABLE
+
     def test_sqlalchemy_operational_errors_are_retryable(self):
         exc = sqlalchemy.exc.OperationalError("SELECT 1", {}, Exception("conn lost"))
         assert classify_exception(exc) is ErrorType.RETRYABLE

@@ -440,8 +440,42 @@ class DocumentRepository:
         from jmfts_core.repositories.rendition import RenditionRepository
 
         RenditionRepository(self.session).unlink_subtree(document_id)
+        self._delete_summary_nodes_of_subtree(document_id)
         self.session.delete(doc)
         return True
+
+    def _delete_summary_nodes_of_subtree(self, root_id: int) -> int:
+        """Delete the ``summarize:tree`` nodes standing for anything in this subtree.
+
+        ROADMAP gap 11's second finding. A summary node lives under a DERIVED root, not under
+        its source, so the ``parent_id`` cascade never reaches it: deleting a source took the
+        ``summarizes`` edges (they cascade) and left the node, still titled "Summary of
+        <the deleted title>". Measured 2026-10-16: 821 such nodes on a 59k-document corpus,
+        583 of them holding a vector that existed nowhere else — content retained after the
+        delete that was supposed to remove it. The node is found by the ``source_node_id``
+        it records, which is the one relation it has to its source.
+
+        No second access check. A derived root is keyed by the source's own effective access
+        (``derived_roots``), so whoever may delete the source may delete what was derived
+        from it, and the summary of a deleted document is not a thing anyone may keep.
+        """
+        # Imported here for the reason `RenditionRepository` is above: `ingest_tasks` and
+        # `rollup_tasks` both import this module.
+        from jmfts_core.ingest_tasks import TASK_SUMMARIZE_TREE
+        from jmfts_core.rollup_tasks import SOURCE_NODE_KEY
+
+        subtree = select(Document.id).where(
+            (Document.id == root_id) | Document.path.contains([root_id])  # type: ignore[arg-type]
+        )
+        result = self.session.execute(
+            delete(Document)
+            .where(Document.produced_by == TASK_SUMMARIZE_TREE)
+            # `as_integer()` renders `(structured_content->>'source_node_id')::int`, which
+            # is the expression migration 025's partial index is built on.
+            .where(Document.structured_content[SOURCE_NODE_KEY].as_integer().in_(subtree))
+            .execution_options(synchronize_session="fetch")
+        )
+        return result.rowcount or 0
 
     # =========================================================================
     # Ingest attempt log (INGEST_SPEC.md 3.4)

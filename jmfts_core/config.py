@@ -264,14 +264,13 @@ class Settings(BaseSettings):
     # "a search for a distinctive single value in a wide row" — and holds it open.
     bm25_exclude_usetypes: list[str] = ["entity", "entities", "summary", "derived", "cell"]
     #
-    # `summary` HERE IS LOAD-BEARING, not only tidy. Every `summarize:tree` node stores its own
-    # 768-dim vector, and every one is byte-identical to its source node's: 13,755 of 13,755
-    # pairs at cosine distance 0.000000, all 14,101 derived nodes with zero children
-    # (`docs/STRESS_CORPUS.md` 4.4b, read from a real corpus; `ROADMAP.md` gap 11). They are
-    # stored and HNSW-indexed, and this list is the only thing keeping them out of a result
-    # set. Remove `summary` and every answer comes back twice. The alternative -- a derived
-    # node carrying no embedding, reached through `source_node_id` -- is undecided; until it
-    # is built, treat this exclusion as REQUIRED, not a default to loosen.
+    # `summary` here is an ordinary default again, as of 0.7.0. Until then it was
+    # LOAD-BEARING: every `summarize:tree` node stored a byte-identical copy of its source
+    # node's vector (13,755 of 13,755 pairs, `docs/STRESS_CORPUS.md` 4.4b; 14,829 by
+    # 2026-10-16), and this list was the only thing keeping every answer from coming back
+    # twice. Those nodes now carry no vector (`ROADMAP.md` gap 11, migration 025), so what
+    # this entry still keeps out is a RAPTOR summary, whose own LLM text has its own vector
+    # and is a deliberate opt-in rather than a default result.
     search_exclude_usetypes: list[str] = ["entity", "entities", "summary", "derived"]
 
     # LLM endpoint (any OpenAI-compatible server: llama-server, vLLM, Ollama, ensonet, or

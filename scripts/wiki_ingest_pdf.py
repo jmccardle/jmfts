@@ -1,11 +1,12 @@
 """Ingest a local PDF file into JMFTS via the wiki:pdf pipeline.
 
-The path is resolved server-side, so the PDF must be visible to the JMFTS
-process (for local-only deployments this is fine; for separate machines,
-use wiki:url against a hosted copy or upload first via another path).
+The path is read by a ``fetch:path`` task, server-side, so the PDF must be visible to
+whichever JMFTS process runs that task (the API's in-process worker, or a ``jmfts-worker``).
+For local-only deployments this is fine. From another machine, upload the bytes instead
+with ``POST /ingest/file`` (multipart), which needs no shared filesystem.
 
 Examples:
-    python -m scripts.wiki_ingest_pdf ./test_docs/sample.pdf
+    python -m scripts.wiki_ingest_pdf ./paper.pdf --extract-facts
     python -m scripts.wiki_ingest_pdf /storage/papers/foo.pdf --parent-id 0 --pretty
 """
 
@@ -20,10 +21,12 @@ import httpx
 
 from scripts._jmfts_client import (
     add_base_url_arg,
+    add_ingest_option_args,
     add_pretty_arg,
     client_from_args,
     die,
     emit_json,
+    ingest_options_from_args,
 )
 
 
@@ -32,8 +35,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("pdf_path", help="Path to a PDF file (must be readable by the API server).")
     parser.add_argument("--parent-id", type=int, default=None, dest="parent_id")
     parser.add_argument("--title", default=None)
-    parser.add_argument("--summarize", action="store_true")
-    parser.add_argument("--extract-facts", action="store_true")
+    add_ingest_option_args(parser)
     add_base_url_arg(parser)
     add_pretty_arg(parser)
     args = parser.parse_args(argv)
@@ -44,10 +46,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not path.exists():
         die(f"PDF not found: {path}")
 
-    pipeline_config = {
-        "summarize": {"enabled": args.summarize},
-        "extract_facts": {"enabled": args.extract_facts},
-    }
+    options = ingest_options_from_args(args)
 
     with client_from_args(args) as client:
         try:
@@ -56,7 +55,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 usetype="wiki:pdf",
                 title=args.title,
                 parent_id=args.parent_id,
-                pipeline_config=pipeline_config,
+                options=options,
             )
         except httpx.HTTPStatusError as e:
             die(f"{e.response.status_code} {e.response.text[:300]}")

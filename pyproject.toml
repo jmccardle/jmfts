@@ -66,12 +66,24 @@ dependencies = [
     # together, and tests/test_packaging.py fails if they disagree.
     "jmfts-client==0.6.2",
     "fastapi>=0.135.0",
+    # NOT A TESTED-LINE FLOOR, the one exception to the rule at the head of this list: a
+    # SECURITY floor. fastapi 0.135 admits starlette 1.0.0, which carries five advisories
+    # fixed by 1.3.1 — among them GHSA-82w8-qh3p-5jfq (request.form() limits ignored for
+    # urlencoded bodies, a DoS, HIGH) and GHSA-86qp-5c8j-p5mr (Host header poisons
+    # request.url.path). Starlette is otherwise only transitive; it is named here so the
+    # floor is ours to hold. Audited 2026-10-16 against OSV; tested on 1.6 and 1.7.
+    "starlette>=1.3.1",
     # Required by the multipart upload route (POST /ingest/file). NOT optional and NOT
     # lazy: FastAPI checks for it while the ROUTE IS BUILT, i.e. at
     # `import jmfts_core.rest.main`, so
     # its absence is an import-time crash of the whole application, not a 500 on one
     # endpoint. It was previously present only as a transitive dependency of `mcp`.
-    "python-multipart>=0.0.9",
+    # The floor is a SECURITY floor, not the tested line: every version below 0.0.31
+    # carries at least one advisory, and POST /ingest/file is a multipart route anybody
+    # with a token can reach — GHSA-pp6c-gr5w-3c5g (unbounded part headers) and
+    # GHSA-5rvq-cxj2-64vf (quadratic querystring parse) are both HIGH, both a DoS. Audited
+    # 2026-10-16 against OSV; tested on 0.0.32.
+    "python-multipart>=0.0.31",
     "uvicorn[standard]>=0.27.0",
     # NO UPPER BOUND, and that is decided rather than forgotten. SQLAlchemy 2.1 changed
     # what a bare `postgresql://` means (psycopg 3, not psycopg2), and that broke a fresh
@@ -93,7 +105,12 @@ dependencies = [
     # `tokenizers` directly because every token count this system is calibrated against
     # was produced by `AutoTokenizer(...)["input_ids"]`, and a second loader would be free
     # to disagree with it about special tokens.
-    "transformers>=5.5",
+    #
+    # 5.10, not 5.5, as a SECURITY floor: 5.5 through 5.9 carry GHSA-x9r9-c232-4q39
+    # (custom generation code fetched before trust consent, fixed 5.8.1) and
+    # GHSA-xrqw-3rrv-vx5w (save_pretrained path traversal via chat template names, fixed
+    # 5.10.0), both HIGH. Audited 2026-10-16 against OSV; tested on 5.19.
+    "transformers>=5.10",
     "numpy>=2.4",
     # 0.27, not 0.26: `ffwf-tau-llm` declares `httpx>=0.27`, and a floor below what a
     # dependency requires is a number that can never be installed.

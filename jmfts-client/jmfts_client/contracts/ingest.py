@@ -15,8 +15,19 @@ from pydantic import BaseModel, Field
 class IngestRequest(BaseModel):
     """Request to ingest content through a named pipeline."""
 
-    content: str = Field(description="Raw text content to ingest")
-    usetype: str = Field(description="Pipeline name: conversation, markdown, raw, transcript")
+    content: str = Field(
+        description=(
+            "What to ingest: the text itself for conversation, markdown, raw and transcript; "
+            "a locator (URL, arXiv id, PDF path) for wiki:url, wiki:arxiv and wiki:pdf"
+        )
+    )
+    usetype: str = Field(
+        description=(
+            "Ingest entry point, which selects option defaults rather than stages: "
+            "conversation, markdown, raw, transcript, wiki:url, wiki:arxiv, wiki:pdf. "
+            "GET /ingest/pipelines lists them with their resolved options"
+        )
+    )
 
     # Metadata
     title: Optional[str] = Field(default=None, description="Title for the root document")

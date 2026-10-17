@@ -72,7 +72,7 @@ durable id, then nothing happens until the batch is finalized.
 ```bash
 # Submit and park. The model is NOT called.
 jmfts-batch-worker run --provider mock --badge llm \
-    --store /var/lib/jmfts/batches --llm-url http://llm-host:8080 --once
+    --store /var/lib/jmfts/batches --llm-url http://llm-host:8080/v1 --once
 
 # See what is parked.
 jmfts-batch-worker status
@@ -104,24 +104,47 @@ and this worker would gather `probe` and `extract:text` rows into an LLM batch a
 summarize them. Set the policy before running it:
 
 ```bash
-JMFTS_TASK_BADGES='{"structure:declared":"embed","structure:inferred":"embed","summarize":"embed","summarize:llm":"llm"}'
+JMFTS_TASK_BADGES='{"embed":"embed","summarize":"embed","summarize:llm":"llm"}'
 ```
+
+That is `EMBEDDING_AND_LLM_POLICY` in `jmfts_core/task_routing.py`, the same value
+`deploy/k8s/10-config.yaml` sets. *Corrected 2026-10-17: this example used to route
+`structure:declared` and `structure:inferred` to `embed` as well. The policy dropped
+them when `embed` became its own task type, because the rungs no longer run the model.*
 
 Tasks enqueued *before* the policy was turned on still carry a NULL badge and remain
 claimable by this worker. It checks `task_type` on every claim as a backstop and fails a
 wrong one as retryable, so another worker can take it.
 
-| Flag | Default | Notes |
-|---|---|---|
-| `--provider` | none | required; no provider is guessed |
-| `--badge` | none | repeatable; must include whatever routes `summarize:llm` |
-| `--gather-size` | 32 | see below |
-| `--poll-seconds` | 60 | |
-| `--stall-seconds` | 93600 (26h) | past both providers' expiry |
-| `--store` | `/var/lib/jmfts/batches` | mock only; `JMFTS_BATCH_STORE` |
+The subcommands are `run`, `status`, `stalled`, `finalize <batch_id>` and
+`cancel <batch_id>`. `--log-level` belongs to the program, not to a subcommand, so it
+goes BEFORE the subcommand: `jmfts-batch-worker --log-level DEBUG run ...`.
+
+| Flag | Subcommands | Default | Notes |
+|---|---|---|---|
+| `--log-level` | (all; before the subcommand) | `INFO` | does not read `JMFTS_LOG_LEVEL`, unlike `jmfts-worker` |
+| `--provider` | `run`, `cancel` | none | required; `mock`, `openai` or `anthropic`; no provider is guessed |
+| `--worker-id` | `run`, `cancel` | `$JMFTS_BATCH_WORKER_ID`, else `batch-{hostname}-{pid}` | written to `claimed_by`; the openai provider also writes it into batch metadata |
+| `--store` | `run`, `cancel`, `finalize` | `$JMFTS_BATCH_STORE`, else `/var/lib/jmfts/batches` | mock only |
+| `--llm-url` | `run`, `cancel` | `JMFTS_LLM_BASE_URL` | mock only; base URL with its version segment, e.g. `http://host:8080/v1` |
+| `--model` | `run` | `JMFTS_LLM_MODEL` | refused at startup if both are empty |
+| `--badge` | `run` | none | repeatable; must include whatever routes `summarize:llm` |
+| `--gather-size` | `run` | 32 | see below |
+| `--poll-seconds` | `run` | 60 | |
+| `--stall-seconds` | `run`, `stalled` | 93600 (26h) | past both providers' expiry |
+| `--once` | `run` | off | one pass, then exit |
+
+`stalled` exits 1 when it finds anything, so a cron job or a probe can act on it without
+parsing the output. `cancel` cancels a batch at its provider. It needs the same provider
+flags as `run`, because it talks to the provider.
 
 Keys come from `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`. The mock uses `JMFTS_LLM_BASE_URL`
 and `JMFTS_LLM_API_KEY`, sending an `Authorization` header only when a key is set.
+
+`JMFTS_BATCH_WORKER_ID` and `JMFTS_BATCH_STORE` are read from the environment directly by
+`jmfts_batch/cli.py`, not through `Settings`, so they are not in `.env.example`'s settings
+list. The worker id must be unique across the fleet; under Kubernetes the pod name, via
+the downward API, is the usual choice.
 
 Set `JMFTS_SUMMARIZATION_DISABLE_THINKING=true` when the local runner serves a reasoning
 model. Measured against llama-server with `Qwen3.8-27B-Q4_0` on 2026-08-20: without it the

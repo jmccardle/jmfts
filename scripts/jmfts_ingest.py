@@ -2,10 +2,17 @@
 
 Replaces the deprecated MCP ``jmfts_ingest`` tool. Two modes:
 
-1. Pipeline ingest (``--usetype markdown|conversation|raw|transcript``) — goes
-   through ``POST /ingest`` and runs parse/chunk/summarize/extract_facts.
-2. Raw document create (``--mode raw-doc``) — calls ``POST /documents`` directly,
+1. Pipeline ingest (``--usetype markdown|conversation|raw|transcript``) -- goes
+   through ``POST /ingest``: the content is stored as a file node, its tasks are queued
+   (probe, structure, embed, rollup/summarize, optionally facts) and drained inside the
+   request, and the finished tree is returned. Tune it with ``--options`` (ingest option
+   groups) and ``--extract-facts/--no-extract-facts``; ``POST /ingest/explain`` says what
+   a format would run under given options without ingesting anything.
+2. Raw document create (``--mode raw-doc``) -- calls ``POST /documents`` directly,
    no chunking or summarization.
+
+``--pipeline-config`` was removed on 2026-10-17. It sent the deleted synchronous
+pipeline's stage vocabulary, which the server refuses with a 400.
 
 Content source: ``--content-file PATH`` or stdin.
 
@@ -13,6 +20,8 @@ Examples:
     cat README.md | python -m scripts.jmfts_ingest --usetype markdown --title "README"
     python -m scripts.jmfts_ingest --content-file notes.md --usetype markdown --parent-id 0
     echo 'raw text' | python -m scripts.jmfts_ingest --mode raw-doc --usetype note
+    python -m scripts.jmfts_ingest --content-file f.md --usetype markdown \
+        --options '{"structure": {"max_words": 300}}' --no-extract-facts
 """
 
 from __future__ import annotations
@@ -27,10 +36,12 @@ import httpx
 
 from scripts._jmfts_client import (
     add_base_url_arg,
+    add_ingest_option_args,
     add_pretty_arg,
     client_from_args,
     die,
     emit_json,
+    ingest_options_from_args,
 )
 
 
@@ -72,14 +83,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--mode",
         choices=("pipeline", "raw-doc"),
         default="pipeline",
-        help="pipeline: POST /ingest with stages; raw-doc: POST /documents.",
+        help="pipeline: POST /ingest (queued, drained in-request); raw-doc: POST /documents.",
     )
     parser.add_argument(
         "--usetype",
         required=True,
         help=(
-            "Pipeline name (markdown|conversation|raw|transcript|wiki:url|...) "
-            "in pipeline mode, or document usetype label in raw-doc mode."
+            "Ingest usetype (markdown|conversation|raw|transcript; GET /ingest/pipelines "
+            "lists all seven) in pipeline mode, or document usetype label in raw-doc mode."
         ),
     )
     parser.add_argument("--content-file", default=None)
@@ -90,20 +101,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=None,
         help="JSON string to attach as structured_content metadata.",
     )
-    parser.add_argument(
-        "--pipeline-config",
-        default=None,
-        help="JSON string of stage overrides (pipeline mode only).",
-    )
     parser.add_argument("--llm-model", default=None)
     parser.add_argument(
         "--no-auto-embed",
         action="store_true",
         help="raw-doc mode only: skip embedding generation.",
     )
+    add_ingest_option_args(parser)
     add_base_url_arg(parser)
     add_pretty_arg(parser)
     args = parser.parse_args(argv)
+
+    options = ingest_options_from_args(args)
+    if args.mode == "raw-doc" and (options or args.llm_model):
+        # POST /documents runs no ingest tasks, so these would be accepted and do nothing.
+        die("--options, --extract-facts and --llm-model apply to pipeline mode only")
 
     content = _read_content(args)
 
@@ -114,13 +126,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         except json.JSONDecodeError as e:
             die(f"invalid --structured-content JSON: {e}")
 
-    pipeline_config = None
-    if args.pipeline_config:
-        try:
-            pipeline_config = json.loads(args.pipeline_config)
-        except json.JSONDecodeError as e:
-            die(f"invalid --pipeline-config JSON: {e}")
-
     with client_from_args(args) as client:
         try:
             if args.mode == "pipeline":
@@ -129,7 +134,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     usetype=args.usetype,
                     title=args.title,
                     parent_id=args.parent_id,
-                    pipeline_config=pipeline_config,
+                    options=options,
                     llm_model=args.llm_model,
                 )
             else:

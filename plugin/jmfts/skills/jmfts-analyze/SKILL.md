@@ -9,6 +9,9 @@ Three centrality primitives plus a bundled lint. All server-side
 (`/graph/*` endpoints) — these are heavy in data-shipping cost and would
 be too slow if implemented client-side.
 
+Every call sends the API token. The scripts read `JMFTS_API_TOKEN`; the
+`curl` lines below pass it as `Authorization: Bearer $JMFTS_API_TOKEN`.
+
 ## Centrality — three different questions
 
 | Question | Endpoint | Script |
@@ -25,16 +28,16 @@ under-weights summary roots. Use **subtree-authority** when looking for
 
 ```bash
 # Top hubs by pagerank
-curl "$JMFTS_API_BASE_URL/graph/centrality?metric=pagerank&top=10" | jq
+curl -s -H "Authorization: Bearer $JMFTS_API_TOKEN" "$JMFTS_API_BASE_URL/graph/centrality?metric=pagerank&top=10" | jq
 
 # Most important subtrees (rolls descendant centrality up the tree)
-curl "$JMFTS_API_BASE_URL/graph/subtree-authority?decay=0.7&top=10" | jq
+curl -s -H "Authorization: Bearer $JMFTS_API_TOKEN" "$JMFTS_API_BASE_URL/graph/subtree-authority?decay=0.7&top=10" | jq
 
 # Best reading paths from a root
-curl "$JMFTS_API_BASE_URL/graph/spines?root_id=1234&max_paths=3" | jq
+curl -s -H "Authorization: Bearer $JMFTS_API_TOKEN" "$JMFTS_API_BASE_URL/graph/spines?root_id=1234&max_paths=3" | jq
 
 # Communities (Leiden over the link graph)
-curl "$JMFTS_API_BASE_URL/graph/communities?scope=links&min_size=3" | jq
+curl -s -H "Authorization: Bearer $JMFTS_API_TOKEN" "$JMFTS_API_BASE_URL/graph/communities?scope=links&min_size=3" | jq
 ```
 
 ### Choosing a metric
@@ -59,8 +62,8 @@ python -m scripts.wiki_lint --pretty
 # Markdown report (publishable)
 python -m scripts.wiki_lint --format markdown > /tmp/lint.md
 
-# Re-ingest the report as a wiki:analysis page (closes the loop)
-python -m scripts.wiki_lint --format markdown --ingest-as wiki:analysis --parent-id 0
+# Re-ingest the report as a markdown page (closes the loop; facts off)
+python -m scripts.wiki_lint --format markdown --ingest-as markdown --parent-id 0
 ```
 
 `/graph/lint` runs four sub-audits in one transaction:
@@ -92,8 +95,8 @@ The targeted scripts are useful when:
 ## Corpus statistics
 
 ```bash
-curl "$JMFTS_API_BASE_URL/graph/stats" | jq
-curl "$JMFTS_API_BASE_URL/graph/diff?since=2026-04-01" | jq
+curl -s -H "Authorization: Bearer $JMFTS_API_TOKEN" "$JMFTS_API_BASE_URL/graph/stats" | jq
+curl -s -H "Authorization: Bearer $JMFTS_API_TOKEN" "$JMFTS_API_BASE_URL/graph/diff?since=2026-04-01" | jq
 ```
 
 `/graph/stats`: totals + per-usetype, per-link-type, per-fact-type
@@ -110,8 +113,9 @@ window. Useful for "what changed since last week?" workflows.
 3. For each top area, `/graph/spines?root_id=N` — the must-read paths.
 
 **Triage maintenance:**
-1. `wiki_lint --format markdown --ingest-as wiki:analysis` — produce
-   today's report and file it.
+1. `wiki_lint --format markdown --ingest-as markdown` — produce
+   today's report and file it. `--ingest-as` takes a `POST /ingest`
+   usetype; `wiki:analysis` is not one and is a 400.
 2. The report has `/view/N` links to every flagged doc; walk them in
    priority order.
 3. Fix → re-run lint → diff the reports.

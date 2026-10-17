@@ -2,6 +2,11 @@
 
 Written 2026-09-13, against `master` at `4349f59`, which is `v0.5.1`.
 
+> **Shipped, noted 2026-10-17.** 0.6.0 was tagged and released, followed by 0.6.1 and 0.6.2
+> (all 2026-10-12; `CHANGELOG.md`). This is no longer the current plan: it is the record of
+> one, kept as written, and its step numbers stay citable. 0.7.0 has no plan document — its
+> plan is its milestone on the issue tracker.
+
 **The headline is a web front end, and it was added to this plan on 2026-09-13 after the
 other six blocks were written.** The document is kept in the order it was written rather than
 reorganised around the new block, because the six blocks are the argument for why the seventh

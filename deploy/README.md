@@ -9,7 +9,7 @@ an advisory lock and enforced the write-mode reservation across every claimer, w
 process it was in, and `service_badge` was already the routing mechanism. Two things were
 missing and are covered here: a way to run the loop without also running an HTTP server
 (`jmfts_core/worker.py`), and recovery for a worker that never comes back
-(`migrations/011_task_queue_heartbeat.sql`).
+(`jmfts_core/sql/migrations/011_task_queue_heartbeat.sql`).
 
 ## What routes where
 
@@ -35,13 +35,36 @@ of in sequence, and the 54% above is redistributed across as many tasks as the d
 chunks. The rungs themselves dropped out of the policy: badging string work for a GPU pool
 would pin it to the scarce resource for nothing.
 
-There are two such resources, and they are separately priced:
+There are two such resources, and they are separately priced. A third pool, `convert`,
+exists for the tasks that need LibreOffice.
 
-| badge | resource | task types |
-|---|---|---|
-| `embed` | the embedding model | `embed`, `summarize` |
-| `llm` | a completion | `summarize:llm` |
-| *(none)* | neither | `probe`, `extract:text`, `structure:declared`, `structure:inferred`, `structure:semantic` |
+The table below is the routing policy in `jmfts_core/task_routing.py`: `EMBEDDING_AND_LLM_POLICY`
+for the first two rows, which is what `deploy/k8s/10-config.yaml` sets, and `CONVERT_POLICY`
+for the third, which nothing sets by default. The last row lists every other registered
+task type. *Regenerated 2026-10-17 from `task_routing.py` and the `@register_task_handler`
+registrations. The table before it had no `convert` row and named 10 of the 27 registered
+task types.*
+
+| badge | resource | task types | pool |
+|---|---|---|---|
+| `embed` | the embedding model | `embed`, `summarize` | `21-worker-gpu.yaml` |
+| `llm` | a completion | `summarize:llm` | `22-worker-llm.yaml` |
+| `convert` | LibreOffice (tier 3) | `render:pdf`, `convert:ooxml` | `23-worker-convert.yaml`; **opt-in**, see below |
+| *(none)* | none routed | `probe`, `fetch:url`, `fetch:arxiv`, `fetch:path`, `extract:text`, `structure:declared`, `structure:inferred`, `structure:conversation`, `structure:sheets`, `structure:semantic`, `extract:tables`, `profile:sheet`, `extract:sheet`, `propose:links`, `citation`, `anchor:source`, `anchor:render`, `summarize:tree`, `extract:facts`, `index:bm25`, `validate:shape`, `derive:rule` | any worker, `20-worker-cpu.yaml` |
+
+Three more task types are declared but never queued. `ocr` is recorded as skipped (out of
+scope for v1). `extract:images` and `review:link` are deferred, and the reason is written
+to the node's attempt log (`DEFERRED_REASON` in `jmfts_core/ingest_tasks.py`).
+
+**`extract:facts` calls an LLM and is not routed.** Its handler declares
+`cost_class=COST_LLM`, but neither policy names it. So any worker claims it, and every
+worker that might needs `JMFTS_LLM_*`. Unconfigured, it finds no endpoint and the task
+fails with a message naming those variables. Add `"extract:facts":"llm"` to
+`JMFTS_TASK_BADGES` to send it to the LLM pool.
+
+**The `convert` row is not applied by `10-config.yaml`.** A worker with
+`JMFTS_CONVERT_URL` set can do the work whatever its badges, so most fleets need no badge
+for it. Route it only when `23-worker-convert.yaml` is running; it explains the trade.
 
 **`llm` names the resource, not the hardware.** A host running a model locally on a GPU and
 a light process forwarding to a metered web API both answer it, and both are in
@@ -147,8 +170,12 @@ Useful for checking that two machines really do share the queue before any of th
 Kubernetes machinery is involved. Both hosts need the database reachable — Postgres on the
 GPU host already listens on `0.0.0.0:5432`.
 
-1. Apply the migration once, against the shared database:
-   `psql -f migrations/011_task_queue_heartbeat.sql`
+1. Bring the shared database's schema up to date, once. `jmfts-init-db --pending` lists
+   the shipped migrations that database has not applied (exit 0 if none, 1 if some, 2 if
+   it could not ask). Apply each one it names, in order, from
+   `jmfts_core/sql/migrations/`, for example
+   `psql -f jmfts_core/sql/migrations/011_task_queue_heartbeat.sql`. Before 2026-10-17
+   this step gave a `migrations/` path at the repository root, which does not exist.
 2. On the GPU host, start a worker that answers both the embedding and the LLM pool:
    `JMFTS_EMBEDDING_DEVICE=cuda jmfts-worker --badge embed --badge llm --worker-id gpu-0`
 3. On the second host, start a CPU worker:
