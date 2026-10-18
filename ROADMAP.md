@@ -28,6 +28,11 @@ internal file at its own date and has not been re-checked.
 
 ## Status
 
+**Released: 0.7.1, 2026-10-18**, the preview audit's patch release. Deferred out of it: one
+box per line instead of one per chunk (audit #6), the client overlays checking
+`rendition_hash`, a verb that re-runs one task, legacy `.doc`/`.ppt`/`.xls` text (#9, which
+needs the "current representation" change `render_tasks.py` names), and #44 option 1.
+
 **Released: 0.7.0, 2026-10-17.** `CHANGELOG.md` is what it carries. Deferred out of it: the
 reranker revision pin, collection-level options (#46), `extra="forbid"` on every request
 contract (#47, 0.8.0), the `QUERIES` floor measurement (`docs/MEASURE_MAXSIM_MARGIN.md`

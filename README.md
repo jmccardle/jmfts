@@ -143,7 +143,7 @@ uvicorn jmfts_core.rest.main:app --host 0.0.0.0 --port 8100 --reload
 ```
 
 This tree builds three distributions, and the first line is not optional. `jmfts` declares
-`jmfts-client==0.7.0` with `==`, so the third line alone resolves that exact version
+`jmfts-client==0.7.1` with `==`, so the third line alone resolves that exact version
 from PyPI and shadows the checkout you meant to work in. The second line is optional for
 the same reason in reverse: without it there is no `/app`, and nothing else is missing.
 

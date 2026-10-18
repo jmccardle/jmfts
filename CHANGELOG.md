@@ -11,7 +11,13 @@ Dates are the release commit's date. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses semantic
 versioning with the caveat that it is pre-1.0, so a minor version may break the wire.
 
-## [Unreleased]
+## [0.7.1] — 2026-10-18
+
+**Office previews work end to end, and a rectangle that cannot be checked is refused rather
+than drawn.** The console draws Word and PowerPoint anchors and spreadsheet cells, compose
+runs the converter it always needed, rendition matching is measured against real
+LibreOffice output (every case at 100%, from as low as 2 in 6), PDF tables on rotated pages
+come out in order, and every no-anchor 409 says why for the node in front of it.
 
 ### Breaking
 
@@ -1117,7 +1123,9 @@ says. Both paragraphs become steps in the 0.6.0 plan, and they are the entry con
 
 First release with packaging metadata and the tests that make a release possible.
 
-[Unreleased]: https://github.com/jmccardle/jmfts/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/jmccardle/jmfts/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/jmccardle/jmfts/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/jmccardle/jmfts/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/jmccardle/jmfts/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/jmccardle/jmfts/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/jmccardle/jmfts/compare/v0.5.2...v0.6.0

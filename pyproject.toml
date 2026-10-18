@@ -64,7 +64,7 @@ dependencies = [
     # verb that is missing or whose parameters moved — at call time, on the wire, not at
     # install time. `./bump-version.sh` moves this line and both `__version__` literals
     # together, and tests/test_packaging.py fails if they disagree.
-    "jmfts-client==0.7.0",
+    "jmfts-client==0.7.1",
     "fastapi>=0.135.0",
     # NOT A TESTED-LINE FLOOR, the one exception to the rule at the head of this list: a
     # SECURITY floor. fastapi 0.135 admits starlette 1.0.0, which carries five advisories
@@ -356,7 +356,7 @@ convert = [
 # reads the tree rather than the installed package — so a `dev` that pulled this in would be
 # installing a wheel to test files it does not read.
 web = [
-    "jmfts-web==0.7.0",
+    "jmfts-web==0.7.1",
 ]
 
 # The suite embeds for real — it ingests documents and asserts on the vectors — so dev
