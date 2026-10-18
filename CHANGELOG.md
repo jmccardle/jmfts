@@ -22,6 +22,20 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
   may write the template is told its category is invalid. Tests now cover every template
   verb in `tests/test_access_template_reads.py`, including search with a category and an
   empty `PUT` (which returns the body and is therefore also a read).
+- **PDF tables on a page that is both rotated and cropped are no longer detected** (#44,
+  option 2). `find_tables` measures in MediaBox space and drops the CropBox, so on such a page
+  the stored table rectangle was wrong (at `/Rotate 270` it covered the paragraph above the
+  table, and `/region` answered 200 with the wrong picture) and every cell was also emitted as
+  prose, duplicating it in BM25 and the embeddings. The page's text is now emitted once, as
+  prose, and the skip is recorded as `tables_skipped` in `pdf_to_markdown`'s metadata and in
+  the `extract:text` attempt detail. Rotation alone and a CropBox alone still detect tables.
+  Detecting on a de-rotated copy (option 1) is still open.
+- **A table whose text runs down or up the displayed page reads in order.** On a rotated page
+  (or a sideways table on an unrotated one) the table markdown came out with the columns as
+  rows, e.g. `| fig | pear | apple | Name |`, and the table node's text and embedding with it.
+  The grid is now turned by the direction its text runs. A candidate whose text direction
+  cannot be read is rejected with a reason in `tables_rejected`, and its text stays prose.
+  Documents already ingested keep their old table text and rectangles until re-ingested.
 
 ## [0.7.0] — 2026-10-17
 

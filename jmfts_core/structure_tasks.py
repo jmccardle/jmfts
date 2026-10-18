@@ -263,7 +263,8 @@ def _extract_pdf(data: bytes) -> Extracted:
     ``extract:tables`` slices into nodes. A few entries per document, so the argument
     ``pdf_to_markdown`` makes against persisting ``text_blocks`` does not apply to it.
 
-    ``table_failures`` and ``tables_rejected`` go to the DETAIL, because they are the
+    ``table_failures``, ``tables_rejected`` and ``tables_skipped`` (#44) go to the DETAIL,
+    because they are the
     attempt's own account of what it could not do — 3.4's business, not a later task's
     input. Without them the reporting `pdf_to_markdown` performs would stop at this
     function and never reach the node, which would make a page PyMuPDF could not analyse
@@ -290,6 +291,7 @@ def _extract_pdf(data: bytes) -> Extracted:
             "pages_with_tables": meta["pages_with_tables"],
             "table_failures": meta["table_failures"],
             "tables_rejected": meta["tables_rejected"],
+            "tables_skipped": meta["tables_skipped"],
         },
     )
 

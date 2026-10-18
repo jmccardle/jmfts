@@ -659,24 +659,27 @@ _ROTATED_WORD = "Turnip harvest report"
 _ROTATED_CELLS = [["Crop", "Yield", "Field"], ["Turnip", "41", "North"], ["Swede", "17", "East"]]
 
 
-def _make_rotated_pdf(rotation: int, *, cropbox=None) -> bytes:
-    """One Letter page: a prose line, then a ruled 3x3 table, carrying ``/Rotate rotation``.
+def _make_rotated_pdf(rotation: int, *, cropbox=None, cells=None) -> bytes:
+    """One Letter page: a prose line, then a ruled table, carrying ``/Rotate rotation``.
 
     Content is written before the rotation is set, so its coordinates are the unrotated
     page's, as a landscape export writes them. ``cropbox`` (top-left points) is set before
     the rotation too, which is the case where the CropBox and the MediaBox disagree.
+    ``cells`` defaults to the 3x3 :data:`_ROTATED_CELLS`.
     """
     import pymupdf
 
+    cells = cells or _ROTATED_CELLS
+    nrows, ncols = len(cells), len(cells[0])
     doc = pymupdf.open()
     page = doc.new_page(width=612, height=792)
     page.insert_text((72, 100), _ROTATED_WORD, fontsize=20)
     x0, y0, w, h = 300, 300, 70, 24
-    for r in range(len(_ROTATED_CELLS) + 1):
-        page.draw_line((x0, y0 + r * h), (x0 + 3 * w, y0 + r * h))
-    for c in range(4):
-        page.draw_line((x0 + c * w, y0), (x0 + c * w, y0 + 3 * h))
-    for r, row in enumerate(_ROTATED_CELLS):
+    for r in range(nrows + 1):
+        page.draw_line((x0, y0 + r * h), (x0 + ncols * w, y0 + r * h))
+    for c in range(ncols + 1):
+        page.draw_line((x0 + c * w, y0), (x0 + c * w, y0 + nrows * h))
+    for r, row in enumerate(cells):
         for c, value in enumerate(row):
             page.insert_text((x0 + c * w + 5, y0 + r * h + 16), value, fontsize=10)
     if cropbox is not None:
@@ -756,3 +759,218 @@ class TestRotatedPagesStoreDisplayedRectangles:
         prose = without["text_blocks"][0]
         assert with_tables["text_blocks"][0]["bbox"] == prose["bbox"]
         assert _dark_fraction(data, prose["bbox"]) > 0.05
+
+
+#: A table that is NOT square, so a transposed reading changes the shape as well as the
+#: text, and whose cells are each unique on the page, so one emitted twice can be counted.
+_ORDER_CELLS = [
+    ["Crop", "Yield", "Field"],
+    ["Turnip", "41", "North"],
+    ["Swede", "17", "East"],
+    ["Kale", "9", "West"],
+]
+_ORDER_MARKDOWN = (
+    "| Crop | Yield | Field |\n"
+    "| --- | --- | --- |\n"
+    "| Turnip | 41 | North |\n"
+    "| Swede | 17 | East |\n"
+    "| Kale | 9 | West |"
+)
+
+#: CropBox for the #44 cases: smaller than the MediaBox on every side.
+_CROP = (40, 50, 560, 700)
+
+
+def _make_upright_landscape_pdf(rotation: int) -> bytes:
+    """A ``/Rotate`` page whose content is drawn turned the OTHER way, so it reads upright.
+
+    This is what a landscape page in a portrait document usually is, and it is the case
+    #17's reordering must leave alone: the text runs left to right as displayed, so the
+    grid ``find_tables`` reads is already in reading order.
+    """
+    import pymupdf
+
+    source = pymupdf.open()
+    landscape = source.new_page(width=792, height=612)
+    landscape.insert_text((72, 100), _ROTATED_WORD, fontsize=20)
+    x0, y0, w, h = 300, 300, 70, 24
+    for r in range(len(_ORDER_CELLS) + 1):
+        landscape.draw_line((x0, y0 + r * h), (x0 + 3 * w, y0 + r * h))
+    for c in range(4):
+        landscape.draw_line((x0 + c * w, y0), (x0 + c * w, y0 + len(_ORDER_CELLS) * h))
+    for r, row in enumerate(_ORDER_CELLS):
+        for c, value in enumerate(row):
+            landscape.insert_text((x0 + c * w + 5, y0 + r * h + 16), value, fontsize=10)
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    page.show_pdf_page(page.rect, source, 0, rotate=-rotation)
+    page.set_rotation(rotation)
+    return doc.tobytes()
+
+
+def _make_sideways_pdf() -> bytes:
+    """An UNROTATED page carrying a table turned 90 degrees, as LaTeX's sidewaystable does."""
+    import pymupdf
+
+    source = pymupdf.open(stream=_make_rotated_pdf(0, cells=_ORDER_CELLS), filetype="pdf")
+    doc = pymupdf.open()
+    page = doc.new_page(width=792, height=612)
+    page.show_pdf_page(page.rect, source, 0, rotate=90)
+    return doc.tobytes()
+
+
+def _cells_inside(data: bytes, bbox) -> str:
+    """The text under a displayed-space rectangle, read back from the page itself."""
+    import pymupdf
+
+    page = pymupdf.open(stream=data, filetype="pdf")[0]
+    return page.get_textbox(pymupdf.Rect(bbox) * page.derotation_matrix)
+
+
+class TestRotatedTablesReadInOrder:
+    """#17: on a turned page the table's markdown read the columns as rows.
+
+    ``find_tables`` reads its grid as DISPLAYED, so a table whose text runs down the page
+    came out as ``| Kale | Swede | Turnip | Crop |``. The table node's text and its embedding
+    were both of that. The grid is now turned until its text runs left to right.
+    """
+
+    @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+    def test_the_cells_come_out_in_reading_order(self, rotation):
+        md, meta = pdf_to_markdown(_make_rotated_pdf(rotation, cells=_ORDER_CELLS))
+
+        (table,) = meta["tables"]
+        assert md[table["start"] : table["end"]] == _ORDER_MARKDOWN
+        assert (table["rows"], table["cols"]) == (4, 3)
+
+    @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+    def test_the_bbox_is_under_the_table_and_each_cell_appears_once(self, rotation):
+        data = _make_rotated_pdf(rotation, cells=_ORDER_CELLS)
+        md, meta = pdf_to_markdown(data)
+
+        (table,) = meta["tables"]
+        inside = _cells_inside(data, table["bbox"])
+        assert all(cell in inside for row in _ORDER_CELLS for cell in row)
+        assert _ROTATED_WORD not in inside
+        assert _dark_fraction(data, table["bbox"]) > 0.06
+        for row in _ORDER_CELLS:
+            for cell in row:
+                assert md.count(cell) == (2 if cell == "Turnip" else 1), cell
+
+    @pytest.mark.parametrize("rotation", [90, 270])
+    def test_a_landscape_page_that_reads_upright_is_left_alone(self, rotation):
+        """The common real case: content drawn turned so the page displays upright."""
+        data = _make_upright_landscape_pdf(rotation)
+        md, meta = pdf_to_markdown(data)
+
+        (table,) = meta["tables"]
+        assert md[table["start"] : table["end"]] == _ORDER_MARKDOWN
+        assert all(
+            cell in _cells_inside(data, table["bbox"]) for row in _ORDER_CELLS for cell in row
+        )
+
+    def test_a_sideways_table_on_an_unrotated_page_reads_in_order(self):
+        """The same rule, without ``/Rotate``: the text direction decides, not the flag."""
+        md, meta = pdf_to_markdown(_make_sideways_pdf())
+
+        (table,) = meta["tables"]
+        assert md[table["start"] : table["end"]] == _ORDER_MARKDOWN
+
+
+class TestRotatedCroppedPagesSkipTables:
+    """#44, option 2: on a page that is rotated AND cropped, tables are not detected.
+
+    ``find_tables`` measures in MediaBox space and drops the CropBox, so the bbox it gave
+    was not in the space it was mapped from: at 270 it landed on the prose line above the
+    table and ``/region`` answered 200 with the wrong picture. And because the misplaced
+    box owned no block, every cell was also emitted as prose.
+    """
+
+    @pytest.mark.parametrize("rotation", [90, 180, 270])
+    def test_the_skip_is_recorded(self, rotation):
+        _, meta = pdf_to_markdown(_make_rotated_pdf(rotation, cropbox=_CROP, cells=_ORDER_CELLS))
+
+        assert meta["tables_found"] == 0
+        assert meta["tables"] == []
+        assert meta["pages_with_tables"] == []
+        (skipped,) = meta["tables_skipped"]
+        assert skipped["page"] == 0
+        assert skipped["rotation"] == rotation
+        assert skipped["cropbox"] != skipped["mediabox"]
+        assert "#44" in skipped["reason"]
+
+    @pytest.mark.parametrize("rotation", [90, 180, 270])
+    def test_every_cell_is_emitted_exactly_once_as_prose(self, rotation):
+        md, _ = pdf_to_markdown(_make_rotated_pdf(rotation, cropbox=_CROP, cells=_ORDER_CELLS))
+
+        assert "|" not in md
+        for row in _ORDER_CELLS:
+            for cell in row:
+                assert md.count(cell) == (2 if cell == "Turnip" else 1), cell
+
+    @pytest.mark.parametrize("rotation", [90, 180, 270])
+    def test_no_rectangle_is_stored_for_a_table_that_was_not_found(self, rotation):
+        """Every block left is prose, and each one crops to ink rather than to paper."""
+        data = _make_rotated_pdf(rotation, cropbox=_CROP, cells=_ORDER_CELLS)
+        _, meta = pdf_to_markdown(data)
+
+        for block in meta["text_blocks"]:
+            assert _dark_fraction(data, block["bbox"]) > 0.02, block
+
+    def test_a_cropbox_alone_keeps_its_tables(self):
+        data = _make_rotated_pdf(0, cropbox=_CROP, cells=_ORDER_CELLS)
+        md, meta = pdf_to_markdown(data)
+
+        assert meta["tables_skipped"] == []
+        (table,) = meta["tables"]
+        assert md[table["start"] : table["end"]] == _ORDER_MARKDOWN
+        assert all(
+            cell in _cells_inside(data, table["bbox"]) for row in _ORDER_CELLS for cell in row
+        )
+
+    @pytest.mark.parametrize("rotation", [90, 180, 270])
+    def test_a_cropbox_equal_to_the_mediabox_is_not_a_crop(self, rotation):
+        data = _make_rotated_pdf(rotation, cropbox=(0, 0, 612, 792), cells=_ORDER_CELLS)
+        _, meta = pdf_to_markdown(data)
+
+        assert meta["tables_skipped"] == []
+        assert meta["tables_found"] == 1
+
+    def test_table_extraction_off_records_no_skip(self):
+        """Nothing was skipped that was not asked for."""
+        data = _make_rotated_pdf(90, cropbox=_CROP)
+        _, meta = pdf_to_markdown(data, extract_tables=False)
+
+        assert meta["tables_skipped"] == []
+
+    def test_the_skip_reaches_the_extraction_attempt_detail(self):
+        """The same path `table_failures` takes, so the node's attempt log carries it."""
+        from jmfts_core.structure_tasks import _extract_pdf
+
+        extracted = _extract_pdf(_make_rotated_pdf(270, cropbox=_CROP))
+
+        assert extracted.detail["tables_skipped"][0]["rotation"] == 270
+
+
+class TestATableWithNoReadableDirectionIsNotGuessed:
+    """Guessing "left to right" is how #17 happened, so an unreadable direction is None,
+    and `_process_page` rejects that candidate (its blocks stay prose) instead."""
+
+    def test_no_text_inside_has_no_direction(self):
+        import pymupdf
+
+        from jmfts_core.pdf_extraction import _displayed_direction
+
+        line = {"bbox": (0, 0, 10, 10), "dir": (1.0, 0.0), "spans": [{"text": "x"}]}
+        table = pymupdf.Rect(100, 100, 200, 200)
+        assert _displayed_direction([line], table, pymupdf.Matrix(1, 1)) is None
+
+    def test_slanted_text_has_no_direction(self):
+        import pymupdf
+
+        from jmfts_core.pdf_extraction import _displayed_direction
+
+        line = {"bbox": (110, 110, 150, 150), "dir": (0.7071, 0.7071), "spans": [{"text": "xy"}]}
+        table = pymupdf.Rect(100, 100, 200, 200)
+        assert _displayed_direction([line], table, pymupdf.Matrix(1, 1)) is None

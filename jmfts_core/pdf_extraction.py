@@ -269,6 +269,96 @@ class _PageResult:
     tables_found: int = 0
     table_errors: list[str] = field(default_factory=list)
     tables_rejected: list[dict] = field(default_factory=list)
+    #: Why table detection was NOT RUN on this page, or ``None`` if it ran (or was not
+    #: asked for). A third fact beside "no table here" and "a grid I declined": "I did not
+    #: look", which is what :func:`_tables_unsafe` answers on a rotated page with a CropBox.
+    tables_skipped: Optional[dict] = None
+
+
+def _tables_unsafe(page: pymupdf.Page) -> Optional[dict]:
+    """Why ``find_tables`` must not run on this page, or ``None`` if it may (#44, option 2).
+
+    A page that is BOTH rotated AND cropped. ``find_tables`` de-rotates the page in MediaBox
+    space and restores it with ``set_mediabox``, which drops the CropBox (see the comment on
+    ``rotation`` in :func:`_process_page`), so the bbox it returns is not in the space our
+    ``~rotation`` — the CropBox's — undoes. Measured on pymupdf 1.28.2 with a ruled 4x3 table:
+    at 90 the stored box had no words under it, at 180 it was clipped and refused as blank,
+    and at 270 it landed on the paragraph ABOVE the table, so ``/region`` answered 200 with
+    the wrong picture. And because the misplaced rectangle owned no text block, every cell was
+    emitted a second time as prose — duplicated in BM25 and in the embeddings.
+
+    Skipping is the decided fix, not a fallback: the page's text is still emitted, once, as
+    prose, and the skip is RECORDED (``tables_skipped`` in the metadata and the extraction
+    attempt's detail) so a missing table on such a page reads as "not looked for" rather than
+    "not there". Detecting on a de-rotated copy and mapping back is #44's option 1, later.
+
+    Either condition alone is safe and is tested: an unrotated CropBox page and a rotated
+    page whose CropBox is its MediaBox both measure correctly.
+    """
+    if page.rotation == 0:
+        return None
+    crop, media = page.cropbox, page.mediabox
+    if all(abs(a - b) < 0.01 for a, b in zip(crop, media)):
+        return None
+    return {
+        "reason": "page is rotated and has a CropBox smaller than its MediaBox; table "
+        "detection would place the table in the wrong rectangle (#44)",
+        "rotation": page.rotation,
+        "cropbox": [round(v, 2) for v in crop],
+        "mediabox": [round(v, 2) for v in media],
+    }
+
+
+#: Cell order for a table whose text runs in each axis direction ON THE DISPLAYED PAGE (#17).
+#:
+#: ``find_tables`` reads its grid in displayed space — rows top to bottom, cells left to
+#: right — because it bakes ``/Rotate`` into the content before it measures. That is the
+#: reading order only when the text in the table runs left to right as displayed. A table
+#: whose text runs down the displayed page (a ``/Rotate 90`` page with upright content, or a
+#: sideways table on an unrotated one) came out with its columns as rows and its rows
+#: reversed: ``| fig | pear | apple | Name |``. The text direction is the one thing that says
+#: which way is "along a row", so the grid is turned until it runs left to right. ``R`` and
+#: ``C`` are the displayed grid's row and column counts; each entry gives the reading-order
+#: table's shape and the displayed cell at reading position ``(i, j)``.
+_READING_ORDER = {
+    (1, 0): lambda d, R, C: d,
+    (0, 1): lambda d, R, C: [[d[j][C - 1 - i] for j in range(R)] for i in range(C)],
+    (-1, 0): lambda d, R, C: [[d[R - 1 - i][C - 1 - j] for j in range(C)] for i in range(R)],
+    (0, -1): lambda d, R, C: [[d[R - 1 - j][i] for j in range(R)] for i in range(C)],
+}
+
+
+def _displayed_direction(
+    lines: list[dict], table_rect: pymupdf.Rect, rotation: pymupdf.Matrix
+) -> Optional[tuple[int, int]]:
+    """The axis the text inside ``table_rect`` runs along on the displayed page.
+
+    ``lines`` and ``table_rect`` are in ``get_text``'s (unrotated) space; a line's ``dir`` is
+    turned through the linear part of ``rotation`` to get its displayed direction. The vote
+    is weighted by characters, so a table with a few sideways column headers — common in
+    papers — still reads by its body. ``None`` when the majority direction is not along an
+    axis, or when no line of text sits inside the table at all — either way there is no
+    direction to read the grid by, and guessing "left to right" is how #17 happened.
+    """
+    turn = pymupdf.Matrix(rotation.a, rotation.b, rotation.c, rotation.d, 0, 0)
+    votes: dict[tuple[int, int], int] = defaultdict(int)
+    for line in lines:
+        box = pymupdf.Rect(line["bbox"])
+        centre = pymupdf.Point((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2)
+        if centre not in table_rect:
+            continue
+        weight = sum(len(s.get("text", "").strip()) for s in line.get("spans", []))
+        shown = pymupdf.Point(line["dir"]) * turn
+        if abs(shown.x) > 0.99:
+            axis = (1 if shown.x > 0 else -1, 0)
+        elif abs(shown.y) > 0.99:
+            axis = (0, 1 if shown.y > 0 else -1)
+        else:
+            axis = None
+        votes[axis] += weight
+    if not votes:
+        return None
+    return max(votes, key=votes.get)
 
 
 def _union(boxes: list[tuple[float, float, float, float]]) -> tuple[float, float, float, float]:
@@ -432,10 +522,13 @@ def _process_page(
     # where the prose's anchors point.
     rotation = page.rotation_matrix
 
-    found = _find_page_tables(page) if extract_tables else _PageTables()
-    result.table_errors = found.errors
-    result.tables_rejected = found.rejected
-    result.tables_found = len(found.tables)
+    if extract_tables:
+        result.tables_skipped = _tables_unsafe(page)
+    found = (
+        _find_page_tables(page)
+        if extract_tables and result.tables_skipped is None
+        else _PageTables()
+    )
     # `find_tables` answers in the OTHER space. It de-rotates the page before it measures
     # (pymupdf/table.py `page_rotation_set0`), so a table's bbox is already the displayed
     # page's while every `get_text` rectangle above is the unrotated page's. They are brought
@@ -446,6 +539,36 @@ def _process_page(
     # 180 and 270.
     unrotate = ~rotation
     table_rects = [pymupdf.Rect(t.bbox) * unrotate for t in found.tables]
+
+    # Put each table's cells in READING order (#17; see `_READING_ORDER`). A table whose
+    # text direction cannot be established is rejected, not guessed at: its blocks then stay
+    # prose and are emitted once, and the rejection says why.
+    page_lines = [line for b in blocks if b.get("type") == 0 for line in b.get("lines", [])]
+    kept = []
+    for table, rows, rect in zip(found.tables, found.rows, table_rects):
+        axis = _displayed_direction(page_lines, rect, rotation)
+        if axis is None:
+            cells = sum(len(row) for row in rows)
+            filled = sum(1 for row in rows for cell in row if str(cell or "").strip())
+            found.rejected.append(
+                {
+                    "rows": table.row_count,
+                    "cols": table.col_count,
+                    "fill": round(filled / cells, 3) if cells else 0.0,
+                    "reason": "the text inside it does not run along one axis of the page, "
+                    "so its cell order cannot be read",
+                }
+            )
+            continue
+        ordered = _READING_ORDER[axis](rows, len(rows), len(rows[0]))
+        kept.append((table, ordered, rect))
+    found.tables = [t for t, _, _ in kept]
+    found.rows = [r for _, r, _ in kept]
+    table_rects = [rect for _, _, rect in kept]
+
+    result.table_errors = found.errors
+    result.tables_rejected = found.rejected
+    result.tables_found = len(found.tables)
     # A table is rendered at most once even if several blocks belong to it.
     emitted = [False] * len(found.tables)
 
@@ -574,7 +697,13 @@ def pdf_to_markdown(
     * ``tables_rejected`` — ``{"page": int, "rows": int, "cols": int, "fill": float,
       "reason": str}`` per candidate dropped by :data:`_TABLE_MIN_FILL`. On a paper whose
       figures are drawn as ruled grids this is where they go, and reporting them is what
-      keeps "there was no table" apart from "there was a grid I declined to call one".
+      keeps "there was no table" apart from "there was a grid I declined to call one". A
+      candidate whose text direction could not be read (see ``_READING_ORDER``) lands here
+      too, with its own reason.
+    * ``tables_skipped`` — ``{"page": int, "reason": str, "rotation": int, "cropbox": [...],
+      "mediabox": [...]}`` per page on which table detection was NOT RUN, because the page
+      is rotated and cropped (#44; see ``_tables_unsafe``). Such a page's text is emitted
+      once, as prose. The third fact beside the two above: "I did not look".
 
     ``text_blocks`` is the positional half of the same idea as ``page_offsets``, at the
     granularity of a paragraph rather than a page: ``{"page": int, "bbox": [x0, y0, x1, y1],
@@ -617,6 +746,7 @@ def pdf_to_markdown(
         pages_with_tables: list[int] = []
         table_failures: list[dict] = []
         tables_rejected: list[dict] = []
+        tables_skipped: list[dict] = []
         text_blocks: list[dict] = []
         tables: list[dict] = []
         cursor = 0
@@ -634,6 +764,14 @@ def pdf_to_markdown(
                 logger.warning("%s page %d: %s", source_name, page_number, error)
             for rejection in result.tables_rejected:
                 tables_rejected.append({"page": page_number, **rejection})
+            if result.tables_skipped is not None:
+                tables_skipped.append({"page": page_number, **result.tables_skipped})
+                logger.warning(
+                    "%s page %d: tables not detected: %s",
+                    source_name,
+                    page_number,
+                    result.tables_skipped["reason"],
+                )
             control_chars_removed += result.control_chars_removed
             for table in result.tables:
                 tables.append(
@@ -665,6 +803,7 @@ def pdf_to_markdown(
             "tables": tables,
             "table_failures": table_failures,
             "tables_rejected": tables_rejected,
+            "tables_skipped": tables_skipped,
             "page_offsets": page_offsets,
             "text_blocks": text_blocks,
             "filename": source_name,
