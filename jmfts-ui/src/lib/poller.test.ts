@@ -132,4 +132,47 @@ describe("createPoller", () => {
     ]);
     expect(onIdle).toHaveBeenCalled();
   });
+
+  it("starts nothing after dispose(), so a start that lands after unmount is inert", async () => {
+    const { read, calls } = manualRead<string>();
+    const onBegin = vi.fn();
+    const poller = createPoller({
+      read,
+      isTerminal: () => false,
+      intervalMs: INTERVAL,
+      onBegin,
+      onResult: vi.fn(),
+      onError: vi.fn(),
+    });
+
+    // Ingest.vue: the upload is awaited, the page unmounts, then the await resumes and starts.
+    poller.dispose();
+    poller.start(7);
+    await vi.advanceTimersByTimeAsync(10 * INTERVAL);
+
+    expect(read).not.toHaveBeenCalled();
+    expect(onBegin).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("disowns a read in flight at dispose(), and stays disposed", async () => {
+    const { read, calls } = manualRead<string>();
+    const onResult = vi.fn();
+    const poller = createPoller({
+      read,
+      isTerminal: () => false,
+      intervalMs: INTERVAL,
+      onResult,
+      onError: vi.fn(),
+    });
+
+    poller.start(7);
+    poller.dispose();
+    calls[0].resolve("stalled");
+    poller.start(8);
+    await vi.advanceTimersByTimeAsync(10 * INTERVAL);
+
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(onResult).not.toHaveBeenCalled();
+  });
 });

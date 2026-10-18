@@ -520,7 +520,9 @@ function askAgain() {
   if (watching.value !== null) poller.start(watching.value);
 }
 
-onBeforeUnmount(() => poller.stop());
+// `dispose`, not `stop`: `submit` may still be awaiting its upload, and the `startWatching` it
+// calls when that lands must not open a loop on a page that is gone.
+onBeforeUnmount(() => poller.dispose());
 
 const ingestion = computed(() =>
   watching.value === null ? null : ingestionState(frontier.value, watchedExisting.value)
