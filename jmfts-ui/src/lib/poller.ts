@@ -11,6 +11,13 @@
 // every `stop` advances it; a read remembers the generation it began under and, once its
 // `await` returns, does nothing at all if that is no longer current — no result, no error, no
 // successor. The timer is cleared before one is scheduled, so there is never a second handle.
+//
+// AND A POLLER CAN BE DISPOSED, which `stop` alone could not say. `Ingest.vue` awaits the upload
+// and THEN calls `start`; a person who navigates away during that await has already unmounted
+// the page, and its `stop` ran before the `start` that follows it. A generation cannot disown a
+// loop that begins after the stop, so that `start` opened one nothing would ever stop, and a
+// `stalled` ingestion polled until the tab closed. `dispose` is the end of the owner's life:
+// after it, `start` does nothing, and nothing can bring the loop back.
 
 export interface PollerOptions<T> {
   /** One reading of `id`. A rejection stops the loop; see `onError`. */
@@ -36,12 +43,18 @@ export interface Poller {
   start(id: number): void;
   /** Stop. A reading already in flight is disowned: its outcome reaches no callback. */
   stop(): void;
+  /**
+   * Stop for good, because the owner is gone. Every later `start` is a no-op, so an `await`
+   * that resumes after the owner unmounted cannot begin a loop nothing would stop.
+   */
+  dispose(): void;
 }
 
 export function createPoller<T>(options: PollerOptions<T>): Poller {
   const { read, isTerminal, intervalMs, onBegin, onResult, onError, onIdle } = options;
   let generation = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let disposed = false;
 
   function clearTimer() {
     if (timer !== null) clearTimeout(timer);
@@ -77,9 +90,15 @@ export function createPoller<T>(options: PollerOptions<T>): Poller {
   }
 
   function start(id: number) {
+    if (disposed) return;
     stop();
     void tick(id, generation);
   }
 
-  return { start, stop };
+  function dispose() {
+    disposed = true;
+    stop();
+  }
+
+  return { start, stop, dispose };
 }
