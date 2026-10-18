@@ -9,7 +9,7 @@ on purpose:
   and an import that edits the environment is the opposite of least surprise. Point the
   normal ``JMFTS_DB_*`` variables at the experiment database instead (or source a file of
   them in the shell that runs ``jmfts-eval``).
-- **The ``/storage/...`` default.** A hard-coded path on one machine. The data directory is
+- **The default data directory.** It was a hard-coded absolute path on one machine. The data directory is
   ``--data-dir`` or ``JMFTS_EVAL_DATA_DIR``, and with neither the run stops and says so.
 """
 
