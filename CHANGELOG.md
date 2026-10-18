@@ -36,6 +36,19 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
   The grid is now turned by the direction its text runs. A candidate whose text direction
   cannot be read is rejected with a reason in `tables_rejected`, and its text stays prose.
   Documents already ingested keep their old table text and rectangles until re-ingested.
+- **The console's preview draws Word and PowerPoint anchors, and shows spreadsheet cells.**
+  `jmfts-ui` read only `source_anchor`, which for an office chunk is an `ooxml` address, so
+  every office preview said "not a rectangle on a PDF page" and the link was hidden. It now
+  reads `render_anchor` first, in the same order as the server's `_pdf_anchor`. The test
+  fixture had put a rendition anchor under `source_anchor`, a row the server never writes,
+  which is why the tests passed. A `cells` anchor (and a sheet node) now opens a grid from
+  `/documents/{id}/cells`; before, it was a dead end. A node with no anchor is told why for
+  its format (PDF `citation`, office `render:pdf`/`anchor:render`, sheet cells) instead of
+  always blaming `citation`. A 413 from `/image` or `/region` is retried once at the dpi the
+  server names. Glyphs a few points past a CropBox edge no longer raise the out-of-page alarm.
+- **An ingest poll no longer outlives the console's Ingest page.** An upload that finished
+  after the user navigated away started a poll nothing stopped; a disposed poller now starts
+  nothing.
 
 ## [0.7.0] — 2026-10-17
 
