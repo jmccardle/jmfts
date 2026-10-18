@@ -127,6 +127,6 @@ def test_readme_client_pin_matches_pyproject():
     assert quoted, "README no longer quotes the jmfts-client pin; this guard expects it"
     assert quoted.group(1) == declared.group(1), (
         f"README quotes jmfts-client=={quoted.group(1)}; pyproject.toml pins "
-        f"{declared.group(1)}. ./bump-version.sh sets the pin, so the README is what "
-        "fell behind."
+        f"{declared.group(1)}. ./bump-version.sh sets both (the README quote since "
+        "2026-10-18), so one was edited by hand."
     )

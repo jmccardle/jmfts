@@ -20,6 +20,10 @@
 #   * pyproject.toml                    the `jmfts-client==<version>` pin
 #   * pyproject.toml                    the `jmfts-web==<version>` pin, in the `web` extra
 #
+# Plus every place the README QUOTES a pin, which is prose rather than a requirement but is
+# held to pyproject.toml by tests/test_doc_drift.py. Until 2026-10-18 this script did not
+# touch it, and the 0.7.0 gate failed on exactly that line after the bump.
+#
 # Both pyproject.toml files read their `__version__` through [tool.setuptools.dynamic], so
 # those two literals ARE the wheels' versions. NEVER add a `version = "..."` literal to a
 # pyproject.toml to fix a mismatch — tests/test_packaging.py forbids the second copy.
@@ -107,6 +111,12 @@ VERSION_FILES=(
 PIN_FILES=(pyproject.toml)
 PIN_PATTERN='"jmfts-(client|web)(\[[a-z,]+\])?==[^"]+"'
 
+# Quotes of a pin in prose: `jmfts-client==0.7.0` in backticks, not a quoted requirement.
+# Discovered by pattern for the same reason as the pins. Zero quotes is allowed (the README
+# may stop quoting one); a count that changes during the bump is not.
+QUOTE_FILES=(README.md)
+QUOTE_PATTERN='`jmfts-(client|web)==[0-9][^`[:space:]]*`'
+
 # -- record the "before" ---------------------------------------------------
 #
 # Read the old value per file before touching anything, so the report shows a real
@@ -131,6 +141,7 @@ if [ "$PINS_BEFORE" -eq 0 ]; then
     echo "bump-version.sh: the pin syntax has changed; this script's pattern is stale." >&2
     exit 1
 fi
+QUOTES_BEFORE="$(grep -hoE "$QUOTE_PATTERN" "${QUOTE_FILES[@]}" | wc -l | tr -d ' ')"
 
 # -- edit ------------------------------------------------------------------
 
@@ -141,6 +152,7 @@ done
 # The extras bracket, where present, is part of the requirement name and must survive:
 # "jmfts-client[vectors]==0.2.0", not "jmfts-client==0.2.0".
 sed -i -E "s/(\"jmfts-(client|web)(\[[a-z,]+\])?)==[^\"]+\"/\1==$NEW\"/g" "${PIN_FILES[@]}"
+sed -i -E "s/(\`jmfts-(client|web))==[0-9][^\`[:space:]]*\`/\1==$NEW\`/g" "${QUOTE_FILES[@]}"
 
 # -- verify ----------------------------------------------------------------
 #
@@ -168,6 +180,19 @@ if [ "$PINS_AFTER" -ne "$PINS_BEFORE" ]; then
     FAILED+=("pin count changed during the bump: $PINS_BEFORE before, $PINS_AFTER after")
 fi
 
+QUOTES_AFTER=0
+while IFS= read -r quote; do
+    QUOTES_AFTER=$((QUOTES_AFTER + 1))
+    case "$quote" in
+        *"==$NEW\`") ;;
+        *) FAILED+=("stale quote: $quote") ;;
+    esac
+done < <(grep -hoE "$QUOTE_PATTERN" "${QUOTE_FILES[@]}")
+
+if [ "$QUOTES_AFTER" -ne "$QUOTES_BEFORE" ]; then
+    FAILED+=("quote count changed during the bump: $QUOTES_BEFORE before, $QUOTES_AFTER after")
+fi
+
 if [ "${#FAILED[@]}" -ne 0 ]; then
     echo "bump-version.sh: FAILED — these locations do not read $NEW:" >&2
     printf '  %s\n' "${FAILED[@]}" >&2
@@ -177,7 +202,7 @@ fi
 
 # -- report ----------------------------------------------------------------
 
-TOTAL=$((${#VERSION_FILES[@]} + PINS_AFTER))
+TOTAL=$((${#VERSION_FILES[@]} + PINS_AFTER + QUOTES_AFTER))
 echo "bumped $TOTAL locations to $NEW"
 echo
 for f in "${VERSION_FILES[@]}"; do
@@ -185,6 +210,9 @@ for f in "${VERSION_FILES[@]}"; do
 done
 grep -nE "$PIN_PATTERN" "${PIN_FILES[@]}" | while IFS= read -r line; do
     printf '  %s\n' "$line"
+done
+grep -noE "$QUOTE_PATTERN" "${QUOTE_FILES[@]}" | while IFS= read -r line; do
+    printf '  %s:%s\n' "${QUOTE_FILES[0]}" "$line"
 done
 echo
 echo "no commit, no tag, no push — that is yours to make. Verify with:"

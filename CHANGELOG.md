@@ -13,6 +13,19 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
 
 ## [Unreleased]
 
+### Breaking
+
+- **Every office preview made before this release answers 409 until its rectangles are
+  measured again.** A `render_anchor` now carries the `rendition_hash` of the rendition it
+  was measured on, and `/region` and `/image` refuse a rectangle whose hash does not match
+  the stored rendition — including every row written before 0.7.1, which has no hash and
+  so cannot be checked (see *Fixed*). Nothing is lost: the refusal names the repair, which
+  is to run `anchor:render` again on the document's file node. No endpoint re-runs one task
+  yet, so on an existing appliance that means deleting and re-uploading each office
+  document whose preview you need; a re-upload of the same bytes is deduplicated by content
+  hash and does not re-run it. PDF anchors are unaffected. The client-side overlays in
+  `jmfts-ui` and `jmfts-web` read the row directly and do not check the hash yet.
+
 ### Changed
 
 - **The MaxSim and filtered recall gates print what they measured.** Every run of
