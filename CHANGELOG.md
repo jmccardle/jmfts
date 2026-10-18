@@ -11,6 +11,18 @@ Dates are the release commit's date. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses semantic
 versioning with the caveat that it is pre-1.0, so a minor version may break the wire.
 
+## [Unreleased]
+
+### Fixed
+
+- **`PUT /templates/{id}` no longer confirms that a hidden template exists.** It validated
+  the category before the access gate, so a caller with no read access who sent an invalid
+  category got 422 for a template under an access-control root and 404 for an id that does
+  not exist. The gate now runs first: hidden → 404, read-only → 403, and only a caller who
+  may write the template is told its category is invalid. Tests now cover every template
+  verb in `tests/test_access_template_reads.py`, including search with a category and an
+  empty `PUT` (which returns the body and is therefore also a read).
+
 ## [0.7.0] — 2026-10-17
 
 **Chunks are measured in words, and a summary stops outliving its source.** The `max_words`

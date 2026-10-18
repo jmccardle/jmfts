@@ -40,7 +40,7 @@ from jmfts_client.contracts.template import (
     TemplateSearchRequest,
     TemplateUpdate,
 )
-from jmfts_core.access import can_read, readable_filter
+from jmfts_core.access import can_read, readable_filter, require_write
 from jmfts_core.models.document import Document
 from jmfts_core.registry import expose, register_service
 from jmfts_core.repositories.document import DocumentRepository
@@ -217,10 +217,15 @@ class TemplateService:
         summary="Update a template's content or metadata",
     )
     def update_template(self, template_id: int, request: TemplateUpdate) -> TemplateResponse:
-        """Update a template's content or metadata."""
-        doc = self.session.get(Document, template_id)
-        if not doc or doc.usetype != TEMPLATE_USETYPE:
-            raise LookupError("Template not found")
+        """Update a template's content or metadata.
+
+        The access gate runs BEFORE the category is validated. In the other order a
+        non-reader sending an invalid category got 422 for a hidden template and 404 for a
+        missing one, which told them the hidden one exists. Hidden → 404, read-only → 403,
+        and only a caller who may write the template learns that its category was bad.
+        """
+        doc = self._readable_template(template_id)
+        require_write(self.session, doc, "modify")
 
         if request.category is not None:
             _validate_category(request.category)

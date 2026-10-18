@@ -199,3 +199,74 @@ def test_search_templates_hides_template_from_non_reader(db_session, monkeypatch
     )
     assert tid not in _search_ids(db_session, na)
     assert tid in _search_ids(db_session, rd)
+
+
+def test_search_templates_category_filter_still_hides_template(db_session, monkeypatch):
+    """The category post-filter runs over hits that were already scoped; it adds none back."""
+    tid, rd, na = _listed_template(
+        db_session, monkeypatch, governed=True, content=_SECRET_BODY, auto_embed=True
+    )
+    body = {"query": "pangolin protocol zebra maneuvers", "limit": 10, "category": "ideation"}
+    for principal, expect in ((na, False), (rd, True)):
+        with _http(db_session, principal) as client:
+            resp = client.post("/templates/search", json=body)
+        assert resp.status_code == 200, resp.text
+        assert (tid in [r["document"]["id"] for r in resp.json()["results"]]) is expect
+
+
+# --- PUT /templates/{id} ---------------------------------------------------------------------
+#
+# The write verb returns the whole template, so it is a read path as well. Its gate is
+# DocumentRepository.update's require_write: hidden -> 404, read-only -> 403. What it got
+# wrong until 2026-10-18 was ORDER: the category was validated before the gate, so a
+# non-reader who sent an invalid category got 422 for a hidden template and 404 for a
+# missing one, an existence oracle on exactly the documents existence-hiding is for.
+
+
+def _put(db_session, principal, tid, body):
+    with _http(db_session, principal) as client:
+        return client.put(f"/templates/{tid}", json=body)
+
+
+def _content(db_session, tid):
+    from jmfts_core.models.document import Document
+
+    db_session.expire_all()
+    return db_session.get(Document, tid).content
+
+
+def test_update_template_non_reader_sees_missing_template(db_session, monkeypatch):
+    tid, _, na = _listed_template(db_session, monkeypatch, governed=True)
+    resp = _put(db_session, na, tid, {"content": "overwritten"})
+    assert resp.status_code == 404, resp.text
+    assert "SECRET" not in resp.text
+    assert _content(db_session, tid) == "SECRET Hello {{name}}"
+
+
+def test_update_template_empty_body_does_not_echo_hidden_template(db_session, monkeypatch):
+    """A PUT that changes nothing would otherwise be a read of the body."""
+    tid, _, na = _listed_template(db_session, monkeypatch, governed=True)
+    resp = _put(db_session, na, tid, {})
+    assert resp.status_code == 404, resp.text
+    assert "SECRET" not in resp.text
+
+
+def test_update_template_invalid_category_is_404_for_non_reader(db_session, monkeypatch):
+    tid, _, na = _listed_template(db_session, monkeypatch, governed=True)
+    hidden = _put(db_session, na, tid, {"category": "not-a-category"})
+    missing = _put(db_session, na, 2_000_000_000, {"category": "not-a-category"})
+    assert missing.status_code == 404
+    assert hidden.status_code == 404, hidden.text
+
+
+def test_update_template_read_only_holder_is_403_and_unchanged(db_session, monkeypatch):
+    tid, rd, _ = _listed_template(db_session, monkeypatch, governed=True)
+    resp = _put(db_session, rd, tid, {"content": "overwritten"})
+    assert resp.status_code == 403, resp.text
+    assert _content(db_session, tid) == "SECRET Hello {{name}}"
+
+
+def test_update_template_invalid_category_is_422_for_reader(db_session, monkeypatch):
+    """The 422 survives for a caller who can see the template; only the oracle goes."""
+    tid, _, _ = _listed_template(db_session, monkeypatch, governed=True)
+    assert _put(db_session, OWNER, tid, {"category": "not-a-category"}).status_code == 422
