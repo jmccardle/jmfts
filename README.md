@@ -59,12 +59,32 @@ jmfts-eval beir --suite full --data-dir DIR --methods vector bm25 hybrid
 It downloads each dataset into `DIR` if absent, ingests it through the same write
 path as `POST /documents`, and writes one JSON per dataset into `eval-results` in
 the working directory, recording the commit, host, models and how many documents
-were left out. The table above has not been re-measured with it yet. Two things
+were left out. The table above has not been re-measured with it yet. *(Two of its
+rows were, on 2026-10-18; see below.)* Two things
 differ from the runs that produced it: the 2026-03 runs embedded a document longer
 than the 512-token token window as a truncated prefix, which the embedder has
 refused since 2026-07 (`--over-window skip` leaves such documents out and counts
 them; nothing is truncated); and a document now keeps 35% of its token vectors
 rather than 50%.
+
+**Re-measured 2026-10-18** with `jmfts-eval beir --over-window skip` at commit
+`09ef9ec`, on one RTX 4090, about 19 minutes per dataset. nDCG@10, with Recall@100
+in brackets:
+
+| dataset | skipped (judged relevant) | ceiling | vector | bm25 | hybrid | vector→maxsim@200 |
+|---|---|---|---|---|---|---|
+| SciFact | 297 of 5183 (34) | 0.8822 | 0.6074 (0.8302) | 0.5828 (0.7767) | **0.6286** (0.8408) | 0.5896 (0.8202) |
+| NFCorpus | 213 of 3633 (182) | 0.9798 | 0.3051 (0.2750) | 0.2938 (0.2227) | **0.3358** (0.2948) | 0.3069 (0.2828) |
+
+*Ceiling* is the best nDCG@10 any ranking could reach once the skipped documents are
+gone, because the judgements still count them. The numbers are lower than the 2026-03
+rows, but they do not measure the same corpus. Each 2026-03 figure multiplied by its
+ceiling gives the new figure to within 0.017 for all six cells; on SciFact it is within
+0.011, and BM25, which reads no vectors, is within 0.005 on both datasets. The
+difference is therefore the skipped documents rather than retrieval. `maxsim@200`
+reranking is measured here for the first time on BEIR: −0.018 against vector on
+SciFact and +0.002 on NFCorpus, at about 800 ms a query against about 22 ms. FiQA and
+TREC-COVID have not been re-measured.
 
 **One thing worth knowing before you rely on it.** `?rerank=true` is unmeasured.
 The cross-encoder second stage loads a standard `CrossEncoder`

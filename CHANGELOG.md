@@ -27,7 +27,10 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
   `--output`), recording the commit (the package version when there is no checkout), host,
   embedding and reranker models, the principal (none bound, so owner) and the over-window
   count. Nothing is written into the tree, and the README's numbers are unchanged until a run
-  re-measures them.
+  re-measures them. *(SciFact and NFCorpus were re-measured on 2026-10-18 and the README
+  carries the new rows beside the old table. Hybrid scores 0.6286 and 0.3358 nDCG@10. Both
+  are lower than the 2026-03 figures by the share of judged-relevant documents now skipped
+  as over-window, not by a change in retrieval.)*
 - **Over-window documents are a choice, and the default is to stop.** The embedder has refused
   text longer than the token window since before 0.1.0; the old loader predated that and
   embedded a truncated prefix. `--over-window error` (default) measures the whole corpus with
