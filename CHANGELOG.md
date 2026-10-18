@@ -11,6 +11,39 @@ Dates are the release commit's date. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses semantic
 versioning with the caveat that it is pre-1.0, so a minor version may break the wire.
 
+## [Unreleased]
+
+### Added
+
+- **`jmfts-eval beir`: the README's BEIR table can be reproduced from a release.** The
+  harness that measured it lived in `benchmarks/beir/` on the history before 0.1.0 and was
+  not carried into the re-rooted tree, so nothing here could check the numbers it publishes.
+  It is restored under `jmfts_core/eval/` (so the console script works from a wheel) as a
+  port, not a copy: documents go in through `DocumentRepository.create`, which is what
+  `POST /documents` writes, instead of a hand-written tiering loop that kept 50% of token
+  vectors where the write path keeps 35%; a re-ingest deletes through `DocumentService` and
+  `IndexService`, not raw SQL; datasets download with the standard library, so the `beir`
+  package is not needed. One JSON per dataset per run goes to `./eval-results/` (or
+  `--output`), recording the commit (the package version when there is no checkout), host,
+  embedding and reranker models, the principal (none bound, so owner) and the over-window
+  count. Nothing is written into the tree, and the README's numbers are unchanged until a run
+  re-measures them.
+- **Over-window documents are a choice, and the default is to stop.** The embedder has refused
+  text longer than the token window since before 0.1.0; the old loader predated that and
+  embedded a truncated prefix. `--over-window error` (default) measures the whole corpus with
+  the tokenizer before anything is written and refuses, naming the count and the longest
+  documents; `--over-window skip` leaves them out, prints the count and records it with the
+  ids and how many of them are judged relevant. Nothing is truncated.
+- `jmfts-eval` has no default data directory and no default database: `--data-dir` or
+  `JMFTS_EVAL_DATA_DIR` names where datasets live, and a database holding documents that are
+  not BEIR corpora is refused for writes unless `--allow-shared-db` is passed. The old
+  harness hard-coded a path on one machine and a database name.
+- Stricter than the old harness in three places: a query that raises now stops the run (it was printed and skipped,
+  and the method's mean taken over the rest); a hit outside the corpus stops the run (it was
+  dropped, shortening the list); a malformed method name such as `maxsim@200junk` or
+  `crossenc@100:t5` is refused before any download or ingest (they parsed, or were ignored).
+  `->` is accepted for `→`.
+
 ## [0.7.1] — 2026-10-18
 
 **Office previews work end to end, and a rectangle that cannot be checked is refused rather

@@ -39,6 +39,12 @@ jmfts-server                # the same app, installed entry point; --help shows 
 # Batch summarization through a provider's batch API (jmfts_batch/README.md)
 jmfts-batch-worker --help
 
+# Retrieval evaluation (jmfts_core/eval/): BEIR ingest + nDCG@10/MAP/recall/MRR, one JSON
+# per dataset in ./eval-results/. Needs --data-dir or JMFTS_EVAL_DATA_DIR, and a database
+# holding nothing but BEIR corpora (point JMFTS_DB_NAME at one). Over-window docs: error.
+jmfts-eval beir --list
+jmfts-eval beir -d scifact --data-dir DIR --methods vector bm25 hybrid 'vector->crossenc@100'
+
 # Interactive API docs, generated from the live route table — Swagger UI at /docs, ReDoc at
 # /redoc, the document at /openapi.json. All three answer without a token; Authorize with
 # JMFTS_API_TOKEN before trying an operation. Tag descriptions come from the service class

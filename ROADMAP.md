@@ -610,7 +610,7 @@ the table is not pruned.
 | 2026-03 | Qwen3-32B KV cache compression | 80K context, 1.9% PPL cost, 96% NIAH retrieval | — |
 | 2026-03 | BEIR baseline: SciFact, NFCorpus, FiQA | 3-dataset baselines; hybrid beats ColBERTv2 and BM25+CE on SciFact | — |
 | 2026-03 | Hybrid weight tuning (successive halving) | Optimal: vector 0.86 / bm25 0.14; fulltext dropped; FiQA +11% | — |
-| 2026-07 | BEIR TREC-COVID (completes the 4-dataset suite) | Vector-dominant: vector 0.841 / hybrid-tuned 0.837 / rrf 0.783 / bm25 0.580 nDCG@10; equal-weight RRF costs ~5.4 pts | 200c5fe |
+| 2026-07 | BEIR TREC-COVID (completes the 4-dataset suite) | Vector-dominant: vector 0.841 / hybrid-tuned 0.837 / rrf 0.783 / bm25 0.580 nDCG@10; equal-weight RRF costs ~5.4 pts | 200c5fe † |
 | 2026-03 | MaxSim reranking evaluation | Helps NFCorpus +3.4%, hurts FiQA; eliminated from hybrid by the tuner | — |
 | 2026-03 | MaxSim tier sweep on BEIR (5–50% tokens) | Monotonic degradation; no sweet spot; ~80 ms/tier; never beats hybrid | — |
 | 2026-03 | MultiHop-RAG benchmark | MaxSim +13.8 pts H@4 over vector; dominates on multi-hop queries | c3eb0ac |
@@ -621,6 +621,13 @@ the table is not pruned.
 | 2026-09 | `link_type` index on `document_links`, 48 configurations | **Do not build it**: faster in 3, slower in 8, indistinguishable in 37 | — |
 | 2026-09 | Container nodes versus their descendants, 10 queries × 12 containers | The container outscored every descendant it contains 53 of 59 times — which is why containers are projected rather than excluded | 188e973 |
 | 2026-10 | Prose chunk window, issue #2 third arm: `sentence_window` against the shipped `sentence_packed`/120, MaxSim at tier 10 | recall@10 **0.421** against **0.210**, noise floor 0.023 — but chunk size was not held constant between the arms, so this is not yet a reading of the strategy alone. The prose default is a decision, not a settled value. Copied here 2026-10-17 from the 2026-10-14 status read, which is rewritten every read; the arms' setup is on issue #2 | — |
+
+† *Marked 2026-10-18.* `200c5fe` is a commit on the history before 0.1.0, which is not in
+`master`'s ancestry or any release tag's: `master` was re-rooted at 0.1.0 and shares no
+commit with that history, so the hash does not resolve from here. The harness it changed
+(`benchmarks/beir/`: graded-qrel metrics and equal-weight RRF) was not carried across
+either, and is restored for 0.8.0 as `jmfts-eval` in `jmfts_core/eval/`, with that commit's
+metric fix in `jmfts_core/eval/metrics.py`. The row is left as it was recorded.
 
 **One decision this log exists to explain: JMFTS owns no GPU model.** Summarization,
 read-side synthesis and fact extraction are calls to an injectable external

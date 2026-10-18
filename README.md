@@ -48,6 +48,24 @@ Per-dataset weight tuning moves SciFact and NFCorpus by under a point. The full
 breakdown, the caveats, and the comparisons against published ColBERTv2 and
 SPLADE++ numbers are recorded in the development repository, not in this tree.
 
+**Reproducing it.** These numbers were measured between 2026-03 and 2026-07, before
+0.1.0, by a harness the 0.1.0 tree did not carry; from 0.8.0 it ships as `jmfts-eval`.
+Against an empty database kept for the purpose (it refuses one holding anything else):
+
+```bash
+jmfts-eval beir --suite full --data-dir DIR --methods vector bm25 hybrid
+```
+
+It downloads each dataset into `DIR` if absent, ingests it through the same write
+path as `POST /documents`, and writes one JSON per dataset into `eval-results` in
+the working directory, recording the commit, host, models and how many documents
+were left out. The table above has not been re-measured with it yet. Two things
+differ from the runs that produced it: the 2026-03 runs embedded a document longer
+than the 512-token token window as a truncated prefix, which the embedder has
+refused since 2026-07 (`--over-window skip` leaves such documents out and counts
+them; nothing is truncated); and a document now keeps 35% of its token vectors
+rather than 50%.
+
 **One thing worth knowing before you rely on it.** `?rerank=true` is unmeasured.
 The cross-encoder second stage loads a standard `CrossEncoder`
 (`JMFTS_RERANKER_MODEL`, default `cross-encoder/ms-marco-MiniLM-L-6-v2`), and it
@@ -77,6 +95,7 @@ jmfts-server --port 9000         # ...or override one setting for this run
 jmfts-server --help              # what the JMFTS_* defaults currently resolve to
 jmfts-worker                     # drain the ingest queue in its own process
 jmfts-batch-worker --help        # summarize:llm through a provider's batch API
+jmfts-eval beir --list           # the BEIR datasets jmfts-eval can measure (see Status)
 ```
 
 With `[web]` installed, `http://localhost:8100/app/` is a console over the same REST API any
