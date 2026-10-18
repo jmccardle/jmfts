@@ -1,6 +1,6 @@
 # JMFTS Roadmap
 
-Last updated: 2026-10-17 (the Status section, known gaps 11–13 — gap 11 decided the same day — and two citations marked held back). **This file is open work; `CHANGELOG.md` is what shipped.** Where
+Last updated: 2026-10-18 (the Status section, after 0.7.1). Before that 2026-10-17 (the Status section, known gaps 11–13 — gap 11 decided the same day — and two citations marked held back). **This file is open work; `CHANGELOG.md` is what shipped.** Where
 the two would say the same thing, this one says nothing and points there.
 
 The 2026-09-17 pass re-read one section — the job system — against `master` at `8e7ccba`, and
@@ -28,9 +28,22 @@ internal file at its own date and has not been re-checked.
 
 ## Status
 
+**Read 2026-10-18, after the 0.7.1 tag, and it supersedes everything below it in this section.**
+`master` is `v0.7.1` (`dddb82d`); PyPI carries `jmfts`, `jmfts-client` and `jmfts-web` 0.7.1.
+Next is **0.8.0**. "audit #N" below numbers an item of the 0.7.1 preview audit, not a tracker
+issue — tracker #6 (the tokenizer) and #9 (the token-proxy test, closed) are unrelated.
+
+| | |
+|---|---|
+| In progress | `held-0.8.0/beir-eval`, 2 commits ahead of `master`: the BEIR harness recreated on current code. Its SciFact and NFCorpus runs need GPU time, coordinated through the host coordinator rather than started here |
+| Next, no decision needed | one box per line instead of one per chunk (audit #6); `jmfts-ui` and `jmfts-web` overlays checking `rendition_hash`; a verb that re-runs one task, which an office document ingested before 0.7.1 needs to get its preview back (it answers 409 until then); deleting a large document runs out of memory because no relationship sets `passive_deletes`, which hits `DELETE /documents/{id}` as well as the BEIR harness; #47 `extra="forbid"`; #46 collection-level options |
+| Next, needs a design change | legacy `.doc`/`.ppt`/`.xls` text (audit #9), which needs the "current representation" change `render_tasks.py` names |
+| Decisions open | #44 (option 1: detect tables on a de-rotated copy); #52 (a corpus root holding itself out of default search); #51 (empty `JMFTS_API_TOKEN`: warn or refuse to start); the `QUERIES` floor in `tests/test_maxsim_recall.py` — two of four gate readings on 2026-10-18 cleared it by 1 and 2 documents; milestones for the presearch issues #48–#55, none of which has one; #45 LLM retry ownership |
+| External blockers | #8 waits on tau R1; #22 waits on real Excel-saved workbooks; the BEIR runs wait on a GPU slot |
+
 **Released: 0.7.1, 2026-10-18**, the preview audit's patch release. Deferred out of it: one
 box per line instead of one per chunk (audit #6), the client overlays checking
-`rendition_hash`, a verb that re-runs one task, legacy `.doc`/`.ppt`/`.xls` text (#9, which
+`rendition_hash`, a verb that re-runs one task, legacy `.doc`/`.ppt`/`.xls` text (audit #9, which
 needs the "current representation" change `render_tasks.py` names), and #44 option 1.
 
 **Released: 0.7.0, 2026-10-17.** `CHANGELOG.md` is what it carries. Deferred out of it: the
