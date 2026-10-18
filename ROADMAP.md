@@ -35,12 +35,12 @@ issue — tracker #6 (the tokenizer) and #9 (the token-proxy test, closed) are u
 
 | | |
 |---|---|
-| In progress | `held-0.8.0/beir-eval`, 2 commits ahead of `master`: the BEIR harness recreated on current code. Its SciFact and NFCorpus runs need GPU time, coordinated through the host coordinator rather than started here |
+| Merged for 0.8.0 | `jmfts-eval`, the BEIR harness recreated on current code, with SciFact and NFCorpus re-measured on 2026-10-18 (Experiment Log). FiQA and TREC-COVID are not re-measured; they need the same GPU slot |
 | Next, no decision needed | one box per line instead of one per chunk (audit #6); `jmfts-ui` and `jmfts-web` overlays checking `rendition_hash`; a verb that re-runs one task, which an office document ingested before 0.7.1 needs to get its preview back (it answers 409 until then); deleting a large document runs out of memory because no relationship sets `passive_deletes`, which hits `DELETE /documents/{id}` as well as the BEIR harness; #47 `extra="forbid"`; #46 collection-level options |
 | Next, needs a design change | legacy `.doc`/`.ppt`/`.xls` text (audit #9), which needs the "current representation" change `render_tasks.py` names |
 | Decided 2026-10-18 | the presearch issues #48–#55 are all in the 0.8.0 milestone; #51: an empty `JMFTS_API_TOKEN` makes the server refuse to start, with an error naming the variable, instead of generating a one-off token |
 | Decisions open | #44 (option 1: detect tables on a de-rotated copy); #52 (a corpus root holding itself out of default search; in 0.8.0, design not chosen); the `QUERIES` floor in `tests/test_maxsim_recall.py` — two of four gate readings on 2026-10-18 cleared it by 1 and 2 documents; #45 LLM retry ownership |
-| External blockers | #8 waits on tau R1; #22 waits on real Excel-saved workbooks; the BEIR runs wait on a GPU slot |
+| External blockers | #8 waits on tau R1; #22 waits on real Excel-saved workbooks; a FiQA and TREC-COVID re-measurement waits on a GPU slot |
 
 **Released: 0.7.1, 2026-10-18**, the preview audit's patch release. Deferred out of it: one
 box per line instead of one per chunk (audit #6), the client overlays checking
@@ -621,6 +621,7 @@ the table is not pruned.
 | 2026-04 | Quantization tolerance hypothesis | **Confirmed**: MaxSim aggregation absorbs 4-bit noise; 0.260 point-query recall ≠ 1 pt multi-hop loss | — |
 | 2026-09 | `link_type` index on `document_links`, 48 configurations | **Do not build it**: faster in 3, slower in 8, indistinguishable in 37 | — |
 | 2026-09 | Container nodes versus their descendants, 10 queries × 12 containers | The container outscored every descendant it contains 53 of 59 times — which is why containers are projected rather than excluded | 188e973 |
+| 2026-10 | BEIR SciFact and NFCorpus re-measured with `jmfts-eval`, over-window documents skipped (297 and 213) | hybrid **0.6286** / **0.3358** nDCG@10; the drop from 2026-03 is the skipped documents (ceilings 0.8822 / 0.9798; each 2026-03 figure × its ceiling lands within 0.017 of the new). `vector→maxsim@200` −0.018 / +0.002 against vector, about 800 ms against about 22 ms a query. The README carries the table | 09ef9ec |
 | 2026-10 | Prose chunk window, issue #2 third arm: `sentence_window` against the shipped `sentence_packed`/120, MaxSim at tier 10 | recall@10 **0.421** against **0.210**, noise floor 0.023 — but chunk size was not held constant between the arms, so this is not yet a reading of the strategy alone. The prose default is a decision, not a settled value. Copied here 2026-10-17 from the 2026-10-14 status read, which is rewritten every read; the arms' setup is on issue #2 | — |
 
 † *Marked 2026-10-18.* `200c5fe` is a commit on the history before 0.1.0, which is not in
