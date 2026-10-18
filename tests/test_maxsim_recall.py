@@ -51,6 +51,7 @@ width of the whole measurement.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import pytest
@@ -89,7 +90,12 @@ MINIMUM_RECALL = 0.90
 #: :attr:`Measured.gated_mean` lost it to accumulation order — ``sum()`` adds left to right,
 #: and over 200,000 shuffles of a 24-value multiset whose exact mean is 0.9 the result ranges
 #: from ``0.8999999999999996`` to ``0.9000000000000004``, straddling the comparison. The
-#: order is the order the queries came back in, which nothing fixes.
+#: query order IS fixed — it is :func:`query_texts` list order, and ``measured`` iterates
+#: that list — but which positions in it carry the short readings is decided by the HNSW
+#: graph, which is drawn afresh every build (`MEASURE_MAXSIM_MARGIN.md` 1.4). So the same
+#: multiset reaches ``sum()`` in a different arrangement from run to run, and the shuffle
+#: range above is the range a run can land in. (This said "which nothing fixes" until
+#: 2026-10-18; the order is fixed, the arrangement of values within it is not.)
 #:
 #: So this is the bottom of that range with a further 1e-15 under it, about 13 ULP below 0.9.
 #: It does not weaken the threshold: a single query losing a single neighbour reads
@@ -160,8 +166,62 @@ class Measured:
         return sum(self.opened) / len(self.opened)
 
 
+def _pattern(hits: list[tuple[int, int]]) -> str:
+    """One digit per query, in query order: how many of its exact top-N the arm LOST.
+
+    Lost rather than kept, because kept is almost always 10, which is two digits; ``0`` is
+    a full page. A query that lost all ten prints ``X``. Read across runs, the positions
+    that are non-zero every time are the stable deficit `MEASURE_MAXSIM_MARGIN.md` 3.1
+    describes, and the ones that move are the graph.
+    """
+    return "".join("X" if n - k >= 10 else str(n - k) for k, n in hits)
+
+
+def _record(readings, corpus, hits: dict[str, list[tuple[int, int]]]) -> None:
+    """Hand the numbers to `conftest.readings`, BEFORE any assertion reads them.
+
+    Integer hits out of the sum of the truth sizes, because that is what the mean is made
+    of: with a full exact top-``LIMIT`` for every query (200 documents, ``LIMIT`` = 10)
+    the mean is exactly ``hits / (LIMIT * QUERIES)``, and the floor is ``9 * QUERIES``
+    hits. The margin is in documents, which is the unit `MEASURE_MAXSIM_MARGIN.md` reads
+    it in — "four documents out of 240" says more than "0.0167".
+    """
+    data = {
+        "queries": QUERIES,
+        "limit": LIMIT,
+        "chunks": CHUNKS,
+        "token_rows": corpus.token_rows,
+        "documents": len(corpus.document_ids),
+        "minimum_recall": MINIMUM_RECALL,
+    }
+    lines = [
+        f"maxsim recall@{LIMIT}  tests/test_maxsim_recall.py  {QUERIES} queries, "
+        f"{corpus.token_rows} token rows over {len(corpus.document_ids)} documents"
+    ]
+    for arm in ("gated", "open"):
+        got = sum(k for k, _ in hits[arm])
+        total = sum(n for _, n in hits[arm])
+        floor = math.ceil(MINIMUM_RECALL * total - 1e-9)
+        data[arm] = {
+            "hits": got,
+            "of": total,
+            "mean": got / total,
+            "floor_hits": floor,
+            "margin_docs": got - floor,
+            "per_query_hits": [k for k, _ in hits[arm]],
+            "lost_pattern": _pattern(hits[arm]),
+        }
+        lines.append(
+            f"  {arm:<5}  {got}/{total} = {got / total:.4f}  margin {got - floor:+d} docs "
+            f"over the floor ({floor}/{total} = {MINIMUM_RECALL:.2f})"
+        )
+    for arm in ("gated", "open"):
+        lines.append(f"  lost per query, {arm:<5}  {data[arm]['lost_pattern']}")
+    readings.append({"name": "maxsim_recall", "lines": lines, "data": data})
+
+
 @pytest.fixture(scope="module")
-def measured(corpus_session):
+def measured(corpus_session, readings):
     """Seed the corpus, take ground truth per arm, then ask the shipped configuration.
 
     Truth is computed once per arm: it is a property of the query and the rows, and no ANN
@@ -170,20 +230,27 @@ def measured(corpus_session):
     no `SET hnsw.ef_search` at all — the appliance issues none either, and that is the
     configuration under measurement. `maxsim_search`'s own `SET LOCAL hnsw.iterative_scan`
     is left alone for the same reason: it IS the shipped configuration.
+
+    The integer hits beside each recall are for the report only (`_record`); every
+    assertion still reads the ``recall()`` floats it always read.
     """
     built = seed_split_corpus(corpus_session, CHUNKS)
     repo = SearchRepository(corpus_session)
     queries = query_texts(QUERIES)
     scores = {}
+    hits = {}
     for arm, principal in built.arms.items():
         token = set_principal(principal)
         try:
             truth = {q: exact_maxsim(repo, q, LIMIT) for q in queries}
-            scores[arm] = [
-                recall(ann_maxsim(repo, q, LIMIT, ef_search=None), truth[q]) for q in queries
+            got = [ann_maxsim(repo, q, LIMIT, ef_search=None) for q in queries]
+            scores[arm] = [recall(g, truth[q]) for g, q in zip(got, queries)]
+            hits[arm] = [
+                (len(set(g) & set(truth[q])), len(set(truth[q]))) for g, q in zip(got, queries)
             ]
         finally:
             reset_principal(token)
+    _record(readings, built.corpus, hits)
     return Measured(
         corpus=built.corpus,
         session=corpus_session,

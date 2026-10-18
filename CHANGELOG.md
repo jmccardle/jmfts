@@ -11,6 +11,18 @@ Dates are the release commit's date. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses semantic
 versioning with the caveat that it is pre-1.0, so a minor version may break the wire.
 
+## [Unreleased]
+
+### Changed
+
+- **The MaxSim and filtered recall gates print what they measured.** Every run of
+  `tests/test_maxsim_recall.py` and `tests/test_filtered_recall.py` ends with a `readings`
+  section, without `-s`: gated and open hits out of 240 with the margin over the floor in
+  documents, the token-row count, one digit per query for the neighbours it lost, and the
+  page fill of the two filtered-scan tests. `JMFTS_RECALL_REPORT=<path>` also appends them
+  as one JSON line; unset, nothing is written. No assertion, threshold, seed or `QUERIES`
+  moved. Three readings are in `docs/MEASURE_MAXSIM_MARGIN.md`'s head note.
+
 ## [0.7.0] — 2026-10-17
 
 **Chunks are measured in words, and a summary stops outliving its source.** The `max_words`

@@ -304,7 +304,37 @@ def test_shipped_order_by_reaches_the_index(db_session):
     )
 
 
-def test_the_native_order_by_does_not_truncate_under_the_read_gate(db_session):
+def _record(readings, name, got, limit, readable, truncated, plan=None):
+    """A page-fill reading for `conftest.readings`, taken before the test asserts on it.
+
+    These two tests do not take a mean; what they measure is how much of one page the
+    HNSW scan filled under the read gate, and whether it said so. That count is the
+    number, and on a red run it is the number the failure is about.
+    """
+    data = {
+        "returned": len(got),
+        "limit": limit,
+        "readable": len(readable),
+        "unreadable_nearer": UNREADABLE,
+        "scan_truncated": truncated,
+    }
+    if plan is not None:
+        data["reaches_index"] = EMBED_INDEX in plan
+    readings.append(
+        {
+            "name": f"filtered_recall.{name}",
+            "lines": [
+                f"filtered {name:<11} {len(got)}/{limit} returned under the read gate, "
+                f"{len(readable)} readable behind {UNREADABLE} unreadable nearer; "
+                f"scan_truncated={truncated}"
+                + ("" if plan is None else f"; {EMBED_INDEX} in plan={EMBED_INDEX in plan}")
+            ],
+            "data": data,
+        }
+    )
+
+
+def test_the_native_order_by_does_not_truncate_under_the_read_gate(db_session, readings):
     """Step 2. This test INVERTED, deliberately, and this is the record of it.
 
     It was `test_the_native_order_by_truncates_under_the_read_gate`, and it passed on
@@ -333,6 +363,7 @@ def test_the_native_order_by_does_not_truncate_under_the_read_gate(db_session):
         plan = _capture_plan(db_session, lambda: _search_as(db_session, outsider))
     finally:
         db_session.execute(text("SET LOCAL enable_seqscan = on"))
+    _record(readings, "full_page", got, LIMIT, readable, repo.scan_truncated, plan)
 
     assert EMBED_INDEX in plan, f"the assertion below must be about HNSW:\n{plan[:2000]}"
     assert len(got) == LIMIT, (
@@ -343,7 +374,7 @@ def test_the_native_order_by_does_not_truncate_under_the_read_gate(db_session):
     assert repo.scan_truncated is False, "a full page is not a short one"
 
 
-def test_a_short_page_says_it_is_short(db_session):
+def test_a_short_page_says_it_is_short(db_session, readings):
     """Step 3, and it is not made redundant by step 2.
 
     Both iterative modes stop at `hnsw.max_scan_tuples`, and a server too old for the GUC
@@ -360,6 +391,7 @@ def test_a_short_page_says_it_is_short(db_session):
     outsider, readable = _seed(db_session)
     over = len(readable) + LIMIT
     got, repo = _search_as(db_session, outsider, limit=over)
+    _record(readings, "short_page", got, over, readable, repo.scan_truncated)
 
     assert len(got) < over, "the fixture must not be able to fill this page"
     assert repo.scan_truncated is True, (
