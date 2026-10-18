@@ -11,6 +11,41 @@ Dates are the release commit's date. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses semantic
 versioning with the caveat that it is pre-1.0, so a minor version may break the wire.
 
+## [Unreleased]
+
+### Changed
+
+- **A rendition rectangle stamps the rendition it was measured on, and a stale one is a
+  409.** `render_anchor` and `render_anchor.unresolved` now carry `rendition_hash` (the
+  sha256 of the rendition bytes; `PdfAnchor.rendition_hash` in the client). `/region
+  ?anchor=true` and `/image` refuse a rendition rectangle whose hash is not the stored
+  rendition's, naming `anchor:render` on the file node to re-run; the settling walk already
+  re-offers it when the hash changes. **A `render_anchor` written before this release has no
+  hash and is refused the same way** — it cannot be checked, so it is not trusted: re-run
+  `anchor:render` on each office document that has a rendition.
+
+### Fixed
+
+- **`anchor:render` located almost no list, table or tightly spaced text in a real
+  LibreOffice rendition.** Measured for the first time against `soffice` (7.4.7 and 24.2.7
+  agree), `located / renderable source blocks` before → after: bulleted list 3/7 → 7/7,
+  numbered list 2/6 → 6/6, ruled table with a merged cell 3/4 → 4/4, borderless table
+  2/3 → 3/3, address block of unspaced paragraphs 2/6 → 6/6, soft-hyphenated text 3/4 →
+  4/4, a deck with bullets, an untitled slide and a table 7/8 → 8/8. The matcher now strips
+  bullet glyphs (including Symbol-font private-use ones) and enumerators on both sides,
+  applies NFKC, ignores whitespace, hyphens and soft hyphens, compares table cells with
+  python-docx's repeated merged cells removed, and reads the rendition as one stream, so
+  several source paragraphs can share a rendered block and one source block can span
+  several. `tests/test_render_anchors_libreoffice.py` holds every case at 100%, and a new
+  CI job, `renditions`, installs LibreOffice to run it (about a minute).
+- **Speaker notes and the reader's own `# Slide N` / `## Notes` labels are reported as
+  `not_rendered`**, not `not_found_in_rendition`: a slide export never draws them.
+- **A failed `citation`, `anchor:source` or `anchor:render` no longer looks like a document
+  nobody anchored.** When one fails for good, every chunk without an anchor gets an
+  `.unresolved` row with code `citation_failed`, `anchor_source_failed` or
+  `anchor_render_failed` and the error. Retry policy, `settled` and the attempt record are
+  unchanged.
+
 ## [0.7.0] — 2026-10-17
 
 **Chunks are measured in words, and a summary stops outliving its source.** The `max_words`
