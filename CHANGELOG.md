@@ -11,6 +11,33 @@ Dates are the release commit's date. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses semantic
 versioning with the caveat that it is pre-1.0, so a minor version may break the wire.
 
+## [Unreleased]
+
+### Fixed
+
+- **The compose stack could not make an office rendition, so no office preview worked in
+  it.** `docker-compose.yml` ran Postgres and the API and nothing else: no LibreOffice and no
+  `JMFTS_CONVERT_URL`, which only `deploy/k8s/23-worker-convert.yaml` set. Its API image also
+  installed `[embed,web]` only, without the `office` readers or the `convert` client. Every
+  `.docx`, `.pptx` and `.xlsx` uploaded to it therefore could not be read (the readers raise
+  `OfficeStackNotInstalled`, which is PERMANENT), and `render:pdf` failed PERMANENT, so the document had no page image,
+  `anchor:render` was never planned, and the preview answered 409 even where the console
+  would have drawn the anchor. Compose now runs a `libreoffice` service from
+  `Dockerfile.libreoffice` with the k8s manifest's choices (no published port, no probe,
+  restart on exit, one replica, 4 GB), the API points at it, and the image installs
+  `[embed,web,office,convert]`. A document already ingested through compose is not repaired by
+  uploading it again, because the upload is deduplicated by content hash. Delete it and upload
+  it again; there is no verb that re-runs one task. See the README.
+- **The converter image had no Calibri, Cambria or CJK fonts.** `Dockerfile.libreoffice`
+  installed Liberation and DejaVu only. Liberation is metric-compatible with Arial, Times New
+  Roman and Courier New, not with Office's defaults since 2007, so a Calibri or Cambria
+  document was paginated in a substitute with different widths, giving different line breaks
+  and different pages. CJK text rendered as missing-glyph boxes, with no words for
+  `anchor:render` to align against. The image now adds `fonts-crosextra-carlito`,
+  `fonts-crosextra-caladea` and `fonts-noto-cjk`, which costs 97 MB (626 MB to 723 MB on
+  `debian:trixie-slim`; 91 MB of it is Noto CJK). Renditions made before this keep the old
+  pagination until the document is ingested again.
+
 ## [0.7.0] — 2026-10-17
 
 **Chunks are measured in words, and a summary stops outliving its source.** The `max_words`

@@ -112,11 +112,25 @@ least one changes an *index* — a database missing that delta answers, and answ
 with nothing in a log to say so.
 
 For a working PostgreSQL and API in one command, the compose file brings up
-`pgvector/pgvector:pg16` alongside the API:
+`pgvector/pgvector:pg16` alongside the API, and a LibreOffice converter beside them:
 
 ```bash
 docker compose up
 ```
+
+**Office page images and previews need the `libreoffice` service.** It is built from
+`Dockerfile.libreoffice` (LibreOffice behind unoserver, no JMFTS in it), publishes no port,
+and the API reaches it through `JMFTS_CONVERT_URL=http://libreoffice:2003`. That is what
+`render:pdf` uses to paginate a `.docx`, `.pptx` or `.xlsx` into a stored PDF. Without it the
+document is still searchable, but `render:pdf` fails PERMANENT, so the document has no page
+image and its preview answers 409.
+
+Before 0.7.1 the compose stack had no converter, and its API image had neither the `office`
+readers nor the `convert` client, so an office document ingested through it has no rendition
+and, having never been read, no text either. Rebuild first (`docker compose up --build`).
+Uploading the same bytes again does not repair such a document: an upload is deduplicated by
+content hash and returns the existing node. There is no verb that re-runs one task, so delete
+the document (`DELETE /documents/{id}`, which removes its subtree) and upload it again.
 
 From a checkout, for development:
 

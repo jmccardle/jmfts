@@ -43,7 +43,14 @@ RUN pip install --no-cache-dir -e ./jmfts-web
 # the model stack by name. `[web]` is named here rather than left implicit: the editable
 # install above already satisfies its pin, so this declares the dependency without
 # resolving anything. See pyproject.toml.
-RUN pip install --no-cache-dir -e ".[embed,web]"
+#
+# `[office]` and `[convert]` because the compose stack beside this file runs a LibreOffice
+# (`Dockerfile.libreoffice`) and points this process at it with JMFTS_CONVERT_URL, and the
+# URL alone converts nothing: `render:pdf` needs the unoserver CLIENT (`convert`, pure
+# Python), and reading a .docx or .pptx — its text, and the blocks `anchor:render` aligns
+# against the rendition — needs `office` (+44 MB, lxml and Pillow). Until 0.7.1 this line
+# was `[embed,web]`, so an office upload to the compose stack had neither half.
+RUN pip install --no-cache-dir -e ".[embed,web,office,convert]"
 
 EXPOSE 8100
 # Overridden by compose (adds --reload); kept so the image is runnable standalone.
