@@ -322,3 +322,54 @@ def evidence(db_session):
         return EvidenceRepository(db_session).read_all(getattr(node, "id", node))
 
     return _read
+
+
+# ---------------------------------------------------------------------------
+# Readings — what a gate measured, printed whether it passed or not
+# ---------------------------------------------------------------------------
+
+import json  # noqa: E402
+from datetime import datetime, timezone  # noqa: E402
+
+#: Where one session's readings collect. On ``config.stash`` rather than a module global,
+#: so two sessions in one process (pytester) cannot see each other's.
+_READINGS = pytest.StashKey[list]()
+
+#: Set it to a path and every session that took a reading appends ONE JSON line there.
+#: Unset, nothing is written: the terminal section is the default and the only output.
+RECALL_REPORT_ENV = "JMFTS_RECALL_REPORT"
+
+
+@pytest.fixture(scope="session")
+def readings(request):
+    """``readings.append({"name": ..., "lines": [...], "data": {...}})`` — a gate's numbers.
+
+    A gate that asserts ``mean >= floor`` and prints nothing says nothing about its margin,
+    and a run-to-run trend cannot be read off a row of green dots. A test hands over what
+    it measured here, and ``pytest_terminal_summary`` prints it in every run — without
+    ``-s``, in CI logs, and on a red run beside the failure.
+
+    Append BEFORE asserting. A reading appended after the assertion is lost on exactly the
+    run that needed it.
+    """
+    return request.config.stash.setdefault(_READINGS, [])
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    taken = config.stash.get(_READINGS, [])
+    if not taken:
+        return
+    terminalreporter.section("readings")
+    for reading in taken:
+        for line in reading["lines"]:
+            terminalreporter.write_line(line)
+    path = os.environ.get(RECALL_REPORT_ENV)
+    if path:
+        record = {
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "exitstatus": int(exitstatus),
+            "readings": {r["name"]: r["data"] for r in taken},
+        }
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
+        terminalreporter.write_line(f"readings appended to {path} (${RECALL_REPORT_ENV})")

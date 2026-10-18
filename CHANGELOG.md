@@ -13,6 +13,16 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
 
 ## [Unreleased]
 
+### Changed
+
+- **The MaxSim and filtered recall gates print what they measured.** Every run of
+  `tests/test_maxsim_recall.py` and `tests/test_filtered_recall.py` ends with a `readings`
+  section, without `-s`: gated and open hits out of 240 with the margin over the floor in
+  documents, the token-row count, one digit per query for the neighbours it lost, and the
+  page fill of the two filtered-scan tests. `JMFTS_RECALL_REPORT=<path>` also appends them
+  as one JSON line; unset, nothing is written. No assertion, threshold, seed or `QUERIES`
+  moved. Three readings are in `docs/MEASURE_MAXSIM_MARGIN.md`'s head note.
+
 ### Fixed
 
 - **`PUT /templates/{id}` no longer confirms that a hidden template exists.** It validated

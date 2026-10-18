@@ -14,6 +14,27 @@ image and the device `.github/workflows/ci.yml` runs the suite on.
 > `scripts/measure_maxsim_margin.py`, `jmfts_core/repositories/search.py` and
 > `.github/workflows/ci.yml` have no commits after it. Nothing was changed below this note.
 
+> **Read again 2026-10-18, on 0.7.0 (`0e6027b`) plus the reporting change, and the gate now
+> prints what it measured.** Every run of `tests/test_maxsim_recall.py` ends with a
+> `readings` section — gated and open hits out of 240, the margin over 216 in documents,
+> the token-row count, and one digit per query for the neighbours it lost — and
+> `JMFTS_RECALL_REPORT=<path>` appends the same as one JSON line. Three whole-process runs,
+> `run_tests_docker.sh`, port 5516, 15,682 token rows each, all 7 tests green:
+>
+> | run | gated | margin | open | lost per query, gated | wall-clock |
+> |---:|---:|---:|---:|---|---:|
+> | 1 | 218/240 | +2 | 226/240 | `210021000131001122012011` | 126 s |
+> | 2 | 222/240 | +6 | 230/240 | `210021000100001122012011` | 280 s |
+> | 3 | 217/240 | +1 | 228/240 | `210031000111001122012400` | 418 s |
+>
+> The gated readings sit inside the 217–224 band of Part 2, run 3 on its floor. **Run 1's
+> open arm read 226/240, which is below finding 1's "never gone below 227/240"**; that
+> sentence was true of the 79 readings it counts and is not true of this tree's 82. The
+> gated arm still cleared the floor, so the control was not exercised. The eight queries
+> 3.1 found short in all 60 builds are short in all three; run 3's 4 at position 22 is on
+> a query 3.1 found short in 1 of 60. Wall-clock grew with host load (1-minute load 4.6 before
+> run 2, 12.3 before run 3, other sessions live) and is not a reading of the fixture's cost.
+
 4.4 named three accounts of the reading that failed public CI and said the one thing
 nobody had done was to **run the fixture enough times to get a distribution rather than a
 reading**. This is that distribution: **79 readings**, and no threshold was moved to fit
