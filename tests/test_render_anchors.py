@@ -33,6 +33,12 @@ The handler reports ``located_blocks`` against ``source_blocks`` on every attemp
 number is readable the day a real converter is in front of it. A fixture that had quietly
 passed with no rendition present at all would have been worse than no test; the schedule
 tests below are what rule that out.
+
+**0.7.1: that day came.** ``tests/test_render_anchors_libreoffice.py`` renders bullets,
+numbered lists, tables, merged paragraphs, hyphenation and a deck with notes through a real
+``soffice`` and holds the recovery rate to a floor; CI's ``renditions`` job runs it. What it
+found — every list, merged block and table lost — is what the matcher tests in section 2
+below now pin without LibreOffice.
 """
 
 from __future__ import annotations
@@ -61,6 +67,7 @@ from jmfts_core.citation_tasks import (  # noqa: E402
     ANCHOR_KIND_OOXML,
     ANCHOR_KIND_PDF,
     ANCHOR_NAME,
+    ANCHOR_UNRESOLVED_NAME,
     ANCHOR_OF_RENDITION,
     ANCHOR_OF_SOURCE,
     MIN_PREFIX_CHARACTERS,
@@ -69,7 +76,10 @@ from jmfts_core.citation_tasks import (  # noqa: E402
     UNRESOLVED_NO_BLOCK,
     UNRESOLVED_NO_SPAN,
     UNRESOLVED_NOT_IN_RENDITION,
-    align_to_rendition,
+    UNRESOLVED_ANCHOR_RENDER_FAILED,
+    UNRESOLVED_CITATION_FAILED,
+    UNRESOLVED_NOT_RENDERED,
+    align_runs,
     anchor_for_rendition_span,
     normalize_for_match,
     run_anchor_render,
@@ -77,6 +87,7 @@ from jmfts_core.citation_tasks import (  # noqa: E402
 from jmfts_core.ingest_tasks import (  # noqa: E402
     TASK_ANCHOR_RENDER,
     TASK_ANCHOR_SOURCE,
+    TASK_CITATION,
     TASK_RENDER_PDF,
     TASK_ROWS,
     explain_plan,
@@ -93,6 +104,7 @@ from jmfts_core.models.task_queue import (  # noqa: E402
     WRITE_SUBTREE,
     TaskQueue,
 )
+from jmfts_core.office.extract import NOT_RENDERED, pptx_to_markdown  # noqa: E402
 from jmfts_core.probe import detect_format, probe_patterns  # noqa: E402
 from jmfts_core.render_tasks import run_render_pdf  # noqa: E402
 from jmfts_core.repositories.document import DocumentRepository  # noqa: E402
@@ -105,6 +117,7 @@ from jmfts_core.services.document_service import (  # noqa: E402
     RegionNotAddressable,
 )
 from jmfts_core.services.ingest_service import IngestService  # noqa: E402
+from jmfts_core.task_errors import ErrorType  # noqa: E402
 from tests.conftest import drain_ingest_queue  # noqa: E402
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -347,6 +360,12 @@ class TestNormalizeForMatch:
         assert normalize_for_match("RETRIEVAL") == normalize_for_match("Retrieval")
 
 
+def align_to_rendition(source, rendered):
+    """The first rendered block of each run — the shape these tests were written against
+    before 0.7.1 let a source block share or span rendered blocks."""
+    return [run[0] if run is not None else None for run in align_runs(source, rendered)]
+
+
 class TestAlignToRendition:
     def test_a_repeated_block_resolves_to_the_copy_in_document_order(self):
         """Part 5's first named failure mode — "the text appears more than once" — answered
@@ -386,6 +405,58 @@ class TestAlignToRendition:
         source = ["beta", "alpha"]
         rendered = ["alpha", "beta"]
         assert align_to_rendition(source, rendered) == [1, None]
+
+    def test_several_source_blocks_merged_into_one_rendered_block_are_all_located(self):
+        """Audit item #10, measured: PyMuPDF reads a tightly spaced list or an address block
+        as ONE block. Every source paragraph in it is located, not only the first — and a
+        short one is located because the position is pinned by the block before it."""
+        source = ["officeoftheregistrar", "buildingseven", "longroad", "after"]
+        rendered = ["officeoftheregistrarbuildingsevenlongroad", "after"]
+        assert align_runs(source, rendered) == [(0, 0), (0, 0), (0, 0), (1, 1)]
+
+    def test_a_short_first_item_of_a_merged_block_is_confirmed_by_the_one_after_it(self):
+        """``yes`` inside a longer block is still refused on its own; it is accepted when
+        the next source block's text is what follows it, which a coincidence would not be."""
+        rendered = ["shortitemthesecondlistitemislonger"]
+        assert align_runs(["shortitem", "thesecondlistitemislonger"], rendered) == [
+            (0, 0),
+            (0, 0),
+        ]
+        assert align_runs(["shortitem"], rendered) == [None]
+
+    def test_one_source_block_spread_over_several_rendered_blocks_is_one_run(self):
+        """A borderless table: one markdown block in the source, one rendered block per
+        row."""
+        source = ["stageownerrenderingplatformteam", "after"]
+        rendered = ["intro", "stageowner", "renderingplatformteam", "after"]
+        assert align_runs(source, rendered) == [(1, 2), (3, 3)]
+
+
+class TestNormalizeWhatTheRendererDrew:
+    """Audit items #5, #14 and #16, each as LibreOffice 7.4 / 24.2 printed it."""
+
+    def test_bullet_glyphs_and_enumerators_come_off_anywhere_in_the_block(self):
+        #  is the Symbol-font bullet LibreOffice draws for Word's "List Bullet".
+        source = normalize_for_match("- First item") + normalize_for_match("- Second item")
+        assert normalize_for_match(" First item  Second item") == source
+        assert normalize_for_match("• First item ◦ Second item") == source
+        assert normalize_for_match("1. First item 2. Second item") == source
+        assert normalize_for_match("a) First item (ii) Second item") == source
+
+    def test_hyphenation_soft_hyphens_and_ligatures_agree(self):
+        source = normalize_for_match("the counter­productive reorganization")
+        assert normalize_for_match("the counter- productive reorganization") == source
+        assert normalize_for_match("the counterproductive re-\norganization") == source
+        assert normalize_for_match("an eﬃcient ﬁnding") == normalize_for_match(
+            "an efficient finding"
+        )
+
+    def test_a_merged_cell_python_docx_repeats_matches_the_one_cell_rendered(self):
+        source = "| Region | Q1 |\n| --- | --- |\n| Total<br> | Total<br> |"
+        rendered = "| Region | Q1 |\n| --- | --- |\n| Total |  |"
+        assert normalize_for_match(source) == normalize_for_match(rendered)
+        # And a borderless rendering, one row per line with no pipes at all.
+        assert normalize_for_match(source) == normalize_for_match("Region Q1\nTotal")
 
 
 # ---------------------------------------------------------------------------
@@ -837,3 +908,181 @@ class TestWhatTheViewerIsGiven:
         with pytest.raises(RegionNotAddressable) as caught:
             DocumentService(db_session)._pdf_anchor(chunk.id)
         assert "reflowed" in str(caught.value)
+
+
+# ---------------------------------------------------------------------------
+# 8. 0.7.1 — never rendered, stale rectangles, and failed tasks
+# ---------------------------------------------------------------------------
+
+
+class TestNotRendered:
+    def test_a_span_made_only_of_never_drawn_blocks_says_so(self):
+        """Audit item #21. Speaker notes and the reader's own labels are not text the
+        renderer lost; reporting them as ``not_found_in_rendition`` would send someone
+        looking for a conversion defect."""
+        blocks = [
+            {"start": 0, "end": 10, NOT_RENDERED: True},
+            {"start": 12, "end": 20, NOT_RENDERED: True},
+            {"start": 22, "end": 30},
+        ]
+        starts = [b["start"] for b in blocks]
+        assert anchor_for_rendition_span(blocks, starts, 0, 20) == (None, UNRESOLVED_NOT_RENDERED)
+        # One renderable block among them that was not found is the ordinary absence.
+        assert anchor_for_rendition_span(blocks, starts, 0, 30) == (
+            None,
+            UNRESOLVED_NOT_IN_RENDITION,
+        )
+
+    def test_the_pptx_reader_marks_notes_and_its_own_labels(self):
+        pptx = pytest.importorskip("pptx")
+        deck = pptx.Presentation()
+        slide = deck.slides.add_slide(deck.slide_layouts[6])
+        slide.notes_slide.notes_text_frame.text = "Say this out loud."
+        buffer = io.BytesIO()
+        deck.save(buffer)
+        markdown, meta = pptx_to_markdown(buffer.getvalue())
+        marked = {
+            markdown[b["start"] : b["end"]] for b in meta["source_blocks"] if b.get(NOT_RENDERED)
+        }
+        assert marked == {"# Slide 1", "## Notes", "Say this out loud."}
+
+
+class TestAStaleRectangleIsRefused:
+    """Audit item #12. ``render:pdf`` can replace a rendition under chunks whose rectangles
+    were measured on the old one."""
+
+    def test_the_rectangle_carries_the_hash_of_the_rendition_it_was_measured_on(
+        self, db_session, evidence, anchored
+    ):
+        node, outcome = anchored
+        stored = RenditionRepository(db_session).get(node.id, KIND_PDF).content_hash
+        rows = [evidence(c).get(RENDER_ANCHOR_NAME) for c in _chunks(db_session, node.id)]
+        assert any(rows)
+        assert {row["rendition_hash"] for row in rows if row} == {stored}
+        assert outcome.detail["rendition_hash"] == stored
+
+    def test_a_re_rendered_document_refuses_the_old_rectangle_and_names_the_re_run(
+        self, db_session, evidence, anchored
+    ):
+        node, _ = anchored
+        chunk = next(c for c in _chunks(db_session, node.id) if evidence(c).get(RENDER_ANCHOR_NAME))
+        DocumentService(db_session)._pdf_anchor(chunk.id)  # current: served
+
+        RenditionRepository(db_session).get(node.id, KIND_PDF).content_hash = "f" * 64
+        db_session.flush()
+        with pytest.raises(RegionNotAddressable) as caught:
+            DocumentService(db_session)._pdf_anchor(chunk.id)
+        assert "re-rendered" in str(caught.value)
+        assert f"re-run `anchor:render` on document {node.id}" in str(caught.value)
+
+    def test_a_rectangle_written_before_the_hash_existed_is_refused_not_trusted(
+        self, db_session, evidence, anchored
+    ):
+        """It cannot be checked, so it is not served as if it had been."""
+        node, _ = anchored
+        chunk = next(c for c in _chunks(db_session, node.id) if evidence(c).get(RENDER_ANCHOR_NAME))
+        old = dict(evidence(chunk)[RENDER_ANCHOR_NAME])
+        del old["rendition_hash"]
+        EvidenceRepository(db_session).write(chunk.id, RENDER_ANCHOR_NAME, old)
+        db_session.flush()
+        with pytest.raises(RegionNotAddressable) as caught:
+            DocumentService(db_session)._pdf_anchor(chunk.id)
+        assert "before 0.7.1" in str(caught.value)
+        assert "anchor:render" in str(caught.value)
+
+
+def _fail_terminally(session, task_type, node_id, error, error_type):
+    tasks = TaskQueueRepository(session)
+    task = tasks.enqueue(task_type, node_id, WRITE_SUBTREE, service_badge=None)
+    claimed = tasks.claim_next(f"test-{task_type}")
+    assert claimed is not None and claimed.id == task.id
+    tasks.mark_running(claimed)
+    attempt = tasks.fail(claimed, error=error, error_type=error_type)
+    session.flush()
+    return claimed, attempt
+
+
+class TestAFailedAnchorTaskIsNotAnAbsence:
+    """Audit item #11. A task that raised wrote nothing — its transaction rolled back — so its
+    chunks looked exactly like chunks nobody had tried to anchor."""
+
+    def test_a_permanently_failed_anchor_render_marks_every_unplaced_chunk(
+        self, db_session, evidence
+    ):
+        response = _upload(db_session, _anchored_docx())
+        drain_ingest_queue(db_session, max_tasks=200)
+        node = DocumentRepository(db_session).get(response.document_id)
+        task, attempt = _fail_terminally(
+            db_session,
+            TASK_ANCHOR_RENDER,
+            node.id,
+            "ValueError: the rendition would not open",
+            ErrorType.PERMANENT,
+        )
+        # The failure itself is untouched: failed, not retried, attempt recorded.
+        assert task.status == TASK_FAILED and task.retry_after is None
+        assert "failure_recorder_error" not in attempt.detail
+        chunks = _chunks(db_session, node.id)
+        assert chunks
+        for chunk in chunks:
+            row = evidence(chunk)[RENDER_ANCHOR_UNRESOLVED_NAME]
+            assert row["code"] == UNRESOLVED_ANCHOR_RENDER_FAILED
+            assert "would not open" in row["error"]
+            assert RENDER_ANCHOR_NAME not in evidence(chunk)
+        with pytest.raises(RegionNotAddressable) as caught:
+            DocumentService(db_session)._pdf_anchor(chunks[0].id)
+        assert "would not open" in str(caught.value)
+
+    def test_a_failure_that_will_be_retried_writes_nothing_yet(self, db_session, evidence):
+        response = _upload(db_session, _anchored_docx())
+        drain_ingest_queue(db_session, max_tasks=200)
+        node = DocumentRepository(db_session).get(response.document_id)
+        task, _ = _fail_terminally(
+            db_session, TASK_ANCHOR_RENDER, node.id, "OperationalError: blip", ErrorType.RETRYABLE
+        )
+        assert task.retry_after is not None
+        for chunk in _chunks(db_session, node.id):
+            assert RENDER_ANCHOR_UNRESOLVED_NAME not in evidence(chunk)
+
+    def test_a_chunk_that_kept_an_earlier_rectangle_is_not_given_a_second_answer(
+        self, db_session, evidence, anchored
+    ):
+        """Two rows, never both: the earlier rectangle stands (its hash refuses it if the
+        rendition moved), and only the chunks with no rectangle get the failure."""
+        node, _ = anchored
+        before = {c.id: RENDER_ANCHOR_NAME in evidence(c) for c in _chunks(db_session, node.id)}
+        assert any(before.values())
+        _fail_terminally(
+            db_session, TASK_ANCHOR_RENDER, node.id, "ValueError: boom", ErrorType.PERMANENT
+        )
+        for chunk in _chunks(db_session, node.id):
+            found = evidence(chunk)
+            if before[chunk.id]:
+                assert RENDER_ANCHOR_NAME in found
+                assert RENDER_ANCHOR_UNRESOLVED_NAME not in found
+            else:
+                assert found[RENDER_ANCHOR_UNRESOLVED_NAME]["code"] == (
+                    UNRESOLVED_ANCHOR_RENDER_FAILED
+                )
+
+    def test_a_failed_citation_marks_the_source_anchor_row(self, db_session, evidence):
+        from tests.corpus.fixtures import minimal_pdf
+
+        response = IngestService(db_session).upload_file(
+            UploadedFile(data=minimal_pdf(), filename="a.pdf", content_type="application/pdf")
+        )
+        drain_ingest_queue(db_session, max_tasks=200)
+        node = DocumentRepository(db_session).get(response.document_id)
+        chunks = _chunks(db_session, node.id)
+        assert chunks
+        repository = EvidenceRepository(db_session)
+        for chunk in chunks:
+            repository.delete(chunk.id, ANCHOR_NAME)
+        db_session.flush()
+        _fail_terminally(
+            db_session, TASK_CITATION, node.id, "ValueError: text mismatch", ErrorType.PERMANENT
+        )
+        for chunk in chunks:
+            row = evidence(chunk)[ANCHOR_UNRESOLVED_NAME]
+            assert row["code"] == UNRESOLVED_CITATION_FAILED
+            assert row["error"] == "ValueError: text mismatch"

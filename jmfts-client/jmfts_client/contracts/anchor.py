@@ -100,6 +100,15 @@ class PdfAnchor(BaseModel):
     #: presenting a partial box as a whole one.
     continues: Optional[list[int]] = None
 
+    #: The sha256 of the rendition bytes the rectangle was measured on, for
+    #: ``of="rendition"`` only (0.7.1). A re-render replaces the rendition and keeps the
+    #: chunks, so this is what tells a current rectangle from last pagination's: the server
+    #: refuses (409) a rendition anchor whose hash is not the stored rendition's, and one with
+    #: no hash at all, which was written before 0.7.1 and cannot be checked. A viewer drawing
+    #: the row client-side should compare it with the ``rendition`` evidence's
+    #: ``content_hash`` the same way.
+    rendition_hash: Optional[str] = None
+
 
 class CellsAnchor(BaseModel):
     """A rectangular region of one worksheet.
@@ -204,6 +213,12 @@ class UnresolvedAnchor(BaseModel):
 
     code: str
     reason: str
+    #: For a ``*_failed`` code (0.7.1): the error the anchor task's last attempt failed
+    #: with, so "this passage was never placed because the task died" is not read as "this
+    #: passage was never anchored". The task's attempt log holds the same text.
+    error: Optional[str] = None
+    #: For a ``render_anchor.unresolved`` row: the rendition the alignment looked in.
+    rendition_hash: Optional[str] = None
 
 
 class UnknownAnchorKind(ValueError):

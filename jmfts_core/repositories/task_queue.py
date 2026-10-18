@@ -33,9 +33,10 @@ which is what :meth:`complete`'s "the attempt's timing must be measured" always 
 
 from __future__ import annotations
 
+import logging
 import random
 from datetime import datetime, timezone
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
@@ -62,6 +63,42 @@ from jmfts_core.task_routing import BADGE_FROM_POLICY, BadgeRequest, resolve_bad
 #: Key for the transaction-scoped advisory lock that serialises claims. Arbitrary but
 #: fixed; two-int form so it cannot collide with a single-bigint advisory lock taken
 #: elsewhere. See the module docstring for why the claim needs it at all.
+logger = logging.getLogger(__name__)
+
+#: task type -> what to write when a task of that type fails FOR GOOD (no retry left).
+#:
+#: 0.7.1, audit item #11. The anchor tasks write per-chunk rows — an anchor, or an
+#: ``.unresolved`` row saying why not — and a run that raises writes neither, because its
+#: transaction is rolled back. The chunks then read exactly like chunks nothing has tried
+#: to anchor, which is a failure presented as an absence. A recorder runs in the SAME
+#: transaction as the failure record (under a savepoint, so a recorder that raises cannot
+#: take the failure record down with it) and writes the outcome the run could not.
+#:
+#: Called from :meth:`TaskQueueRepository.fail` and therefore on every terminal path — the
+#: worker's own failure, a reaped lease, a requeue that exhausted the cap — not only the
+#: worker's. It does not change the failure: status, retry policy, ``settled`` and the
+#: attempt record are decided exactly as before.
+TerminalFailureRecorder = Callable[[Session, TaskQueue, str], None]
+TERMINAL_FAILURE_RECORDERS: dict[str, TerminalFailureRecorder] = {}
+
+
+def register_terminal_failure_recorder(
+    task_type: str,
+) -> Callable[[TerminalFailureRecorder], TerminalFailureRecorder]:
+    """Register what ``task_type`` records when it fails for good. Duplicates are an error."""
+
+    def decorate(recorder: TerminalFailureRecorder) -> TerminalFailureRecorder:
+        existing = TERMINAL_FAILURE_RECORDERS.get(task_type)
+        if existing is not None and existing is not recorder:
+            raise ValueError(
+                f"task type {task_type!r} already has a terminal failure recorder ({existing!r})"
+            )
+        TERMINAL_FAILURE_RECORDERS[task_type] = recorder
+        return recorder
+
+    return decorate
+
+
 _CLAIM_LOCK_KEY = (0x4A4D_4653, 1)  # 'JMFS', slot 1
 
 #: Key for the lease reaper's lock. Same namespace, next slot: every worker runs the
@@ -778,10 +815,23 @@ class TaskQueueRepository:
         self.session.flush()
         self.session.refresh(task)
 
+        detail = dict(detail or {})
+        recorder = None if will_retry else TERMINAL_FAILURE_RECORDERS.get(task.task_type)
+        if recorder is not None:
+            try:
+                with self.session.begin_nested():
+                    recorder(self.session, task, error)
+            except Exception as exc:  # noqa: BLE001 - reported on the attempt, never dropped
+                # The task's failure is the primary fact and it stands. That its outcome
+                # could not also be written onto the nodes goes on the same attempt record,
+                # where whoever reads the failure reads this beside it.
+                logger.exception("terminal failure recorder for task %s raised", task.id)
+                detail["failure_recorder_error"] = f"{type(exc).__name__}: {exc}"
+
         return self._append_attempt(
             task,
             status="failed",
-            detail=dict(detail or {}),
+            detail=detail,
             produced=None,
             rung=None,
             error=error,
