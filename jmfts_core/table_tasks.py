@@ -34,9 +34,11 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from jmfts_client.contracts.anchor import ANCHOR_ROW, PdfAnchor
 from jmfts_core.atoms import (
     COST_CPU,
     EV_EXTRACTION,
+    EV_SOURCE_ANCHOR,
     EV_SOURCE_SPAN,
     EV_TABLE,
     EV_TEXT,
@@ -69,6 +71,29 @@ def table_key(page: int, index: int) -> str:
     even if an earlier page gained one, which a document-wide ordinal would not survive.
     """
     return f"p{page}.t{index}"
+
+
+def table_anchor(doc_id: int, t: dict) -> dict:
+    """The ``source_anchor`` row for one recorded table: ``{kind: pdf, page, bbox}``.
+
+    The same shape ``citation_tasks.anchor_for_span`` writes on a chunk, from the page and
+    box ``extract:text`` recorded for the table — no ``of``, because the box is the source
+    PDF's own geometry, which is what an absent ``of`` means. Built through the contract
+    model that READS the row, so the writer cannot spell an anchor the reader refuses.
+
+    Until 0.7.1 the page and box lived on the ``table`` row only, which neither
+    ``/region?anchor=true`` nor a viewer reads, and a PDF table node could not be previewed
+    (preview audit #7).
+    """
+    try:
+        anchor = PdfAnchor(page=t["page"], bbox=tuple(t["bbox"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"document {doc_id} table {table_key(t.get('page'), t.get('index'))} records "
+            f"page {t.get('page')!r} and bbox {t.get('bbox')!r}, which is not a page and a "
+            f"rectangle: {exc}"
+        ) from exc
+    return {"kind": anchor.kind, "page": anchor.page, "bbox": list(anchor.bbox)}
 
 
 def _table_ceiling(evidence: dict, params: dict) -> tuple[int, int]:
@@ -184,7 +209,12 @@ def _written_keys(session: Session, doc: Document) -> dict[str, int]:
 @register_task_handler(
     TASK_EXTRACT_TABLES,
     consumes=(f"{EV_TEXT}@self", f"{EV_EXTRACTION}@self"),
-    produces=(f"{EV_TABLE}@children", f"{EV_TEXT}@children", f"{EV_SOURCE_SPAN}@children"),
+    produces=(
+        f"{EV_TABLE}@children",
+        f"{EV_TEXT}@children",
+        f"{EV_SOURCE_SPAN}@children",
+        f"{EV_SOURCE_ANCHOR}@children",
+    ),
     write_mode=WRITE_CHILDREN,
     cost_class=COST_CPU,
     fanout=_TABLE_FANOUT,
@@ -196,6 +226,9 @@ def run_extract_tables(session: Session, task: TaskQueue) -> TaskOutcome:
     Each child holds ``content[start:end]`` exactly, with ``source_span`` set to that span
     and the page and bbox on its ``table`` evidence — a citation anchor the ``citation``
     pass never has to compute, and does not try to (it annotates ``chunk`` nodes only).
+    From 0.7.1 the same page and bbox are also written as the child's ``source_anchor``
+    (:func:`table_anchor`), because that row is what ``/region?anchor=true`` and a viewer
+    read; until then a PDF table node could not be previewed.
 
     ``with_tokens`` is decided per table from the tokenizer, as ``_write_table`` decides it
     per sheet. A table past the DOCUMENT window raises: no ``embed`` could take it, and a
@@ -240,8 +273,11 @@ def run_extract_tables(session: Session, task: TaskQueue) -> TaskOutcome:
     repo = DocumentRepository(session)
     queue = TaskQueueRepository(session)
     content = doc.content or ""
-    measured: list[tuple[dict, str, int]] = []
+    measured: list[tuple[dict, str, int, dict]] = []
     for t in tables:
+        # Built BEFORE any child is written, so a table whose recorded box is not a
+        # rectangle fails the run with nothing written (all or none, as above).
+        anchor = table_anchor(doc.id, t)
         text = content[t["start"] : t["end"]]
         # `check_fit`, so the count includes the retrieval prefix and special tokens the
         # embedder will add — the same count `profile:sheet` takes for the same decision.
@@ -252,11 +288,11 @@ def run_extract_tables(session: Session, task: TaskQueue) -> TaskOutcome:
                 f"tokens, past the {settings.embedding_doc_window}-token document window; "
                 "no embed path can take it"
             )
-        measured.append((t, text, tokens))
+        measured.append((t, text, tokens, anchor))
 
     written: list[int] = []
     document_vector_only: list[str] = []
-    for t, text, tokens in measured:
+    for t, text, tokens, anchor in measured:
         key = table_key(t["page"], t["index"])
         fits_token_window = tokens <= settings.embedding_token_window
         child_frontier = frontier if fits_token_window else without_token_vectors(frontier)
@@ -280,6 +316,10 @@ def run_extract_tables(session: Session, task: TaskQueue) -> TaskOutcome:
                     "fits_token_window": fits_token_window,
                 },
                 "source_span": [t["start"], t["end"]],
+                # The page and box again, as the row `/region?anchor=true` and every viewer
+                # read. The `table` row above keeps them too: it is this task's record of
+                # what it measured, and the anchor is the address a reader follows.
+                ANCHOR_ROW: anchor,
             },
             # The model does not run here; `embed` is its own task and the node is not
             # retrievable until it has run, which is what `in_flight` states.

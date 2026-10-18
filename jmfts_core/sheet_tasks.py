@@ -623,7 +623,15 @@ def run_profile_sheet(session: Session, task: TaskQueue) -> TaskOutcome:
         evidence={
             "profile": dict(profile_record, sheet_name=name),
             # The profile describes the whole sheet, so it is addressed at what it measured.
-            **_cells_anchor(name, used_range(measurement.rows, measurement.cols)),
+            **_cells_anchor(
+                name,
+                used_range(
+                    measurement.rows,
+                    measurement.cols,
+                    min_row=measurement.min_row,
+                    min_col=measurement.min_col,
+                ),
+            ),
         },
         # The model does not run here. `embed` is its own task and this node is not
         # retrievable until it has run, which is what `in_flight` states — the same
@@ -742,18 +750,48 @@ def _cells_anchor(sheet_name: str, bounds: Optional[CellRange]) -> dict:
     return {EV_SOURCE_ANCHOR: CellsAnchor(sheet=sheet_name, ref=bounds.ref).model_dump()}
 
 
+def _near_corner(measurements: dict) -> tuple[int, int]:
+    """``(min_row, min_col)`` of the measured used range, or a refusal naming the rung.
+
+    Recorded by ``profile:sheet`` from 0.7.1 (#22). A measurement without them was taken by
+    an earlier version, and anchoring from it would put the A1 assumption back in by
+    default, so this raises instead; ``profile:sheet`` runs before every rung that reads it.
+    """
+    min_row, min_col = measurements.get("min_row"), measurements.get("min_col")
+    if min_row is None or min_col is None:
+        raise ValueError(
+            "this sheet's `measurements` record no `min_row`/`min_col`, so they were taken "
+            "before profile:sheet measured the used range's near corner; re-run "
+            "profile:sheet before anchoring anything at the used range"
+        )
+    return int(min_row), int(min_col)
+
+
+def _measured_range(measurements: dict) -> Optional[CellRange]:
+    """The sheet's measured used range, tight on all four sides."""
+    rows, cols = int(measurements.get("rows") or 0), int(measurements.get("cols") or 0)
+    if rows < 1 or cols < 1:
+        return None
+    min_row, min_col = _near_corner(measurements)
+    return used_range(rows, cols, min_row=min_row, min_col=min_col)
+
+
 def _row_range(row_index: int, measurements: dict) -> Optional[CellRange]:
     """One worksheet row, across the sheet's measured width. What a record node came from.
 
     The width is ``profile:sheet``'s, the same one the table and the profile are anchored
-    at, so a record's region is a slice of its sheet's region and never wider than it. Column
-    A and not the record's first filled column: the row is the unit a person goes back to,
-    and Excel's row header selects all of it.
+    at, so a record's region is a slice of its sheet's region and never wider than it.
+
+    From the used range's leftmost column, and until 0.7.1 from column A — the row was taken
+    as the unit a person goes back to. When the sheet's region became tight (#22) that would
+    have made a record WIDER than its sheet whenever the data does not start in column A,
+    which breaks the slice rule above, and the columns it gave up hold nothing in any row.
     """
     cols = int(measurements.get("cols") or 0)
     if cols < 1:
         return None
-    return CellRange(min_row=row_index, min_col=1, max_row=row_index, max_col=cols)
+    _, min_col = _near_corner(measurements)
+    return CellRange(min_row=row_index, min_col=min_col, max_row=row_index, max_col=cols)
 
 
 def _born(frontier) -> str:
@@ -917,10 +955,7 @@ def _write_table(
             },
             # The markdown is the rendering of the measured used range, so that is the
             # region this node is the whole of.
-            **_cells_anchor(
-                sheet_name,
-                used_range(int(measurements.get("rows") or 0), int(measurements.get("cols") or 0)),
-            ),
+            **_cells_anchor(sheet_name, _measured_range(measurements)),
         },
         # The model does not run here. `embed` is its own task and this node is not
         # retrievable until it has run, which is what `in_flight` states.

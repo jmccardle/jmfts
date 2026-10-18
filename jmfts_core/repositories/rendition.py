@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from jmfts_core.models.document import Document
 from jmfts_core.models.document_rendition import DocumentRendition
+from jmfts_core.models.task_queue import TASK_COMPLETED, TASK_FAILED, TaskQueue
 from jmfts_core.rendering import PDF_MEDIA_TYPE
 from jmfts_core.repositories.blob import BlobLeakError, BlobRepository, lob_exists, unlink_lob
 from jmfts_core.repositories.evidence import EvidenceRepository
@@ -272,13 +273,85 @@ def pdf_for(session: Session, document: Document) -> PdfSource:
     repo = RenditionRepository(session)
     row = repo.get(document.id, KIND_PDF)
     if row is None:
-        raise NoRenditionError(
-            f"document {document.id} is {detected or 'bytes nothing recognised'} and has no "
-            "PDF rendition, so this appliance has no page to draw. A rendition is produced "
-            "by the `render:pdf` task, which needs a LibreOffice: see jmfts_core/convert.py "
-            "for the two halves of tier 3, and re-run the task for this node once they are "
-            "present"
-        )
+        raise NoRenditionError(_why_no_rendition(session, document, detected))
     data = repo.read_bytes(document.id, KIND_PDF)
-    assert data is not None  # `get` found the row; `read_bytes` raises if the object is gone
+    if data is None:
+        # Was an `assert`, which `python -O` strips (0.7.0 preview audit #24). `get` found
+        # the row a statement ago and `read_bytes` raises when the OBJECT is gone, so None
+        # here means the ROW went in between: an eviction (`RenditionRepository.delete`)
+        # committed while this read was in progress. That is the absence above, reached
+        # late, and it is reported as one rather than handed on as an empty page.
+        raise NoRenditionError(
+            f"document {document.id}'s PDF rendition was deleted while it was being read; "
+            f"re-run `{RENDER_PDF_TASK}` for this node to make it again"
+        )
     return PdfSource(data=data, origin="rendition", rendition=row)
+
+
+#: ``ingest_tasks.TASK_RENDER_PDF``, spelled here because importing ``ingest_tasks``
+#: registers every task handler and a repository on the query path must not. Pinned against
+#: the original by ``tests/test_render_tasks.py``.
+RENDER_PDF_TASK = "render:pdf"
+
+
+def _why_no_rendition(session: Session, document: Document, detected: Optional[str]) -> str:
+    """Why ``document`` has no rendition, as whichever of four facts is true.
+
+    0.7.0 said one thing for all four — "`render:pdf` needs a LibreOffice, re-run the task"
+    — and that was wrong advice for three of them (preview audit #23): a ``.txt`` is not a
+    format anything here paginates, so no LibreOffice would help; a ``.docx`` uploaded a
+    second ago is still rendering, so the caller should wait; and a rendition that was made
+    and evicted needs a re-run, not a converter. Each is read from the queue and the attempt
+    log rather than inferred from the format, because those record what was decided.
+    """
+    what = f"document {document.id} is {detected or 'bytes nothing recognised'}"
+    latest = (
+        session.execute(
+            select(TaskQueue)
+            .where(TaskQueue.scope_document_id == document.id)
+            .where(TaskQueue.task_type == RENDER_PDF_TASK)
+            .order_by(TaskQueue.id.desc())
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
+    if latest is not None and latest.status == TASK_FAILED:
+        return (
+            f"{what} and has no PDF rendition: `{RENDER_PDF_TASK}` failed for it "
+            f"({latest.error_type or 'unclassified'}: {latest.error or 'no error recorded'}). "
+            "Rendering needs a LibreOffice, see jmfts_core/convert.py for the two halves of "
+            "tier 3; re-run the task for this node once they are present"
+        )
+    if latest is not None and latest.status == TASK_COMPLETED:
+        return (
+            f"{what} and has no PDF rendition, though `{RENDER_PDF_TASK}` completed for it: "
+            "the rendition was made and has since been evicted. Re-run the task for this "
+            "node to make it again"
+        )
+    if latest is not None:
+        return (
+            f"{what} and has no PDF rendition YET: `{RENDER_PDF_TASK}` is {latest.status} "
+            "for it. Ask again once it completes"
+        )
+
+    # Never queued. The planner's attempt record says why in its own words when the row was
+    # decided and came out not applicable, which is the "not renderable" case.
+    attempts = EvidenceRepository(session).read(document.id, "attempts")
+    for entry in reversed(attempts if isinstance(attempts, list) else []):
+        if not isinstance(entry, dict):
+            continue
+        detail = entry.get("detail")
+        skipped = detail.get("not_applicable") if isinstance(detail, dict) else None
+        reason = skipped.get(RENDER_PDF_TASK) if isinstance(skipped, dict) else None
+        if isinstance(reason, str):
+            return (
+                f"{what}, which this appliance does not paginate: `{RENDER_PDF_TASK}` was not "
+                f"planned for it ({reason}). There is no page of it to draw, and no converter "
+                "would change that"
+            )
+    return (
+        f"{what} and has no PDF rendition, and `{RENDER_PDF_TASK}` was never queued for it: "
+        "it was ingested before the task existed, or no plan recorded a decision about it. "
+        "Re-ingesting it plans the task if its format is one this appliance paginates"
+    )

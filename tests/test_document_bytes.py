@@ -771,3 +771,81 @@ class TestRegion:
         db_session.flush()
         with _as(outsider), pytest.raises(LookupError, match="not found"):
             DocumentService(db_session).get_document_region(pdf_node.id, page=0, bbox="10,10,20,20")
+
+
+# ---------------------------------------------------------------------------
+# 0.7.1 — why a node has no anchor, said per node (preview audit #7, #13, #23)
+# ---------------------------------------------------------------------------
+
+
+def _child(session, parent_id: int, usetype: str, **evidence) -> Document:
+    node = DocumentRepository(session).create(
+        title=f"a {usetype}",
+        content="words",
+        parent_id=parent_id,
+        usetype=usetype,
+        auto_embed=False,
+        evidence=evidence or None,
+    )
+    session.flush()
+    return node
+
+
+class TestWhyANodeIsUnanchored:
+    """0.7.0 answered every unanchored node with "`citation` is what writes one", which was
+    false for a table, a section, a worksheet, a file node and every format with no pages."""
+
+    def _refusal(self, session, node_id: int) -> str:
+        with pytest.raises(RegionNotAddressable) as caught:
+            DocumentService(session).get_document_region(node_id, anchor=True)
+        return str(caught.value)
+
+    def test_a_pdf_chunk_still_names_citation(self, db_session, pdf_node):
+        chunk, _ = _anchored_chunk(db_session, pdf_node.id)
+        EvidenceRepository(db_session).delete(chunk.id, ANCHOR_ROW)
+        message = self._refusal(db_session, chunk.id)
+        assert "`citation`" in message and f"file node {pdf_node.id}" in message
+
+    def test_a_file_node_is_the_whole_document_and_names_image(self, db_session, pdf_node):
+        message = self._refusal(db_session, pdf_node.id)
+        assert "is a file node" in message
+        assert f"/documents/{pdf_node.id}/image?page=N" in message
+        assert "citation" not in message
+
+    def test_a_section_says_its_chunks_carry_the_anchors(self, db_session, pdf_node):
+        section = _child(db_session, pdf_node.id, "section")
+        message = self._refusal(db_session, section.id)
+        assert "no task anchors a section" in message
+        assert "citation" not in message
+
+    def test_a_worksheet_points_at_its_cells_rather_than_at_a_re_ingest(self, db_session, pdf_node):
+        sheet = _child(db_session, pdf_node.id, "sheet")
+        message = self._refusal(db_session, sheet.id)
+        assert f"GET /documents/{sheet.id}/cells" in message
+        assert "re-ingest" not in message
+
+    def test_a_pdf_table_from_before_0_7_1_quotes_the_region_call_that_draws_it(
+        self, db_session, pdf_node
+    ):
+        table = _child(
+            db_session,
+            pdf_node.id,
+            "table",
+            table={"key": "p1.t0", "page": 1, "index": 0, "bbox": [50.0, 140.0, 410.0, 212.0]},
+        )
+        message = self._refusal(db_session, table.id)
+        assert "`extract:tables`" in message
+        assert f"/documents/{table.id}/region?page=1&bbox=50.0,140.0,410.0,212.0" in message
+        assert "not from a PDF" not in message and "`citation` writes" not in message
+
+    def test_a_node_of_a_format_with_no_pages_says_so(self, db_session):
+        node = _ingest(db_session, b"plain words, no pages\n", "notes.txt", "text/plain")
+        chunk = _child(db_session, node.id, "chunk")
+        message = self._refusal(db_session, chunk.id)
+        assert "came from a text file" in message
+        assert "citation" not in message
+
+    def test_image_of_a_text_file_says_it_is_not_paginated(self, db_session):
+        node = _ingest(db_session, b"plain words, no pages\n", "notes.txt", "text/plain")
+        with pytest.raises(NotAPdfSource, match="does not paginate"):
+            DocumentService(db_session).get_document_image(node.id, page=0)

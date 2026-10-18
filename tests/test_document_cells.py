@@ -249,14 +249,24 @@ class TestParseRef:
 
 
 class TestUsedRange:
-    def test_it_is_a1_to_the_last_measured_cell(self):
-        assert used_range(5, 3) == CellRange(min_row=1, min_col=1, max_row=5, max_col=3)
-        assert used_range(5, 3).ref == "A1:C5"
+    def test_it_is_the_first_measured_cell_to_the_last(self):
+        assert used_range(5, 3, min_row=1, min_col=1) == CellRange(
+            min_row=1, min_col=1, max_row=5, max_col=3
+        )
+        assert used_range(5, 3, min_row=1, min_col=1).ref == "A1:C5"
+
+    def test_data_that_starts_at_c5_is_addressed_from_c5(self):
+        """0.7.1, preview audit #22: every used range started at A1."""
+        assert used_range(40, 8, min_row=5, min_col=3).ref == "C5:H40"
+
+    def test_a_near_corner_outside_the_far_one_is_refused(self):
+        with pytest.raises(ValueError, match="not a rectangle"):
+            used_range(5, 3, min_row=6, min_col=1)
 
     def test_a_sheet_measured_to_hold_nothing_has_no_used_range(self):
         """`None`, not `A1:A1`. A 1x1 rectangle over a cell that holds nothing would answer
         a question about the sheet with a shape invented here."""
-        assert used_range(0, 0) is None
+        assert used_range(0, 0, min_row=0, min_col=0) is None
 
 
 # ---------------------------------------------------------------------------
@@ -459,6 +469,15 @@ class TestCellsBounds:
         assert (bounds.ref, source) == ("B4:H120", CELLS_REF_ANCHOR)
 
     def test_the_measured_used_range_is_the_default(self):
+        block = _sheet_block(rows=5, cols=3)
+        block["measurements"].update(min_row=2, min_col=2)
+        bounds, source = _cells_bounds(7, {}, block, None)
+
+        assert (bounds.ref, source) == ("B2:C5", CELLS_REF_USED_RANGE)
+
+    def test_a_measurement_from_before_the_near_corner_counts_from_a1(self):
+        """A sheet profiled before 0.7.1 recorded `rows`/`cols` counted from A1 and no near
+        corner, so A1 is the origin of the measurement that exists, not a guess."""
         bounds, source = _cells_bounds(7, {}, _sheet_block(rows=5, cols=3), None)
 
         assert (bounds.ref, source) == ("A1:C5", CELLS_REF_USED_RANGE)

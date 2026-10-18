@@ -275,11 +275,18 @@ class TestShape:
         # source is a rectangle of cells and it is known when the node is made, so the two
         # per-sheet tasks write the anchor themselves rather than a third task recovering it.
         # They write the unresolved row for exactly one case, a sheet holding no cells.
+        #
+        # AND `extract:tables` SINCE 0.7.1 (preview audit #7), for the same reason as the
+        # sheet tasks: a PDF table's page and box are known when the node is made. Producers
+        # are read at the granularity of the FACT, so it is listed here as well; in practice
+        # it never writes the unresolved half, because a recorded box that is not a
+        # rectangle fails the run (`table_tasks.table_anchor`) rather than being recorded.
         assert producers("source_anchor.unresolved") == {
             "citation",
             "anchor:source",
             "profile:sheet",
             "extract:sheet",
+            "extract:tables",
         }
 
 

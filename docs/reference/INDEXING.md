@@ -56,7 +56,7 @@ of the node above (legal only as a read).
 | `embed` | `text@self` | `embedding@self` | `model` |
 | `extract:facts` | `text@self`, `text@subtree` | — | `llm` |
 | `extract:sheet` | `sheet@self`, `sheet.measurements@self`, `blob@ancestor` | `sheet.shape@self`, `text@subtree`, `record@children`, `cell@subtree`, `table@children`, `source_anchor@children` | `cpu` |
-| `extract:tables` | `text@self`, `extraction@self` | `table@children`, `text@children`, `source_span@children` | `cpu` |
+| `extract:tables` | `text@self`, `extraction@self` | `table@children`, `text@children`, `source_span@children`, `source_anchor@children` | `cpu` |
 | `extract:text` | `matched@self`, `blob@self` | `text@self`, `extraction@self` | `cpu` |
 | `fetch:arxiv` | `source@self` | `blob@self`, `file@self` | `cpu` |
 | `fetch:path` | `source@self` | `blob@self`, `file@self` | `cpu` |

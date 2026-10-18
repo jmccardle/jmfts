@@ -40,6 +40,7 @@ from jmfts_core.pdf_extraction import _table_to_markdown, pdf_to_markdown  # noq
 from jmfts_core.repositories.document import DocumentRepository  # noqa: E402
 from jmfts_core.repositories.evidence import EvidenceRepository  # noqa: E402
 from jmfts_core.repositories.task_queue import TaskQueueRepository  # noqa: E402
+from jmfts_core.services.document_service import DocumentService  # noqa: E402
 from jmfts_core.services.ingest_service import IngestService  # noqa: E402
 from jmfts_core.models.task_queue import TaskQueue  # noqa: E402
 from jmfts_core.structure_tasks import _extract_pdf, _replan_after_extraction  # noqa: E402
@@ -216,6 +217,39 @@ class TestTheHandler:
         assert evidence.read(child.id, "source_span") == [start, start + len(TABLE_MD)]
         assert outcome.detail["tables_written"] == 1
         assert outcome.detail["pages"] == [0]
+
+    def test_each_child_is_anchored_at_its_page_and_box(self, db_session):
+        """0.7.1, preview audit #7: the page and box were on the `table` row only, which
+        `/region?anchor=true` does not read, so a PDF table could not be previewed. The row
+        is the chunk anchor's shape, with no `of` because it is the source PDF's geometry."""
+        node = _file_node(db_session)
+        run_extract_tables(db_session, _ScopedTask(node.id))
+
+        (child,) = _children(db_session, node.id)
+        anchor = EvidenceRepository(db_session).read(child.id, "source_anchor")
+        assert anchor == {"kind": "pdf", "page": 0, "bbox": [50.0, 140.0, 410.0, 212.0]}
+        found = DocumentService(db_session)._pdf_anchor(child.id)
+        assert (found.page, found.of) == (0, "source")
+
+    def test_a_recorded_box_that_is_not_a_rectangle_writes_nothing(self, db_session):
+        start = len(PROSE) + 2
+        node = _file_node(
+            db_session,
+            tables=[
+                {
+                    "page": 0,
+                    "index": 0,
+                    "bbox": [50.0, 140.0],
+                    "start": start,
+                    "end": start + len(TABLE_MD),
+                    "rows": 3,
+                    "cols": 3,
+                }
+            ],
+        )
+        with pytest.raises(ValueError, match="is not a page and a rectangle"):
+            run_extract_tables(db_session, _ScopedTask(node.id))
+        assert _children(db_session, node.id) == []
 
     def test_its_embed_is_planned_through_the_frontier(self, db_session):
         node = _file_node(db_session)
@@ -436,6 +470,15 @@ class TestThePipeline:
         ]
         assert node.settled == SETTLED_SETTLED
         assert TaskQueueRepository(db_session).unfinished_tasks_for(node.id) == []
+
+    def test_a_table_node_crops_to_its_own_anchor(self, db_session, table_pdf):
+        """Preview audit #7, end to end: `/region?anchor=true` on a table node is a picture."""
+        node = _ingest(db_session, table_pdf)
+        (child,) = [
+            c for c in _children(db_session, node.id) if c.produced_by == TASK_EXTRACT_TABLES
+        ]
+        payload = DocumentService(db_session).get_document_region(child.id, anchor=True)
+        assert payload.content.startswith(b"\x89PNG")
 
     def test_the_rung_is_not_enqueued_twice(self, db_session, table_pdf):
         """The re-plan decides only the rows gated on what extract:text measured."""

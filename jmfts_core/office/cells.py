@@ -628,14 +628,22 @@ def parse_ref(text: str) -> CellRange:
     return CellRange(min_row=min(rows), min_col=min(cols), max_row=max(rows), max_col=max(cols))
 
 
-def used_range(rows: int, cols: int) -> Optional[CellRange]:
-    """The rectangle ``A1:<cols><rows>``, or ``None`` when the sheet holds nothing.
+def used_range(rows: int, cols: int, *, min_row: int, min_col: int) -> Optional[CellRange]:
+    """The rectangle ``<min_col><min_row>:<cols><rows>``, or ``None`` when the sheet is empty.
 
-    ``rows`` and ``cols`` are ``profile:sheet``'s measurements — the last row and the last
-    column that hold a value — so this is the sheet's used range as it was MEASURED, not as
-    the file's optional ``<dimension>`` element declares it. The two disagree often enough
-    that the profile records both (``sheet_profile.py``), and the measured pair is the one
-    that describes the cells.
+    All four are ``profile:sheet``'s measurements — the first and last row, and the leftmost
+    and last column, that hold a value — so this is the sheet's used range as it was
+    MEASURED, not as the file's optional ``<dimension>`` element declares it. The two
+    disagree often enough that the profile records both (``sheet_profile.py``), and the
+    measured pair is the one that describes the cells.
+
+    **The near corner is required, and until 0.7.1 it was always A1** (preview audit #22).
+    That rectangle was loose rather than wrong — every cell it named outside the data is
+    empty — but a sheet whose table starts at C5 was addressed as ``A1:H40``, which is not
+    what a person selecting the data would write. A caller holding a measurement from before
+    the near corner was recorded passes ``1`` for both and says so where it does; this
+    function does not default them, because a default here would be the A1 assumption again,
+    made silently for every caller.
 
     ``None`` rather than ``A1:A1`` for an empty sheet. A sheet with no used range has no
     region to default to, and a 1x1 rectangle over a cell that holds nothing would answer a
@@ -643,7 +651,12 @@ def used_range(rows: int, cols: int) -> Optional[CellRange]:
     """
     if rows < 1 or cols < 1:
         return None
-    return CellRange(min_row=1, min_col=1, max_row=rows, max_col=cols)
+    if not (1 <= min_row <= rows and 1 <= min_col <= cols):
+        raise ValueError(
+            f"a used range from row {min_row} to {rows} and column {min_col} to {cols} is not "
+            "a rectangle; the near corner has to lie within the far one"
+        )
+    return CellRange(min_row=min_row, min_col=min_col, max_row=rows, max_col=cols)
 
 
 def read_region(

@@ -22,6 +22,8 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
   page fill of the two filtered-scan tests. `JMFTS_RECALL_REPORT=<path>` also appends them
   as one JSON line; unset, nothing is written. No assertion, threshold, seed or `QUERIES`
   moved. Three readings are in `docs/MEASURE_MAXSIM_MARGIN.md`'s head note.
+- The 0.6.0 "Office citations" entry is corrected in place: legacy `.doc`/`.ppt`/`.xls`
+  get a rendition and no text, chunks or anchors.
 
 ### Fixed
 
@@ -81,6 +83,28 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
   `fonts-crosextra-caladea` and `fonts-noto-cjk`, which costs 97 MB (626 MB to 723 MB on
   `debian:trixie-slim`; 91 MB of it is Noto CJK). Renditions made before this keep the old
   pagination until the document is ingested again.
+- **A PDF table node can be previewed.** `extract:tables` now writes `source_anchor`
+  `{kind: pdf, page, bbox}` on each table node, the same shape `citation` writes on a chunk,
+  from the page and box the `table` row already held. `/region?anchor=true` read only the
+  anchor, so a table node was a 409. Tables written by 0.7.0 have no anchor; their 409 now
+  quotes the explicit `/region?page=&bbox=` call that draws the same box.
+- **The 409 for a node with no anchor says why, per node.** It used to tell every such node
+  that "`citation` writes one … over a PDF text layer", which was false for a table, a
+  section, a worksheet, a file node and any format with no pages. A worksheet is now pointed
+  at `GET /documents/{id}/cells` (it never carries an anchor, so the old "re-ingest it" changed
+  nothing), a file node at `/image?page=N`, a section at its chunks.
+- **"No rendition" says which of four things is true.** `/image` and `/region` on a document
+  with no PDF rendition said `render:pdf` needs a LibreOffice, whatever the reason. They now
+  say whether `render:pdf` is still running (wait), failed (its recorded error, and the
+  LibreOffice hint), completed and was evicted (re-run it), or was never planned because the
+  format is not one this appliance paginates, such as `.txt` (no converter would help).
+- **Cells anchors no longer always start at A1.** `profile:sheet` measures the used range's
+  near corner (`measurements.min_row`/`min_col`), so a sheet whose data starts at C5 is
+  addressed `C5:H40` rather than `A1:H40`. A record row starts at the same column, so it
+  stays a slice of its sheet's region. A sheet profiled before this has no near corner, and
+  `/cells` serves its used range from A1, which is where that measurement counted from.
+- `pdf_for` checked a rendition read with `assert`, which `python -O` strips. It raises
+  `NoRenditionError` instead.
 
 ## [0.7.0] — 2026-10-17
 
@@ -432,6 +456,11 @@ plan is published and is the long version of everything below.
   every office chunk; `anchor:render` recovers a rectangle against the rendition and writes
   it to a separate row, labelled `of: "rendition"`, so a recovered rectangle is never
   mistaken for an exact one.
+  *(Corrected 2026-10-18: citations are for `.docx` and `.pptx`, and cells anchors for
+  `.xlsx`. A legacy `.doc`/`.ppt`/`.xls` is converted and rendered, but nothing reads the
+  converted package — `extract:text` has no `ole2` reader and `render_tasks.py` says the
+  conversion "has no consumer" — so it gets no text, no chunks and no anchors, and only its
+  rendition's pages can be shown.)*
 - **Leaf-to-parent projection.** `SearchRequest` and `HybridSearchRequest` take `project`:
   match over `match_limit` leaves (default 5 × limit), then return their parents scored by
   `max`, `sum` or `count`, each carrying `via`, the leaves that put it there.

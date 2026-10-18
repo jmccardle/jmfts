@@ -72,6 +72,7 @@ from jmfts_core.repositories.rendition import (
 )
 from jmfts_core.services.ingest_service import IngestService
 from jmfts_core.task_errors import ErrorType, classify_exception
+from tests.conftest import drain_ingest_queue
 
 # ---------------------------------------------------------------------------
 # Fixtures — bytes that need no LibreOffice
@@ -454,3 +455,56 @@ class TestPdfFor:
         with pytest.raises(NoRenditionError) as caught:
             pdf_for(db_session, node)
         assert "render:pdf" in str(caught.value)
+
+
+class TestWhyThereIsNoRendition:
+    """0.7.1, preview audit #23. 0.7.0 told every node with no rendition that `render:pdf`
+    needs a LibreOffice, which was wrong advice for a document still rendering, one whose
+    rendition was evicted, and one no converter could paginate."""
+
+    def test_the_task_name_is_the_one_the_queue_uses(self):
+        from jmfts_core.repositories.rendition import RENDER_PDF_TASK
+
+        assert RENDER_PDF_TASK == TASK_RENDER_PDF
+
+    def test_a_document_still_rendering_is_told_to_wait(self, db_session):
+        node = _office_node(db_session, fmt="docx")
+        _task(db_session, node.id, TASK_RENDER_PDF)
+        with pytest.raises(NoRenditionError, match=r"YET: `render:pdf` is pending") as caught:
+            pdf_for(db_session, node)
+        assert "LibreOffice" not in str(caught.value)
+
+    def test_a_failed_render_quotes_the_failure(self, db_session):
+        node = _office_node(db_session, fmt="docx")
+        row = _task(db_session, node.id, TASK_RENDER_PDF)
+        row.status = "failed"
+        row.error_type = "permanent"
+        row.error = "JMFTS_CONVERT_URL is blank"
+        db_session.flush()
+        with pytest.raises(NoRenditionError, match="failed for it") as caught:
+            pdf_for(db_session, node)
+        assert "JMFTS_CONVERT_URL is blank" in str(caught.value)
+        assert "LibreOffice" in str(caught.value)
+
+    def test_an_evicted_rendition_asks_for_a_re_run(self, db_session, monkeypatch, rendered_pdf):
+        node = _office_node(db_session, fmt="docx")
+        monkeypatch.setattr(
+            "jmfts_core.render_tasks.convert_bytes", lambda data, *, to: rendered_pdf
+        )
+        row = _task(db_session, node.id, TASK_RENDER_PDF)
+        run_render_pdf(db_session, row)
+        row.status = "completed"
+        db_session.flush()
+        RenditionRepository(db_session).delete(node.id, KIND_PDF)
+        with pytest.raises(NoRenditionError, match="evicted"):
+            pdf_for(db_session, node)
+
+    def test_a_format_nothing_paginates_says_no_converter_would_help(self, db_session):
+        uploaded = IngestService(db_session).upload_file(
+            UploadedFile(data=b"plain words\n", filename="notes.txt", content_type="text/plain")
+        )
+        drain_ingest_queue(db_session)
+        node = db_session.get(Document, uploaded.document_id)
+        with pytest.raises(NoRenditionError, match="does not paginate") as caught:
+            pdf_for(db_session, node)
+        assert "no converter would change that" in str(caught.value)

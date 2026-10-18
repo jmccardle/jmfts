@@ -557,6 +557,12 @@ class SheetMeasurement:
     name: str
     rows: int
     cols: int
+    #: The near corner of the used range: the first row and leftmost column holding a value,
+    #: 1-based, and 0 for a sheet that holds none. ``rows``/``cols`` stay counted from A1
+    #: (8.3's dimensions, and what the rendering covers); these are what a TIGHT reference to
+    #: the used range starts at (preview audit #22: every cells anchor started at A1).
+    min_row: int
+    min_col: int
     non_empty_cells: int
     fill_ratio: float
     declared_rows: Optional[int]
@@ -715,6 +721,10 @@ class _Scan:
 
     rows: int = 0
     cols: int = 0
+    #: The first row and the leftmost column that hold a value; 0 while none has been seen.
+    #: ``rows``/``cols`` are the far corner of the used range, and these are the near one.
+    min_row: int = 0
+    min_col: int = 0
     non_empty_cells: int = 0
     head_values: dict = field(default_factory=dict)
     head_kinds: dict = field(default_factory=dict)
@@ -759,6 +769,10 @@ def _scan(
             scan.non_empty_cells += 1
             if col_index > scan.cols:
                 scan.cols = col_index
+            if not scan.min_col or col_index < scan.min_col:
+                scan.min_col = col_index
+            if not scan.min_row:
+                scan.min_row = row_index
 
             if in_head:
                 scan.head_values[(row_index, col_index)] = text
@@ -1029,6 +1043,8 @@ def _assemble(
         name=name,
         rows=rows,
         cols=cols,
+        min_row=scan.min_row,
+        min_col=scan.min_col,
         non_empty_cells=scan.non_empty_cells,
         fill_ratio=fill_ratio,
         declared_rows=declared_rows,

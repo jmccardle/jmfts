@@ -77,6 +77,10 @@ def sheet_evidence_block(
         # `INGEST_SPEC.md` 8.3's table, spelled as 8.3 spells it.
         "rows": measurement.rows,
         "cols": measurement.cols,
+        # The used range's near corner, beside the far one 8.3 names. Not in 8.3's table:
+        # added in 0.7.1 so a cells anchor is tight rather than starting at A1 (#22).
+        "min_row": measurement.min_row,
+        "min_col": measurement.min_col,
         "fill_ratio": measurement.fill_ratio,
         "header_row": measurement.header_row.verdict,
         "header_col": measurement.header_col.verdict,

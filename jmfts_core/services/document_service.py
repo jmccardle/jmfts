@@ -78,7 +78,13 @@ from jmfts_client.contracts.document import (
 )
 from jmfts_core.embedding import TextTooLongError, get_embedding_service
 from jmfts_core.fact_extraction import extract_facts
-from jmfts_core.models.document import Document, USETYPE_FILE, USETYPE_SHEET
+from jmfts_core.models.document import (
+    Document,
+    USETYPE_FILE,
+    USETYPE_SECTION,
+    USETYPE_SHEET,
+    USETYPE_TABLE,
+)
 from jmfts_core.office.cells import (
     CELLS_READ_MAX,
     BadCellRef,
@@ -273,7 +279,13 @@ def _cells_bounds(
             "not run and this sheet's used range has not been measured. Name a region with "
             "`ref` to read one without it"
         )
-    bounds = used_range(int(rows), int(cols))
+    # The near corner was first measured in 0.7.1 (#22). A sheet profiled before that has
+    # only the far one, which was measured COUNTING FROM A1 — so A1 is not a guess for those
+    # rows, it is the origin the measurement that exists was taken from, and the rectangle
+    # served is exactly the one that version anchored at. Loose, never wrong.
+    min_row = measurements.get("min_row", 1)
+    min_col = measurements.get("min_col", 1)
+    bounds = used_range(int(rows), int(cols), min_row=int(min_row), min_col=int(min_col))
     if bounds is None:
         raise SheetSourceUnavailable(
             f"Sheet {sheet.get('name')!r} was measured to hold no cells ({rows} row(s) by "
@@ -1579,13 +1591,106 @@ class DocumentService:
         sheet = self._sheet_of(document_id)
         if sheet is None:
             # RegionNotAddressable, not SheetSourceUnavailable: this is raised inside
-            # `_pdf_anchor`, and /region and /page map only the former (409). Naming the
+            # `_pdf_anchor`, and /region and /image map only the former (409). Naming the
             # node's own id instead would name a /cells call that is itself a 409.
             raise RegionNotAddressable(
                 f"Document {document_id} carries a cells anchor ({ref}) and has no "
                 "worksheet node at or above it, so there is no node to ask for its cells"
             )
         return f"GET /documents/{sheet.id}/cells?ref={ref}"
+
+    def _why_unanchored(self, document_id: int) -> str:
+        """Why a node with neither ``source_anchor`` nor its ``.unresolved`` row has neither.
+
+        0.7.0 gave one answer to every node — "`citation` is what writes one and it runs over
+        a PDF text layer" — and it was false for most of the nodes that reached it (preview
+        audit #7, #13, #23): a PDF table, a section, a worksheet, a file node and every node
+        of a format with no pages. Each of those has its own true reason and its own next
+        call, so the message is decided by what the node is and what it came from.
+        """
+        repo = DocumentRepository(self.session)
+        node = repo.get(document_id)
+        if node is None:
+            raise LookupError(f"Document {document_id} not found")
+        head = (
+            f"Document {document_id} carries no {ANCHOR_NAME!r} evidence row, so it is not "
+            "addressed at any region of its source"
+        )
+
+        if node.usetype == USETYPE_SHEET:
+            # BY DESIGN, NOT A GAP. A sheet node is the region; nothing anchors it at itself,
+            # and re-ingesting would change nothing (0.7.0 said to).
+            return (
+                f"Document {document_id} is a worksheet, which is never anchored at a region "
+                "because it IS one, and a spreadsheet region is served as cells rather than as "
+                f"a picture of cells: GET /documents/{document_id}/cells (omit `ref` for the "
+                "measured used range)"
+            )
+        if self._sheet_of(document_id) is not None:
+            # A spreadsheet node ingested before `extract:sheet` / `profile:sheet` wrote
+            # `cells` anchors. `citation` is the wrong pointer: it never runs over a sheet.
+            return (
+                f"{head}. For a spreadsheet that anchor is written by `extract:sheet` "
+                "(records, tables) and `profile:sheet` (profiles), so a workbook ingested "
+                "before they wrote one has none; re-ingest it to get one"
+            )
+        if node.usetype == USETYPE_FILE:
+            return (
+                f"Document {document_id} is a file node, which is the whole document and is "
+                "not anchored at a region of itself. Its pages are served one at a time by "
+                f"GET /documents/{document_id}/image?page=N"
+            )
+        if node.usetype == USETYPE_SECTION:
+            return (
+                f"Document {document_id} is a section, and no task anchors a section: its "
+                "text is its children's, and each chunk under it carries its own anchor. Ask "
+                "for a chunk under it instead"
+            )
+
+        above = [a for a in repo.get_ancestors(document_id) if a.usetype == USETYPE_FILE]
+        if not above:
+            return f"{head}, and it sits under no file node, so it has no source to be in"
+        file_node = above[-1]
+        evidence = EvidenceRepository(self.session)
+        matched = evidence.read(file_node.id, "matched")
+        fmt = matched.get("format") if isinstance(matched, dict) else None
+
+        if fmt == "pdf" and node.usetype == USETYPE_TABLE:
+            # `extract:tables` writes the anchor from 0.7.1 on; a table written by 0.7.0 has
+            # its page and box on the `table` row only. That row is NOT read as an anchor
+            # here — one reader per row is the rule `_pdf_anchor` keeps — but its numbers are
+            # quoted, so the caller has the explicit /region call that draws the same box.
+            table = evidence.read(document_id, "table")
+            where = ""
+            if isinstance(table, dict) and "page" in table and "bbox" in table:
+                box = ",".join(str(v) for v in table["bbox"])
+                where = (
+                    f". Its `table` row records page {table['page']} and bbox [{box}], so "
+                    f"GET /documents/{document_id}/region?page={table['page']}&bbox={box} "
+                    "serves the same rectangle now"
+                )
+            return (
+                f"{head}. A PDF table's anchor is written by `extract:tables`, which writes "
+                "it beside the `table` row from 0.7.1 on, and this table was written before "
+                f"that; a PDF ingested now gets one{where}"
+            )
+        if fmt == "pdf":
+            return (
+                f"{head}. `citation` writes one for each chunk of a PDF, over its text layer, "
+                f"and has not for this node; the attempt log of file node {file_node.id} says "
+                "whether `citation` is still to run or failed"
+            )
+        if fmt in ("docx", "pptx"):
+            return (
+                f"{head}. For an office document `anchor:source` writes the exact address in "
+                "the package and `anchor:render` a rectangle on its rendition; neither has "
+                f"written a row for this node, and the attempt log of file node {file_node.id} "
+                "says why"
+            )
+        return (
+            f"{head}. It came from a {fmt or 'unrecognised'} file, and nothing in this "
+            "appliance places a node of that format on a page"
+        )
 
     def _pdf_anchor(self, document_id: int) -> PdfAnchor:
         """This node's own ``source_anchor``, as a page and a rectangle — or why it is not one.
@@ -1642,22 +1747,7 @@ class DocumentService:
                     f"Document {document_id} has no rectangle: "
                     f"{unresolved.get('reason')} (code {unresolved.get('code')!r})"
                 )
-            if self._sheet_of(document_id) is not None:
-                # A spreadsheet node ingested before `extract:sheet` / `profile:sheet` wrote
-                # `cells` anchors. `citation` is the wrong pointer: it never runs over a sheet.
-                raise RegionNotAddressable(
-                    f"Document {document_id} carries no {ANCHOR_NAME!r} evidence row, so it is "
-                    "not addressed at any region of its source. For a spreadsheet that anchor "
-                    "is written by `extract:sheet` (records, tables) and `profile:sheet` "
-                    "(profiles), so a workbook ingested before they wrote one has none; "
-                    "re-ingest it to get one"
-                )
-            raise RegionNotAddressable(
-                f"Document {document_id} carries no {ANCHOR_NAME!r} evidence row, so it is "
-                "not addressed at any region of its source. `citation` is what writes one "
-                "and it runs over a PDF text layer; name a `page` and a `bbox` to render a "
-                "rectangle this node does not claim"
-            )
+            raise RegionNotAddressable(self._why_unanchored(document_id))
         try:
             anchor = parse_anchor(row)
         except UnknownAnchorKind as exc:

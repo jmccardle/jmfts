@@ -687,7 +687,8 @@ class TestTheCellsAnchor:
         self, db_session, evidence, workbook_bytes
     ):
         """`Notes` gets no records and still gets a table, so the table is the only node that
-        can carry its address. B3 is its one value, so the used range is A1:B3."""
+        can carry its address. B3 is its one value, so the used range is B3:B3 — it was A1:B3
+        until 0.7.1, when the near corner began to be measured (preview audit #22)."""
         file_node = _ingest(db_session, workbook_bytes)
         sheet = _sheet_node(db_session, file_node, "Notes")
         table = _children(db_session, sheet.id, USETYPE_TABLE)[0]
@@ -695,7 +696,7 @@ class TestTheCellsAnchor:
         assert evidence(table)["source_anchor"] == {
             "kind": "cells",
             "sheet": "Notes",
-            "ref": "A1:B3",
+            "ref": "B3:B3",
         }
 
     def test_the_profile_is_addressed_at_the_sheet_it_measured(
