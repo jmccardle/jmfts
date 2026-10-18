@@ -37,12 +37,36 @@ services:
       timeout: 3s
       retries: 30
 
+  # The tier-3 converter: LibreOffice behind unoserver, and NOT a JMFTS. It is what makes an
+  # office rendition at all — without it `render:pdf` fails PERMANENT on every .docx, .pptx
+  # and .xlsx, the document settles without a page image, and its preview answers 409.
+  # Choices mirror deploy/k8s/23-worker-convert.yaml rather than restating them:
+  #   * NO published port. unoserver authenticates nothing, so anything that reaches 2003
+  #     can convert arbitrary bytes; it is reachable from `api` on the compose network and
+  #     from nowhere else, which is the ClusterIP-and-no-Ingress decision.
+  #   * NO healthcheck. unoserver speaks XML-RPC, not HTTP, and a port probe says only that
+  #     something listens. Liveness is the image's `--conversion-timeout`: a stuck
+  #     conversion exits the process, and `restart` brings it back. The worker sees a
+  #     connection error meanwhile, which is RETRYABLE, so the task waits rather than fails.
+  #   * ONE replica, 4 GB ceiling. unoserver serialises conversions through one warm
+  #     LibreOffice, and memory is what a large spreadsheet exhausts.
+  libreoffice:
+    build:
+      context: .
+      dockerfile: Dockerfile.libreoffice
+    restart: unless-stopped
+    mem_limit: 4g
+
   api:
     build: .
     command: uvicorn jmfts_core.rest.main:app --host 0.0.0.0 --port 8100 --reload
     depends_on:
       postgres:
         condition: service_healthy
+      # Started, not healthy: there is no health to wait for (above), and a `render:pdf`
+      # claimed before unoserver is listening retries on the connection error.
+      libreoffice:
+        condition: service_started
     environment:
       # Settings read env with the JMFTS_ prefix (config.py: env_prefix).
       JMFTS_DB_HOST: postgres
@@ -59,6 +83,13 @@ services:
       # jmfts-ui/, so typing this API's address into its address bar works as well as going
       # through Vite's proxy does. Add yours by exporting JMFTS_CORS_ORIGINS before `up`.
       JMFTS_CORS_ORIGINS: ${JMFTS_CORS_ORIGINS:-["http://127.0.0.1:5183","http://localhost:5183"]}
+      # Where `render:pdf` sends office bytes. This process runs the ingest worker in-thread
+      # (JMFTS_INGEST_WORKER_ENABLED defaults on), so it is the one that needs the URL.
+      JMFTS_CONVERT_URL: http://libreoffice:2003
+      # WHICH LibreOffice that is, recorded on every rendition. unoserver cannot report it,
+      # so it is declared; blank means nobody measured. Read the truth with
+      #   docker compose exec libreoffice soffice --version
+      JMFTS_CONVERT_VERSION: ${JMFTS_CONVERT_VERSION:-}
     ports:
       - "127.0.0.1:8100:8100"
     volumes:

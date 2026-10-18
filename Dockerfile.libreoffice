@@ -53,6 +53,17 @@ FROM ${BASE}
 # out in Arial or Times renders with metric-compatible substitutes or it renders wrong —
 # different line breaks, different pagination, and therefore a rectangle on a different
 # page from the words it was measured against.
+#
+# The same argument, for the fonts Office has defaulted to since 2007. `fonts-crosextra-
+# carlito` is metric-compatible with Calibri and `fonts-crosextra-caladea` with Cambria;
+# Liberation covers only Arial, Times New Roman and Courier New, so a document in Word's
+# default body font was paginated with whatever fontconfig picked instead. `fonts-noto-cjk` is
+# coverage rather than metrics: without it Chinese, Japanese and Korean text renders as
+# missing-glyph boxes, and `anchor:render` has no words on the page to align against.
+# (Added for 0.7.1. COST, measured 2026-10-18 by building this file with and without the
+# three on debian:trixie-slim, LibreOffice 25.2.3.2: 626 MB -> 723 MB, +97 MB, nearly all
+# of it `fonts-noto-cjk` — dpkg reports 91 MB installed for it, 2.7 MB for Carlito and
+# 0.3 MB for Caladea.)
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       libreoffice-writer \
@@ -62,6 +73,9 @@ RUN apt-get update \
       python3-venv \
       fonts-liberation \
       fonts-dejavu-core \
+      fonts-crosextra-carlito \
+      fonts-crosextra-caladea \
+      fonts-noto-cjk \
  && rm -rf /var/lib/apt/lists/*
 
 # --system-site-packages so the venv can see `uno`, which apt installed into the system
