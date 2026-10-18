@@ -181,6 +181,11 @@ jmfts-worker = "jmfts_core.worker:main"
 # nothing in jmfts_core depends on it.
 jmfts-batch-worker = "jmfts_batch.cli:main"
 
+# Retrieval evaluation (jmfts_core/eval/): `jmfts-eval beir` reproduces the README's BEIR
+# table from a release tag. Base-installable; the vector, maxsim and crossenc arms need the
+# `embed` extra like any other query embedding, and BM25 alone does not.
+jmfts-eval = "jmfts_core.eval.cli:main"
+
 [project.optional-dependencies]
 # THE MODEL STACK, and the reason it is an extra rather than a dependency.
 #

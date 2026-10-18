@@ -24,8 +24,10 @@ class Base(DeclarativeBase):
 # Must be an RLock, not a plain Lock: get_session_factory() acquires it and then
 # calls get_engine() while still holding it, and get_engine() re-acquires the same
 # lock. A non-reentrant Lock self-deadlocks there on the first DB touch of a process
-# whose entry point is get_session()/get_session_factory() (e.g. the BEIR loader),
-# rather than get_engine() first.
+# whose entry point is get_session()/get_session_factory() (e.g. `jmfts-eval`,
+# jmfts_core/eval/cli.py, whose first DB touch is get_session()), rather than
+# get_engine() first. (Until 2026-10-18 this named "the BEIR loader", which was not in
+# this tree between the 0.1.0 re-root and its restore as jmfts-eval.)
 _engine = None
 _SessionLocal = None
 _init_lock = threading.RLock()

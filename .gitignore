@@ -52,3 +52,6 @@ jmfts-needle/experiments/e6_index.npz
 # torch comes from an index chosen at install time. See the comment above `dependencies`
 # in pyproject.toml. A lock that nothing installs from or checks only rots (#31).
 uv.lock
+
+# jmfts-eval result files (jmfts_core/eval/cli.py); results live beside the run, not in the tree
+eval-results/

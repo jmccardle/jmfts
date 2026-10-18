@@ -62,6 +62,7 @@ import jmfts_core.office         # the office seam: importing it imports no read
 import jmfts_core.rdf            # the RDF seam: importing it imports no rdflib
 import jmfts_core.office.sheets  # 8.3's measurer, which reaches for BOTH at call time
 import jmfts_core.sketch         # the sketch seam, same rule
+import jmfts_core.eval.cli       # jmfts-eval: only the arms that embed reach the model stack
 
 heavy = sorted(m for m in ("torch", "sentence_transformers") if m in sys.modules)
 assert not heavy, f"importing the app pulled in {heavy}"
