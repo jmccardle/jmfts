@@ -148,6 +148,15 @@ def build_allowlist() -> set[str]:
         if name:
             names.add(name)
 
+    # 2b. `@register_terminal_failure_recorder` functions, dispatched by task-type string
+    # from `TaskQueueRepository.fail` (0.7.1).
+    from jmfts_core.repositories.task_queue import TERMINAL_FAILURE_RECORDERS
+
+    for recorder in TERMINAL_FAILURE_RECORDERS.values():
+        name = getattr(recorder, "__name__", "")
+        if name:
+            names.add(name)
+
     # 3. Contract classes and their fields — the wire shapes, read by Pydantic.
     from pydantic import BaseModel
     from pydantic_settings import BaseSettings

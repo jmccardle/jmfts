@@ -107,7 +107,12 @@ from jmfts_core.rendering import (
 )
 from jmfts_core.repositories.blob import BlobRepository
 from jmfts_core.repositories.evidence import EvidenceRepository
-from jmfts_core.repositories.rendition import NoRenditionError, pdf_for
+from jmfts_core.repositories.rendition import (
+    KIND_PDF,
+    NoRenditionError,
+    RenditionRepository,
+    pdf_for,
+)
 from jmfts_core.repositories.search import SearchRepository
 from jmfts_core.repositories.document import (
     DocumentRepository,
@@ -177,6 +182,15 @@ class NotAPdfSource(Exception):
     this step, and a renderer that quietly extracted markdown instead would be the failure
     step 29 is written to avoid, one route earlier.
     """
+
+
+def _unresolved_text(row: dict) -> str:
+    """An ``*.unresolved`` row as a sentence: its reason, its code, and the error if a task
+    died (0.7.1, audit item #11) — the error is what tells "failed" from "could not place"."""
+    text = f"{row.get('reason')} (code {row.get('code')!r})"
+    if row.get("error"):
+        text += f"; the task failed with: {row['error']}"
+    return text
 
 
 class RegionNotAddressable(Exception):
@@ -1692,6 +1706,54 @@ class DocumentService:
             "appliance places a node of that format on a page"
         )
 
+    def _check_rendition_current(self, document_id: int, recorded: Optional[str]) -> None:
+        """Refuse a rendition rectangle that was not measured on the rendition stored now.
+
+        0.7.1, audit item #12. ``render:pdf`` can run again — after a LibreOffice upgrade,
+        after eviction — and replaces the rendition while the chunks and their
+        ``render_anchor`` rows stay. Until ``anchor:render`` re-runs against the new bytes,
+        those rows are rectangles from a pagination nobody is shown, and a crop of them is
+        a confident picture of the wrong text. So the hash on the row has to be the hash of
+        the stored rendition, and a row with NO hash — every one written before 0.7.1 — is
+        refused too: it cannot be checked, and trusting it would make "unverifiable" read
+        as "verified". The settling walk re-offers ``anchor:render`` when the rendition hash
+        changes, so a mismatch heals itself; a row with no hash needs the re-run by hand.
+        """
+        repo = DocumentRepository(self.session)
+        node = repo.get(document_id)
+        file_node = node
+        if node is not None and node.usetype != USETYPE_FILE:
+            above = [a for a in repo.get_ancestors(document_id) if a.usetype == USETYPE_FILE]
+            file_node = above[-1] if above else None
+        if file_node is None:
+            raise RegionNotAddressable(
+                f"Document {document_id} carries a {RENDER_ANCHOR_ROW!r} row and has no "
+                f"{USETYPE_FILE!r} node at or above it, so there is no rendition to check the "
+                "rectangle against"
+            )
+        rerun = f"re-run `anchor:render` on document {file_node.id}"
+        row = RenditionRepository(self.session).get(file_node.id, KIND_PDF)
+        if row is None:
+            raise RegionNotAddressable(
+                f"Document {document_id}'s rectangle was recovered from a rendition of "
+                f"document {file_node.id}, which has no rendition now; re-run `render:pdf` on "
+                f"document {file_node.id}, then {rerun}"
+            )
+        if recorded is None:
+            raise RegionNotAddressable(
+                f"Document {document_id}'s {RENDER_ANCHOR_ROW!r} carries no `rendition_hash`: "
+                "it was written before 0.7.1, so which rendition its rectangle was measured on "
+                f"cannot be checked, and the rendition may have been replaced since. {rerun} "
+                "to recover a rectangle that can be"
+            )
+        if recorded != row.content_hash:
+            raise RegionNotAddressable(
+                f"Document {document_id}'s rectangle was measured on rendition {recorded[:12]}, "
+                f"and document {file_node.id}'s stored rendition is now {row.content_hash[:12]}: "
+                f"it was re-rendered, and the rectangle belongs to a pagination this appliance "
+                f"no longer serves. {rerun}"
+            )
+
     def _pdf_anchor(self, document_id: int) -> PdfAnchor:
         """This node's own ``source_anchor``, as a page and a rectangle — or why it is not one.
 
@@ -1723,6 +1785,7 @@ class DocumentService:
             except UnknownAnchorKind as exc:
                 raise RegionNotAddressable(f"Document {document_id}: {exc}") from exc
             if isinstance(recovered, PdfAnchor):
+                self._check_rendition_current(document_id, recovered.rendition_hash)
                 return recovered
             # A `render_anchor` that is not a rectangle is a writer nobody has: the only
             # producer is `anchor:render`, which writes `kind="pdf"`. Refusing names the row
@@ -1744,8 +1807,7 @@ class DocumentService:
             unresolved = evidence.get(ANCHOR_UNRESOLVED_ROW)
             if isinstance(unresolved, dict):
                 raise RegionNotAddressable(
-                    f"Document {document_id} has no rectangle: "
-                    f"{unresolved.get('reason')} (code {unresolved.get('code')!r})"
+                    f"Document {document_id} has no rectangle: {_unresolved_text(unresolved)}"
                 )
             raise RegionNotAddressable(self._why_unanchored(document_id))
         try:
@@ -1807,9 +1869,9 @@ class DocumentService:
             if isinstance(unresolved, dict):
                 raise RegionNotAddressable(
                     f"Document {document_id} is addressed at {where}, which is an exact "
-                    "address in the source package and has no rectangle on any page. A "
-                    "rectangle was looked for in this document's rendition and not found: "
-                    f"{unresolved.get('reason')} (code {unresolved.get('code')!r})"
+                    "address in the source package and has no rectangle on any page. No "
+                    "rectangle was recovered from this document's rendition: "
+                    f"{_unresolved_text(unresolved)}"
                 )
             raise RegionNotAddressable(
                 f"Document {document_id} is addressed at {where}, which is an exact address "

@@ -102,6 +102,15 @@ _LEADING_ATX_RE = re.compile(r"^(#{1,6})(\s)")
 #: numbering — which the ``w:numPr`` test already catches.
 _LIST_STYLE_NAME_RE = re.compile(r"^list (bullet|number)\s*[0-9]*$", re.IGNORECASE)
 
+#: The ``source_blocks`` key marking a block that, BY CONSTRUCTION, no page of a rendition
+#: draws: the ``# Slide N`` heading and ``## Notes`` label this reader writes, and a slide's
+#: speaker notes, which LibreOffice's slide export leaves out. ``anchor:render`` does not look
+#: for these and reports a chunk made only of them as ``not_rendered`` rather than as text
+#: the renderer lost (audit item #21). A key on the block map, not in the markdown, so the
+#: text a chunk was cut from — and every stored ``content`` it is compared against — is
+#: unchanged.
+NOT_RENDERED = "not_rendered"
+
 #: Three or more consecutive blank lines collapse to one blank line. Empty paragraphs are
 #: how a person spaces a Word document, and carrying every one of them through would make
 #: the markdown mostly whitespace.
@@ -537,7 +546,11 @@ def pptx_to_markdown(data: bytes) -> tuple[str, dict]:
         blocks: list[tuple[str, Optional[dict]]] = [
             (
                 "# " + (title if title else f"Slide {number}"),
-                _slide_address(part, root, number, title_anchor_element) if title else None,
+                (
+                    _slide_address(part, root, number, title_anchor_element)
+                    if title
+                    else {NOT_RENDERED: True}
+                ),
             )
         ]
         promoted_paragraph = (
@@ -590,16 +603,14 @@ def pptx_to_markdown(data: bytes) -> tuple[str, dict]:
                 notes_root = slide.notes_slide.element
                 # `## Notes` is this reader's label, like `Slide N` above, and gets no
                 # address for the same reason.
-                blocks.append(("## Notes", None))
+                blocks.append(("## Notes", {NOT_RENDERED: True}))
+                address = (
+                    _slide_address(notes_part, notes_root, number, placeholder.element)
+                    if placeholder is not None
+                    else None
+                )
                 blocks.append(
-                    (
-                        _LEADING_ATX_RE.sub(r"\\\1\2", notes),
-                        (
-                            _slide_address(notes_part, notes_root, number, placeholder.element)
-                            if placeholder is not None
-                            else None
-                        ),
-                    )
+                    (_LEADING_ATX_RE.sub(r"\\\1\2", notes), {**(address or {}), NOT_RENDERED: True})
                 )
 
         section, section_span = _assemble(blocks)

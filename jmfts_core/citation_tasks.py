@@ -67,6 +67,7 @@ with the text the chunks were cut from.
 from __future__ import annotations
 
 import re
+import unicodedata
 from bisect import bisect_right
 from typing import Callable, Optional, Sequence
 
@@ -97,11 +98,12 @@ from jmfts_core.models.task_queue import WRITE_SUBTREE, TaskQueue
 # The office readers, at module scope and safe there: `jmfts_core.office.extract` imports
 # python-docx and python-pptx inside its functions, behind the `require_*` guards, so this
 # costs a base install nothing. `structure_tasks` imports the same two names the same way.
-from jmfts_core.office.extract import docx_to_markdown, pptx_to_markdown
+from jmfts_core.office.extract import NOT_RENDERED, docx_to_markdown, pptx_to_markdown
 from jmfts_core.pdf_extraction import pdf_to_markdown
 from jmfts_core.repositories.blob import BlobRepository
 from jmfts_core.repositories.evidence import EvidenceRepository
 from jmfts_core.repositories.rendition import EVIDENCE_NAME, KIND_PDF, pdf_for
+from jmfts_core.repositories.task_queue import register_terminal_failure_recorder
 from jmfts_core.structure_tasks import (
     EXTRACTION_DOCX_BODY,
     EXTRACTION_PDF_TEXT_LAYER,
@@ -656,7 +658,7 @@ ANCHOR_OF_RENDITION = "rendition"
 #: Part 5's failure list, met as ONE code rather than three: its "text appears more than
 #: once", "text does not appear" and "chunk spans a page break" are three ways for a SEARCH
 #: to come back unusable, and this handler does not search — it aligns two block maps in
-#: document order (:func:`align_to_rendition`), where all three arrive as the same unmatched
+#: document order (:func:`align_runs`), where all three arrive as the same unmatched
 #: block. Reporting "not found" and meaning it is the honest answer; naming which of the
 #: three it was would be a claim the alignment never made.
 UNRESOLVED_NOT_IN_RENDITION = "not_found_in_rendition"
@@ -668,6 +670,21 @@ UNRESOLVED_REASON[UNRESOLVED_NOT_IN_RENDITION] = (
     "document holds"
 )
 
+#: The source block is one that, BY CONSTRUCTION, no page of the rendition holds: a
+#: ``# Slide N`` heading or a ``## Notes`` label the reader wrote, or a slide's speaker notes,
+#: which LibreOffice's slide export does not draw. The reader marks these
+#: (``office.extract.NOT_RENDERED``); the alignment does not look for them, and a chunk made
+#: only of them gets this code rather than :data:`UNRESOLVED_NOT_IN_RENDITION` — "we looked
+#: and the renderer lost it" would send someone hunting for a conversion defect that is not
+#: there. Audit item #21.
+UNRESOLVED_NOT_RENDERED = "not_rendered"
+
+UNRESOLVED_REASON[UNRESOLVED_NOT_RENDERED] = (
+    "the chunk covers only text that the rendition never draws: speaker notes, or a "
+    "`Slide N` / `Notes` label the reader wrote. There is no page for it to be on, and "
+    "nothing went wrong in looking"
+)
+
 #: What a markdown marker is, for the purpose of comparing a source block against a rendered
 #: one. Both sides are markdown — the office readers emit it, ``pdf_to_markdown`` emits it —
 #: and NEITHER side's markers came from the other: a heading the ``.docx`` declares by style
@@ -675,25 +692,82 @@ UNRESOLVED_REASON[UNRESOLVED_NOT_IN_RENDITION] = (
 #: judged its font size to be one. So the markers are noise on both sides, and removing them
 #: from both is the comparison that means what it says. The dash range covers the soft and
 #: typographic hyphens a renderer substitutes for the one the author typed.
-_MATCH_NOISE = re.compile(r"[#*_`|>\[\]()~\-‐-―]+")
+_MATCH_NOISE = re.compile(r"[#*_`|>\[\]()~\-‐-―\u00ad]+")
 _MATCH_SPACE = re.compile(r"\s+")
+
+#: A list marker the RENDERER drew and the reader did not write, anywhere in a block. The
+#: office readers emit ``- `` for every list item and drop the numbering; LibreOffice draws
+#: ``•``, a Symbol-font glyph in the Private Use Area (``\uf0b7`` measured, 2026-10-18,
+#: LibreOffice 7.4), or the item's number. ANYWHERE and not only at the start, because
+#: PyMuPDF reads a tightly spaced list as ONE block, so the second item's glyph is mid-text.
+#: Audit item #5.
+_BULLET_GLYPHS = re.compile("[\ue000-\uf8ff•◦▪▫·‣⁃∙●○■□◆◇►▶▸▹➢➤➔→✓✔✗❖★☐☑]")
+
+#: An enumerator standing alone as a token: ``1.``, ``2)``, ``(3)``, ``1.2.``, ``a.``,
+#: ``iv)``. Removed on BOTH sides, so a real "Plan A." loses the same token on each and still
+#: matches — the comparison is only asked which page a passage is on.
+_ENUMERATOR = re.compile(
+    r"(?<!\S)\(?(?:(?:\d{1,3}\.)*\d{1,3}|[a-z]|[ivxlcdm]{1,6})[.)](?!\S)", re.IGNORECASE
+)
+
+#: A markdown table row, ``| a | b |``, as both sides write one.
+_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+_CELL_SPLIT = re.compile(r"(?<!\\)\|")
+_SEPARATOR_CELL = re.compile(r"^[\s:\-]*$")
+
+
+def _table_cells(text: str) -> str:
+    """A block's table rows reduced to their non-empty cells, merged repeats taken out.
+
+    Audit item #16. python-docx reports a horizontally merged cell once PER GRID COLUMN it
+    spans, so the reader writes ``| Total | Total | 4,600 |`` where the rendition holds
+    ``| Total |  | 4,600 |``. Dropping empty cells and a cell equal to its left neighbour
+    turns both into ``Total 4,600``. Lines that are not table rows pass through untouched.
+
+    What it does NOT do, stated: a VERTICAL merge (python-docx repeats it down the column)
+    is left alone, because the rendered side may split a borderless table into one block per
+    row, where no column is visible to deduplicate against. A table with one stays unlocated.
+    """
+    lines = []
+    for line in text.split("\n"):
+        if not _TABLE_ROW.match(line):
+            lines.append(line)
+            continue
+        kept: list[str] = []
+        for cell in _CELL_SPLIT.split(line.strip()[1:-1]):
+            cell = cell.strip()
+            if _SEPARATOR_CELL.match(cell) or (kept and kept[-1] == cell):
+                continue
+            kept.append(cell)
+        lines.append(" ".join(kept))
+    return "\n".join(lines)
 
 
 def normalize_for_match(text: str) -> str:
     """``text`` reduced to what the two sides can be expected to agree about.
 
-    Whitespace collapses because a line break is the renderer's decision and not the
-    author's. It is CASE-FOLDED, and that is the one lossy step that needs an argument: a
-    heading Word styles as small caps or all caps renders as capitals in the PDF while the
-    package holds mixed case, so a case-sensitive test would refuse to locate exactly the
-    headings a reader most wants located. Folding is not hiding a problem — nothing here
-    decides whether two passages are the SAME, only which page one of them is on, and the
-    passage's own text is on the node either way.
+    It is CASE-FOLDED, and that is the one lossy step that needs an argument: a heading Word
+    styles as small caps or all caps renders as capitals in the PDF while the package holds
+    mixed case, so a case-sensitive test would refuse to locate exactly the headings a reader
+    most wants located. Folding is not hiding a problem — nothing here decides whether two
+    passages are the SAME, only which page one of them is on, and the passage's own text is
+    on the node either way.
+
+    **WHITESPACE IS REMOVED, NOT COLLAPSED** (0.7.1, audit item #14). A line break is the
+    renderer's decision, and so is where it hyphenates: LibreOffice's automatic hyphenation
+    prints ``counter-`` at a line end, PyMuPDF joins the line to the next with a space, and
+    the source holds ``counter\\u00adproductive`` (a soft hyphen) or ``counterproductive``.
+    With hyphens and soft hyphens as noise and every space gone, all three read the same.
+    NFKC first, so a ligature glyph (``ﬁ``) and the two letters it stands for agree.
     """
-    return _MATCH_SPACE.sub(" ", _MATCH_NOISE.sub(" ", text)).strip().casefold()
+    text = unicodedata.normalize("NFKC", text).replace("<br>", " ")
+    text = _table_cells(text)
+    text = _BULLET_GLYPHS.sub(" ", text)
+    text = _ENUMERATOR.sub(" ", text)
+    return _MATCH_SPACE.sub("", _MATCH_NOISE.sub(" ", text)).casefold()
 
 
-#: How far ahead of the cursor :func:`align_to_rendition` will look, in rendition blocks. The
+#: How far ahead of the cursor :func:`align_runs` will look, in rendition blocks. The
 #: rendition interleaves the document's own blocks with running heads, footers and page
 #: numbers, so a block that is there at all is a few positions ahead — and a block found four
 #: hundred positions ahead is a repeated string, not the paragraph. It also bounds the
@@ -707,32 +781,19 @@ MATCH_WINDOW_BLOCKS = 400
 #: quarter``. Sixteen characters is a few words, which is where a prefix stops being a
 #: coincidence — a constant here and not an option, because nothing has measured the recovery
 #: rate yet and a knob with no measurement behind it is a number two deployments disagree on.
+#: (0.7.1: the rate is now measured, ``tests/test_render_anchors_libreoffice.py``, and every
+#: case there is at 100% with this constant unchanged — so it stays a constant. Since 0.7.1
+#: the length counts characters with whitespace removed, see :func:`normalize_for_match`.)
 MIN_PREFIX_CHARACTERS = 16
 
 
-def _same_region(source: str, rendered: str) -> bool:
-    """Whether two normalized blocks are the same text, allowing for a page break.
-
-    Exact, or one a prefix of the other with the shorter at least
-    :data:`MIN_PREFIX_CHARACTERS` long. The prefix arm is Part 5's third failure mode
-    answered rather than reported: a paragraph the renderer split across a break becomes two
-    rendition blocks, the first of which is a prefix of the source block, and that first
-    fragment is exactly the rectangle an anchor wants — "the reader who clicks a citation
-    wants to be taken to where the passage starts".
-    """
-    if source == rendered:
-        return True
-    if len(rendered) >= MIN_PREFIX_CHARACTERS and source.startswith(rendered):
-        return True
-    if len(source) >= MIN_PREFIX_CHARACTERS and rendered.startswith(source):
-        return True
-    return False
-
-
-def align_to_rendition(
+def align_runs(
     source_texts: Sequence[str], rendered_texts: Sequence[str]
-) -> list[Optional[int]]:
-    """For each source block, the rendition block that holds it — or ``None``.
+) -> list[Optional[tuple[int, int]]]:
+    """For each source block, the run ``(first, last)`` of rendition blocks holding it.
+
+    ``align_to_rendition`` until 0.7.1, which answered one block index per source block;
+    a source block can now share a rendered block or span several, so it answers a run.
 
     **A MONOTONE WALK, NOT A SEARCH, and that is the design decision in this step.** Part 5
     proposes recovering each chunk's rectangle with ``page.search_for`` over the rendition,
@@ -755,20 +816,101 @@ def align_to_rendition(
     Neither list has to be complete or the same length as the other: the rendition holds page
     furniture no source block produced, and the source holds blocks the reader wrote — a
     ``## Notes`` label — that no page holds.
+
+    **THE RENDITION IS READ AS ONE STREAM, NOT AS A LIST OF BLOCKS** (0.7.1, audit item #10).
+    Measured against LibreOffice 7.4: PyMuPDF reads a tightly spaced list, an address block,
+    or a text box of several paragraphs as ONE block, and a borderless table as one block per
+    row. A one-to-one walk located only the first paragraph of the first and none of the
+    second. So the rendered blocks are concatenated, and the cursor is a POSITION in that
+    stream rather than a block index:
+
+    * **pinned** — the cursor sits inside a block the previous source block ended in. The
+      next source block is accepted there only if the stream continues with exactly its
+      text, at any length: the position is already fixed by the block before it. This is
+      many source blocks to one rendered block.
+    * **fresh** — otherwise each later block start within :data:`MATCH_WINDOW_BLOCKS` is
+      tried. The source text matching there, across as many blocks as it takes, is one
+      source block to many rendered ones. A match that ends INSIDE a block is accepted only
+      when it is :data:`MIN_PREFIX_CHARACTERS` long, or when the next source block's text
+      follows it, which is what keeps ``yes`` from being located inside ``yes, and the
+      following quarter`` while still locating a short first bullet of a merged list.
+    * **split** — failing both, the longest run of WHOLE blocks starting there that is a
+      prefix of the source text, if it is at least :data:`MIN_PREFIX_CHARACTERS` long. That
+      is a paragraph a page break interrupted with a running foot, and its first fragment is
+      exactly the rectangle an anchor wants — "the reader who clicks a citation wants to be
+      taken to where the passage starts".
     """
-    matched: list[Optional[int]] = []
+    lengths = [len(text) for text in rendered_texts]
+    bounds: list[int] = []
+    position = 0
+    for length in lengths:
+        bounds.append(position)
+        position += length
+    stream = "".join(rendered_texts)
+    # Where non-empty blocks start and end, so "on a block boundary" is a set lookup.
+    starts = {bound for bound, length in zip(bounds, lengths) if length}
+    ends = {bound + length for bound, length in zip(bounds, lengths) if length}
+
+    def block_at(offset: int) -> int:
+        """The non-empty block holding stream position ``offset``."""
+        index = bisect_right(bounds, offset) - 1
+        while lengths[index] == 0:
+            index -= 1
+        return index
+
+    def next_text(after: int) -> str:
+        for text in source_texts[after + 1 :]:
+            if text:
+                return text
+        return ""
+
+    matched: list[Optional[tuple[int, int]]] = []
     cursor = 0
-    for text in source_texts:
-        found: Optional[int] = None
+    for number, text in enumerate(source_texts):
+        found: Optional[tuple[int, int]] = None
         if text:
-            limit = min(len(rendered_texts), cursor + MATCH_WINDOW_BLOCKS)
-            for index in range(cursor, limit):
-                if _same_region(text, rendered_texts[index]):
-                    found = index
-                    break
-        matched.append(found)
-        if found is not None:
-            cursor = found + 1
+            pinned = 0 < cursor < len(stream) and cursor not in starts
+            if pinned and stream.startswith(text, cursor):
+                found = (cursor, cursor + len(text))
+            else:
+                first = bisect_right(bounds, cursor - 1) if cursor else 0
+                limit = min(len(rendered_texts), first + MATCH_WINDOW_BLOCKS)
+                for index in range(first, limit):
+                    if not lengths[index]:
+                        continue
+                    start = bounds[index]
+                    if stream.startswith(text, start):
+                        end = start + len(text)
+                        follower = next_text(number)
+                        if (
+                            len(text) >= MIN_PREFIX_CHARACTERS
+                            or end in ends
+                            or (
+                                follower
+                                and stream.startswith(follower[:MIN_PREFIX_CHARACTERS], end)
+                            )
+                        ):
+                            found = (start, end)
+                            break
+                        continue
+                    # The split arm: whole blocks from here that the text begins with.
+                    end = start
+                    probe = index
+                    while (
+                        probe < len(rendered_texts)
+                        and text.startswith(rendered_texts[probe], end - start)
+                        and end - start + lengths[probe] <= len(text)
+                    ):
+                        end += lengths[probe]
+                        probe += 1
+                    if end - start >= MIN_PREFIX_CHARACTERS:
+                        found = (start, end)
+                        break
+        if found is None:
+            matched.append(None)
+            continue
+        matched.append((block_at(found[0]), block_at(found[1] - 1)))
+        cursor = found[1]
     return matched
 
 
@@ -779,7 +921,7 @@ def anchor_for_rendition_span(
 
     ``blocks`` is the SOURCE block map — the office reader's ``source_blocks``, whose offsets
     are the coordinates a chunk's ``source_span`` is measured in — with ``page`` and ``bbox``
-    copied onto the entries :func:`align_to_rendition` located. A block with no ``bbox`` is
+    copied onto the entries :func:`align_runs` located. A block with no ``bbox`` is
     one the rendition does not hold at a place this alignment could name.
 
     THE RULE IS :func:`anchor_for_span`'S RULE, deliberately: the page is the page the passage
@@ -800,10 +942,17 @@ def anchor_for_rendition_span(
 
     located = [block for block in overlapping if "bbox" in block]
     if not located:
+        if all(block.get(NOT_RENDERED) for block in overlapping):
+            return None, UNRESOLVED_NOT_RENDERED
         return None, UNRESOLVED_NOT_IN_RENDITION
 
     page = located[0]["page"]
     boxes = [block["bbox"] for block in located if block["page"] == page]
+    # A source block that ran across rendered blocks on later pages carries them itself
+    # (see `_located_blocks`), so a passage of ONE block can still continue overleaf.
+    further = {block["page"] for block in located}
+    for block in located:
+        further.update(block.get("continues", ()))
     anchor = {
         "kind": ANCHOR_KIND_PDF,
         "of": ANCHOR_OF_RENDITION,
@@ -815,7 +964,7 @@ def anchor_for_rendition_span(
             max(box[3] for box in boxes),
         ],
     }
-    continues = sorted({block["page"] for block in located} - {page})
+    continues = sorted(further - {page})
     if continues:
         anchor["continues"] = continues
     return anchor, None
@@ -831,25 +980,47 @@ def _located_blocks(source: tuple[str, Sequence[dict]], rendition: tuple[str, Se
     source_markdown, source_blocks = source
     rendered_markdown, rendered_blocks = rendition
 
-    matched = align_to_rendition(
-        [normalize_for_match(source_markdown[b["start"] : b["end"]]) for b in source_blocks],
+    runs = align_runs(
+        # A block the reader marked as never drawn is not looked for: it cannot be found, and
+        # a coincidental match would move the cursor past text that IS there.
+        [
+            (
+                ""
+                if b.get(NOT_RENDERED)
+                else normalize_for_match(source_markdown[b["start"] : b["end"]])
+            )
+            for b in source_blocks
+        ],
         [normalize_for_match(rendered_markdown[b["start"] : b["end"]]) for b in rendered_blocks],
     )
     # New dicts rather than a mutation of the reader's own output: the block map belongs to
     # the reader that returned it, and a handler that edited it in place would make a second
     # caller of the same reader see geometry it did not ask for.
-    return [
-        (
-            {
-                **block,
-                "page": rendered_blocks[index]["page"],
-                "bbox": rendered_blocks[index]["bbox"],
-            }
-            if index is not None
-            else dict(block)
-        )
-        for block, index in zip(source_blocks, matched)
-    ]
+    located: list[dict] = []
+    for block, run in zip(source_blocks, runs):
+        if run is None:
+            located.append(dict(block))
+            continue
+        covered = rendered_blocks[run[0] : run[1] + 1]
+        page = covered[0]["page"]
+        boxes = [rendered["bbox"] for rendered in covered if rendered["page"] == page]
+        entry = {
+            **block,
+            "page": page,
+            # The union on the FIRST page, `anchor_for_span`'s rule: several rendered blocks
+            # for one source block is a table split per row, or a paragraph a page broke.
+            "bbox": [
+                min(box[0] for box in boxes),
+                min(box[1] for box in boxes),
+                max(box[2] for box in boxes),
+                max(box[3] for box in boxes),
+            ],
+        }
+        continues = sorted({rendered["page"] for rendered in covered} - {page})
+        if continues:
+            entry["continues"] = continues
+        located.append(entry)
+    return located
 
 
 # NOT A ROW OF `TASK_ROWS`, and `ingest_tasks.TASK_ANCHOR_RENDER` carries the argument: the
@@ -976,6 +1147,11 @@ def run_anchor_render(session: Session, task: TaskQueue) -> TaskOutcome:
 
     blocks = _located_blocks((markdown, blocks), (rendered_markdown, rendered_meta["text_blocks"]))
     starts = [block["start"] for block in blocks]
+    # WHICH BYTES these rectangles were measured on, stamped on every row this run writes
+    # (0.7.1, audit item #12). A re-render replaces the rendition and keeps the chunks, so
+    # without it `_pdf_anchor` serves last pagination's rectangles over this pagination's
+    # page. The hash of the bytes just parsed, from the row `pdf_for` read them through.
+    rendition_hash = pdf.rendition.content_hash
 
     chunks = (
         session.execute(
@@ -1008,7 +1184,9 @@ def run_anchor_render(session: Session, task: TaskQueue) -> TaskOutcome:
             anchor, code = None, UNRESOLVED_NO_SPAN
 
         if anchor is not None:
-            evidence.write(chunk.id, RENDER_ANCHOR_NAME, anchor)
+            evidence.write(
+                chunk.id, RENDER_ANCHOR_NAME, {**anchor, "rendition_hash": rendition_hash}
+            )
             anchored += 1
             pages.add(anchor["page"])
             if "continues" in anchor:
@@ -1017,7 +1195,11 @@ def run_anchor_render(session: Session, task: TaskQueue) -> TaskOutcome:
             evidence.write(
                 chunk.id,
                 RENDER_ANCHOR_UNRESOLVED_NAME,
-                {"code": code, "reason": UNRESOLVED_REASON[code]},
+                {
+                    "code": code,
+                    "reason": UNRESOLVED_REASON[code],
+                    "rendition_hash": rendition_hash,
+                },
             )
             unresolved[code] = unresolved.get(code, 0) + 1
 
@@ -1040,6 +1222,10 @@ def run_anchor_render(session: Session, task: TaskQueue) -> TaskOutcome:
             "located_blocks": sum(1 for block in blocks if "bbox" in block),
             "rendered_blocks": len(rendered_meta["text_blocks"]),
             "rendition_pages": page_count,
+            "rendition_hash": rendition_hash,
+            # Source blocks that by construction no page draws (notes, reader-written
+            # labels). Not looked for, so `located / (source - not_rendered)` is the rate.
+            "not_rendered_blocks": sum(1 for block in blocks if block.get(NOT_RENDERED)),
             # WHAT PAGINATED IT, carried onto the attempt rather than onto each rectangle.
             # Part 6: two LibreOffice versions paginate differently, so which one produced
             # these coordinates is the fact that decides whether they are still valid. It
@@ -1047,4 +1233,100 @@ def run_anchor_render(session: Session, task: TaskQueue) -> TaskOutcome:
             # chunks — the `rendition` row is where it lives permanently.
             "renderer_version": record.get("renderer_version"),
         }
+    )
+
+
+# ---------------------------------------------------------------------------
+# When an anchor task fails for good — 0.7.1, audit item #11
+# ---------------------------------------------------------------------------
+
+#: The anchor task itself failed, permanently or with its retries spent, so it placed
+#: nothing. One code per task, because which task died is the first thing someone acting on
+#: it needs, and the row name alone (``source_anchor.unresolved``) is written by two.
+UNRESOLVED_CITATION_FAILED = "citation_failed"
+UNRESOLVED_ANCHOR_SOURCE_FAILED = "anchor_source_failed"
+UNRESOLVED_ANCHOR_RENDER_FAILED = "anchor_render_failed"
+
+for _code, _task in (
+    (UNRESOLVED_CITATION_FAILED, TASK_CITATION),
+    (UNRESOLVED_ANCHOR_SOURCE_FAILED, TASK_ANCHOR_SOURCE),
+    (UNRESOLVED_ANCHOR_RENDER_FAILED, TASK_ANCHOR_RENDER),
+):
+    UNRESOLVED_REASON[_code] = (
+        f"the `{_task}` task over this document failed and placed nothing, so whether this "
+        "passage can be anchored is not known. The error is beside this reason and in the "
+        f"task's attempt log; fix its cause and re-run `{_task}` on the file node"
+    )
+
+
+def _record_anchor_failure(
+    session: Session,
+    task: TaskQueue,
+    error: str,
+    *,
+    anchor_name: str,
+    unresolved_name: str,
+    code: str,
+) -> None:
+    """Write ``code`` onto every chunk under the failed task's node that has no anchor.
+
+    A chunk that still holds an anchor from an EARLIER successful run keeps it: the failed
+    run changed nothing on it (its transaction was rolled back), the attempt log says the
+    re-run failed, and for a rendition rectangle the stamped ``rendition_hash`` is what
+    refuses it if the pagination moved underneath. Writing the failure beside it would be
+    the "node that says two things" both rows exist to prevent. An earlier ``.unresolved``
+    row is replaced — the latest thing known about that passage is that the task died.
+    """
+    evidence = EvidenceRepository(session)
+    chunks = (
+        session.execute(
+            select(Document.id)
+            .where(Document.path.contains([task.scope_document_id]))
+            .where(Document.usetype == USETYPE_CHUNK)
+            .order_by(Document.id)
+        )
+        .scalars()
+        .all()
+    )
+    row = {"code": code, "reason": UNRESOLVED_REASON[code], "error": error}
+    for chunk_id in chunks:
+        if evidence.read(chunk_id, anchor_name) is not ev.ABSENT:
+            continue
+        evidence.write(chunk_id, unresolved_name, row)
+    session.flush()
+
+
+@register_terminal_failure_recorder(TASK_CITATION)
+def _record_citation_failure(session: Session, task: TaskQueue, error: str) -> None:
+    _record_anchor_failure(
+        session,
+        task,
+        error,
+        anchor_name=ANCHOR_NAME,
+        unresolved_name=ANCHOR_UNRESOLVED_NAME,
+        code=UNRESOLVED_CITATION_FAILED,
+    )
+
+
+@register_terminal_failure_recorder(TASK_ANCHOR_SOURCE)
+def _record_anchor_source_failure(session: Session, task: TaskQueue, error: str) -> None:
+    _record_anchor_failure(
+        session,
+        task,
+        error,
+        anchor_name=ANCHOR_NAME,
+        unresolved_name=ANCHOR_UNRESOLVED_NAME,
+        code=UNRESOLVED_ANCHOR_SOURCE_FAILED,
+    )
+
+
+@register_terminal_failure_recorder(TASK_ANCHOR_RENDER)
+def _record_anchor_render_failure(session: Session, task: TaskQueue, error: str) -> None:
+    _record_anchor_failure(
+        session,
+        task,
+        error,
+        anchor_name=RENDER_ANCHOR_NAME,
+        unresolved_name=RENDER_ANCHOR_UNRESOLVED_NAME,
+        code=UNRESOLVED_ANCHOR_RENDER_FAILED,
     )
