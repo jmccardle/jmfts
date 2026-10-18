@@ -166,6 +166,15 @@ REST route, an entry in this OpenAPI document, a method on the in-process
 `LocalJmftsClient`, and a method there — four views of one definition, with a test holding
 each of them to it. See `jmfts-client/README.md`.
 
+**Every integrated system is a consumer of this API, including one that writes into it.**
+JMFTS is the foundation and does not test its callers: no caller's contract tests run in
+this repository's CI, and a change to the API is accepted here together with the cost of
+updating whatever calls it. A caller that hand-writes its own client takes on keeping that
+client current; one that uses `jmfts-client` at the matching version gets the change as a
+typed error at import or validation time instead. Breaking changes are listed in
+`CHANGELOG.md`, and a request field the server does not read is reported back in the
+`X-JMFTS-Ignored-Fields` response header.
+
 Press **Authorize** and paste `JMFTS_API_TOKEN` before trying an operation; the page names
 which of the two credentials each one takes, since `/runner/*` uses `JMFTS_RUNNER_KEY`
 instead and `GET /health` needs neither. All three pages answer without a token — a browser
