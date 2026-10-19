@@ -56,9 +56,8 @@ spec:
             # The shared bearer. Create it before applying this:
             #   kubectl -n jmfts create secret generic jmfts-api-token \
             #     --from-literal=JMFTS_API_TOKEN="$(openssl rand -base64 32)"
-            # A BLANK JMFTS_API_TOKEN makes each replica generate its OWN ephemeral token
-            # and print it to its boot log, so a two-replica Deployment would accept two
-            # different tokens depending on which pod answered. Pin it here.
+            # A BLANK JMFTS_API_TOKEN makes the pod refuse to start (crash-loop with
+            # an error naming the variable), so the Secret must exist and be non-empty.
             - secretRef:
                 name: jmfts-api-token
           resources:

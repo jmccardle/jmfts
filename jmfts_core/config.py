@@ -45,10 +45,10 @@ class Settings(BaseSettings):
     debug: bool = True
 
     # Shared-bearer auth (CR-4). Every request carries `Authorization: Bearer
-    # <token>`, compared constant-time against this value. If left empty,
-    # api/auth.py GENERATES an ephemeral token once at startup and prints it to
-    # stdout (generate-print-require, like Jupyter) — a missing token NEVER
-    # means "allow all". Set JMFTS_API_TOKEN to pin a fixed token.
+    # <token>`, compared constant-time against this value. REQUIRED: if empty, unset
+    # or whitespace-only the API server refuses to start (rest/auth.py
+    # ApiTokenNotConfigured, issue #51) — no generated token, no default, never
+    # "allow all". Processes that never serve the API do not read it.
     api_token: str = ""  # env JMFTS_API_TOKEN
 
     # Runner key — the credential for the /runner surface, which is a DIFFERENT kind of
@@ -64,11 +64,10 @@ class Settings(BaseSettings):
     # tokenizer, and an HTTP port. Two pods in one namespace read the same Secret and that
     # is the whole handshake.
     #
-    # Blank is the OFF switch, unlike `api_token` where blank means generate-print-require.
-    # The difference is deliberate: generating a key per process is right for one appliance
-    # printing a token an operator reads, and wrong for a fleet, where two replicas would
-    # generate two different keys and a worker would authenticate against whichever pod it
-    # happened to reach. With no key set the /runner routes answer 503, which reads as
+    # Blank is the OFF switch, unlike `api_token` where blank refuses to start.
+    # The difference is deliberate: the API cannot run without its credential, but the
+    # embedding surface is optional and a deployment that does not offer it should not
+    # have to invent a key. With no key set the /runner routes answer 503, which reads as
     # "this deployment does not offer embedding" — never as "come in".
     runner_key: str = ""  # env JMFTS_RUNNER_KEY
 

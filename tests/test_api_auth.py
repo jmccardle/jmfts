@@ -11,6 +11,7 @@ The pinned token / CORS origin come from ``tests/conftest.py`` (``TEST_API_TOKEN
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from jmfts_core.rest.main import app
@@ -90,44 +91,88 @@ def test_cors_reflects_configured_origin_and_is_not_wildcard():
     assert allow_origin != "*"
 
 
-# ── ephemeral-token path: no JMFTS_API_TOKEN → generate-print-REQUIRE ────────
+# ── empty-token path: no JMFTS_API_TOKEN → the server refuses to start (#51) ──
 
 
-def test_ephemeral_token_is_generated_and_still_required(monkeypatch):
-    """With JMFTS_API_TOKEN unset, the server generates a token, REQUIRES it,
-    and NEVER allows unauthenticated access."""
+@pytest.mark.parametrize("value", ["", "   ", "\t\n"])
+def test_blank_token_refuses_to_start(monkeypatch, value):
+    """Empty and whitespace-only are the same refusal, and it names the variable."""
     import jmfts_core.rest.auth as auth_mod
     from jmfts_core.config import get_settings
 
-    # Force the empty-token path. delenv() is not enough: pydantic BaseSettings
-    # still reads .env, which pins a real JMFTS_API_TOKEN on dev machines. An
-    # empty *environment* value takes precedence over .env, so it reliably
-    # exercises the generate-print-require branch everywhere.
-    monkeypatch.setenv("JMFTS_API_TOKEN", "")
+    # An empty *environment* value takes precedence over .env on dev machines.
+    monkeypatch.setenv("JMFTS_API_TOKEN", value)
     get_settings.cache_clear()
-    monkeypatch.setattr(auth_mod, "_generated_token", None)
-
     try:
-        # The effective (empty) setting proves we are on the ephemeral path,
-        # not silently reusing a pinned token.
-        assert get_settings().api_token == ""
-
-        # A no-token request STILL 401s — a missing config token is not "allow all".
-        assert client.get("/config").status_code == 401
-        # A wrong token STILL 401s.
-        assert client.get("/config", headers={"Authorization": "Bearer nope"}).status_code == 401
-
-        # A token was generated (once) and it works.
-        generated = auth_mod.get_effective_token()
-        assert generated and isinstance(generated, str)
-        # Idempotent: asking again yields the same token (generated exactly once).
-        assert auth_mod.get_effective_token() == generated
-
-        resp = client.get("/config", headers={"Authorization": f"Bearer {generated}"})
-        assert resp.status_code == 200
+        with pytest.raises(auth_mod.ApiTokenNotConfigured, match="JMFTS_API_TOKEN"):
+            auth_mod.get_effective_token()
+        # The lifespan (what uvicorn runs) refuses too.
+        with pytest.raises(auth_mod.ApiTokenNotConfigured, match="JMFTS_API_TOKEN"):
+            with TestClient(app):
+                pass
     finally:
-        # Restore the pinned-token world for every following test. monkeypatch
-        # re-adds JMFTS_API_TOKEN at teardown; clearing the settings cache and the
-        # generated singleton here means the next get_settings() re-reads it.
         get_settings.cache_clear()
-        auth_mod._generated_token = None
+
+
+def test_unset_token_refuses_to_start(monkeypatch, tmp_path):
+    """Unset (not merely empty) refuses too. chdir away so a dev .env cannot supply one."""
+    import jmfts_core.rest.auth as auth_mod
+    from jmfts_core.config import get_settings
+
+    monkeypatch.delenv("JMFTS_API_TOKEN", raising=False)
+    monkeypatch.chdir(tmp_path)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().api_token == ""
+        with pytest.raises(auth_mod.ApiTokenNotConfigured, match="JMFTS_API_TOKEN"):
+            auth_mod.get_effective_token()
+    finally:
+        get_settings.cache_clear()
+
+
+def test_set_token_starts_authenticates_and_health_is_open():
+    with TestClient(app) as c:
+        assert c.get("/health").status_code == 200
+        assert c.get("/config").status_code == 401
+        assert c.get("/config", headers=AUTH_HEADERS).status_code == 200
+
+
+def _server_cli(args, env_token, cwd):
+    import os
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if k != "JMFTS_API_TOKEN"}
+    # The child runs from a scratch cwd (so no .env can supply a token), which means it
+    # must be told which tree to import: the one under test, not whatever is installed.
+    import jmfts_client
+    import jmfts_core
+
+    env["PYTHONPATH"] = os.pathsep.join(
+        sorted({os.path.dirname(os.path.dirname(m.__file__)) for m in (jmfts_core, jmfts_client)})
+    )
+    if env_token is not None:
+        env["JMFTS_API_TOKEN"] = env_token
+    return subprocess.run(
+        [sys.executable, "-c", "from jmfts_core.rest.main import run; run()", *args],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=cwd,
+    )
+
+
+def test_jmfts_server_help_works_without_a_token(tmp_path):
+    r = _server_cli(["--help"], None, tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "Serve the JMFTS API" in r.stdout
+
+
+@pytest.mark.parametrize("token", [None, "", "  "])
+def test_jmfts_server_exits_with_one_clear_line_without_a_token(token, tmp_path):
+    r = _server_cli(["--no-reload"], token, tmp_path)
+    assert r.returncode != 0
+    assert "JMFTS_API_TOKEN is not set" in r.stderr
+    assert "openssl rand" in r.stderr
+    assert "Traceback" not in r.stderr

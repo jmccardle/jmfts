@@ -1,7 +1,7 @@
 """Access-control models: principals, API tokens, and subtree RBAC grants.
 
 See ``migration 006`` for the DDL and ``jmfts_core/access.py`` for the enforcement
-engine. The shared "owner" bearer (``JMFTS_API_TOKEN`` / the ephemeral boot token) is
+engine. The shared "owner" bearer (``JMFTS_API_TOKEN``) is
 SYNTHETIC — it bypasses all checks and is NOT a ``principals`` row.
 """
 

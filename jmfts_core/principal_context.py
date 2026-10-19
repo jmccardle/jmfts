@@ -31,7 +31,7 @@ class CurrentPrincipal:
     is_owner: bool = False
 
 
-# The synthetic owner: the shared bearer / ephemeral boot token. It bypasses all
+# The synthetic owner: the shared bearer. It bypasses all
 # access control and deliberately has NO database row — owner auth stays a
 # constant-time token compare that needs no DB (see api/auth.py).
 OWNER = CurrentPrincipal(id=None, name="owner", is_owner=True)

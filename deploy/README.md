@@ -226,9 +226,8 @@ block for around ten seconds on a host this pod does not own and restart a healt
 appliance. It is now the cheap one, and the LLM probe has its own path with its own
 credential.
 
-`JMFTS_API_TOKEN` must be PINNED in a Secret for a multi-replica Deployment. Left blank,
-each replica generates its own ephemeral token and prints it to its boot log, so which
-token works depends on which pod answered.
+`JMFTS_API_TOKEN` must be set in a Secret. Left blank, the API pod refuses to start and
+its log names the variable.
 
 Autoscaling needs [KEDA](https://keda.sh) and is applied separately:
 

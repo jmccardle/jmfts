@@ -488,7 +488,7 @@ def _die_unauthorized(resp: httpx.Response, *, token_sent: bool) -> None:
 
     Two different mistakes, told apart by whether a header went out: no token configured
     at all, or one the server does not accept. A stale token is the usual second case --
-    a server whose own ``JMFTS_API_TOKEN`` is blank prints a new one on every start.
+    a client and server that no longer share the same ``JMFTS_API_TOKEN``.
     """
     try:
         detail = resp.json().get("detail", resp.text)
@@ -497,8 +497,7 @@ def _die_unauthorized(resp: httpx.Response, *, token_sent: bool) -> None:
     if token_sent:
         hint = (
             "the server rejected JMFTS_API_TOKEN. Check it against the server's "
-            "JMFTS_API_TOKEN, or, if that is blank, against the token the server printed "
-            "at its most recent startup."
+            "JMFTS_API_TOKEN."
         )
     else:
         hint = (

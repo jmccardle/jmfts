@@ -4,11 +4,11 @@ One app-level FastAPI dependency (`require_token`) gates every router. Clients
 send ``Authorization: Bearer <token>``; the token is compared constant-time
 (``secrets.compare_digest``) against the *effective token*.
 
-The effective token is ``settings.api_token`` when that is set. When it is
-empty, a token is GENERATED ONCE per process via ``secrets.token_urlsafe(32)``,
-printed to stdout, and then REQUIRED on every request — exactly like Jupyter's
-startup token. A missing ``JMFTS_API_TOKEN`` therefore never grants
-unauthenticated access; it only changes where the required token comes from.
+The effective token is ``settings.api_token``, and it MUST be set: an empty, unset or
+whitespace-only ``JMFTS_API_TOKEN`` makes the server refuse to start
+(:class:`ApiTokenNotConfigured`). It used to generate a one-off token and print it, which
+left any client sharing the same environment sending an empty bearer and getting 401 on
+every call, with the cause on one stdout line in the server's log (issue #51).
 
 Public exceptions to the gate: the ``/health`` liveness probe stays open, and
 ``OPTIONS`` (CORS preflight) is never blocked. Everything else — including
@@ -75,9 +75,8 @@ JMFTS_RUNNER_SCHEME = "JMFTSRunnerKey"
 API_BEARER = BearerScheme(
     scheme_name=API_SCHEME,
     description=(
-        "The shared API token (JMFTS_API_TOKEN). When that setting is empty the server "
-        "generates one per run and prints it to the boot log — it is never absent. Paste "
-        "the token itself; the `Bearer ` prefix is added for you."
+        "The shared API token (JMFTS_API_TOKEN). The server refuses to start without "
+        "one. Paste the token itself; the `Bearer ` prefix is added for you."
     ),
 )
 
@@ -110,31 +109,28 @@ PUBLIC_PATHS = frozenset({"/health", "/health/"})
 # under this prefix declares `require_runner`, and no route outside it does.
 RUNNER_PREFIX = "/runner"
 
-# Process-singleton for the generated ephemeral token. Populated at most once by
-# `get_effective_token()` when no JMFTS_API_TOKEN is configured.
-_generated_token: str | None = None
+
+class ApiTokenNotConfigured(RuntimeError):
+    """``JMFTS_API_TOKEN`` is empty, unset or whitespace-only; the API will not start."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "JMFTS_API_TOKEN is not set (or is empty). The API server refuses to start "
+            "without a shared bearer token. Set one, e.g. "
+            '`export JMFTS_API_TOKEN="$(openssl rand -base64 32)"`, or put '
+            "JMFTS_API_TOKEN=<token> in .env, and give clients the same value."
+        )
 
 
 def get_effective_token() -> str:
-    """Return the token every request must present.
+    """Return the token every request must present, or raise :class:`ApiTokenNotConfigured`.
 
-    ``settings.api_token`` when configured; otherwise a process-singleton token
-    generated once and printed to stdout. Generation happens exactly once
-    (guarded by the module-level singleton), not per request.
+    Whitespace-only counts as empty. There is no generated fallback and no default.
     """
-    settings = get_settings()
-    if settings.api_token:
-        return settings.api_token
-
-    global _generated_token
-    if _generated_token is None:
-        _generated_token = secrets.token_urlsafe(32)
-        print(
-            "JMFTS: no JMFTS_API_TOKEN set — generated an ephemeral token for "
-            f"this run: {_generated_token}\n"
-            "  Set JMFTS_API_TOKEN to pin a fixed token and silence this message."
-        )
-    return _generated_token
+    token = get_settings().api_token
+    if not token or not token.strip():
+        raise ApiTokenNotConfigured()
+    return token
 
 
 def _resolve_principal(presented: str):

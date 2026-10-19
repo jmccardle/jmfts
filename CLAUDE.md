@@ -330,7 +330,7 @@ Tier 2 is **not** pure Python, whatever the three names suggest: `python-docx` a
 
 ### Two credentials, kept disjoint
 
-`jmfts_core/rest/auth.py` holds both. `require_token` authenticates the API bearer and binds a principal into a contextvar, which repositories read to enforce subtree access. `require_runner` gates `/runner` with a different key and binds NO principal, because a runner has no subtree and binding one would be a lie about who is asking. A blank `JMFTS_RUNNER_KEY` answers 503 (surface off), never 401 and never allow-all. `tests/test_runner_auth.py` asserts the correspondence in both directions.
+`jmfts_core/rest/auth.py` holds both. `require_token` authenticates the API bearer (`get_effective_token()` raises `ApiTokenNotConfigured` when it is blank — there is no generated token) and binds a principal into a contextvar, which repositories read to enforce subtree access. `require_runner` gates `/runner` with a different key and binds NO principal, because a runner has no subtree and binding one would be a lie about who is asking. A blank `JMFTS_RUNNER_KEY` answers 503 (surface off), never 401 and never allow-all. `tests/test_runner_auth.py` asserts the correspondence in both directions.
 
 ### Embedding as a service
 
@@ -350,7 +350,7 @@ All settings use `JMFTS_` prefix. See `.env.example` for the full list. Key grou
 - `JMFTS_EMBEDDING_*` — model name and device (cuda/cpu)
 - `JMFTS_TOKEN_*` — token selection parameters (top_percent, embed_dims)
 - `JMFTS_BM25_*` — BM25 tuning (k1, b)
-- `JMFTS_API_TOKEN` / `JMFTS_RUNNER_KEY` — the two credentials; see *Two credentials* above
+- `JMFTS_API_TOKEN` / `JMFTS_RUNNER_KEY` — the two credentials; see *Two credentials* above. `JMFTS_API_TOKEN` is REQUIRED: empty, unset or whitespace makes the API server refuse to start (`ApiTokenNotConfigured`); `JMFTS_RUNNER_KEY` blank is the off switch
 - `JMFTS_RUNNER_URL` — where this process asks for vectors, if not itself
 - `JMFTS_LLM_*` — OpenAI-compatible endpoint for synthesis, RAPTOR and fact extraction. Blank by default and blank is supported: everything except summarization, RAPTOR, fact extraction and synthesis works without an LLM.
 - `JMFTS_SUMMARIZATION_*` — the shape of the summarization request (context, temperature), not which endpoint serves it

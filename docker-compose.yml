@@ -1,12 +1,12 @@
 # Local JMFTS development stack: pgvector Postgres + the API, both in Docker.
 #
 #   docker compose up --build -d      # first run builds the image (CPU torch)
-#   docker compose logs -f api        # watch startup / the auth token line
+#   docker compose logs -f api        # watch startup
 #   docker compose down               # stop (keeps data + model cache volumes)
 #   docker compose down -v            # stop and WIPE the DB + HF model cache
 #
-# The API is reachable at http://127.0.0.1:8100 with a pinned dev bearer token
-# (JMFTS_API_TOKEN below). LLM-backed endpoints (raptor, fact-extraction,
+# The API is reachable at http://127.0.0.1:8100 with a bearer token you supply
+# (JMFTS_API_TOKEN, required). LLM-backed endpoints (raptor, fact-extraction,
 # synthesis) report "degraded" — no LLM is wired here — but documents,
 # embeddings, chunking, indexing and search all work, which is everything the
 # tau session store needs.
@@ -75,9 +75,9 @@ services:
       JMFTS_DB_USER: jmfts
       JMFTS_DB_PASSWORD: jmfts
       JMFTS_EMBEDDING_DEVICE: cpu
-      # Pinned dev token so tau can point at this instance with a known value.
-      # Override by exporting JMFTS_API_TOKEN before `docker compose up`.
-      JMFTS_API_TOKEN: ${JMFTS_API_TOKEN:-jmfts-dev-local}
+      # REQUIRED, no default: export JMFTS_API_TOKEN (or put it in .env) before
+      # `docker compose up`; compose stops here if it is empty. Clients use the same value.
+      JMFTS_API_TOKEN: ${JMFTS_API_TOKEN:?set JMFTS_API_TOKEN (e.g. openssl rand -base64 32); the API refuses to start without it}
       # Which browser origins may call this API directly (a JSON list of explicit origins; the
       # server default is none). The two below are the standalone console's dev server in
       # jmfts-ui/, so typing this API's address into its address bar works as well as going
