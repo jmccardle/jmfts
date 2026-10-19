@@ -15,6 +15,19 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
 
 ### Added
 
+- **A triple's object can be a literal over REST, not only a document node (#48).**
+  `POST /triples`, `PUT /triples` and `POST /triples/{id}/supersede` take `object_literal`
+  (the lexical form) and an optional `object_datatype` (an absolute IRI; omitted means
+  `xsd:string`) in place of `object_id`. Exactly one of `object_id` and `object_literal`: neither
+  or both is a 422 naming both fields, and `object_datatype` without a literal is a 422. A
+  datatype in the XSD namespace that the appliance does not know, a CURIE or relative IRI as a
+  datatype, or a literal that is not a valid value of its datatype (`"abc"` as `xsd:integer`)
+  is refused, never coerced; a datatype outside XSD is stored as the opaque IRI it is. `PUT`
+  is idempotent over a literal on exactly the key `uq_triple_literal` already defines (subject,
+  predicate, `md5(object_literal)`, `COALESCE(object_datatype, '')`), so the same text under a
+  different datatype is a different fact and a literal never collides with a node-object
+  triple. Write access is the node-object rule: write on the subject, nothing on the
+  object. No batch route; that is #14.
 - **`jmfts-eval beir`: the README's BEIR table can be reproduced from a release.** The
   harness that measured it lived in `benchmarks/beir/` on the history before 0.1.0 and was
   not carried into the re-rooted tree, so nothing here could check the numbers it publishes.
