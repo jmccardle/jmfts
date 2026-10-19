@@ -8,7 +8,7 @@ so existing ``from jmfts_core.rest.schemas import TripleCreate`` imports keep wo
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from jmfts_client.contracts.document import DocumentResponse
 
@@ -40,23 +40,54 @@ class PredicateResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+def _exactly_one_object(object_id: Optional[int], object_literal: Optional[str], object_datatype):
+    """The shape rule both write requests share: one object, and a datatype only on a literal."""
+    if (object_id is None) == (object_literal is None):
+        raise ValueError(
+            "a triple's object is exactly one of object_id and object_literal; "
+            f"got object_id={object_id!r}, object_literal={object_literal!r}"
+        )
+    if object_datatype is not None and object_literal is None:
+        raise ValueError("object_datatype types a literal; give object_literal, not object_id")
+
+
 class TripleCreate(BaseModel):
     """Request to create a triple.
 
-    The object stays a document node on this surface. ``triples.object_literal`` exists in
-    the schema as of 0.3.0 and the repository can write it, but no REST verb mints a
-    literal fact yet — literals arrive from the sheet reader (``SPRINT_0_3_0.md`` 6.5),
-    which is a later step, and an idempotent ``PUT /triples`` over literals needs the
-    uniqueness question settled first.
+    The object is EXACTLY ONE of a document node (``object_id``) or a literal value
+    (``object_literal``, optionally typed by ``object_datatype``). Neither, or both, is a
+    422. ``object_datatype`` without ``object_literal`` is a 422 too: a datatype belongs to
+    a literal, and the schema's ``ck_triples_object_exactly_one`` refuses it on a node.
     """
 
     subject_id: int
     predicate_id: int
-    object_id: int
+    object_id: Optional[int] = Field(
+        default=None,
+        description="The object as a document node. Exactly one of object_id and "
+        "object_literal must be given.",
+    )
+    object_literal: Optional[str] = Field(
+        default=None,
+        description="The object as a literal value, in its lexical form. Exactly one of "
+        "object_id and object_literal must be given.",
+    )
+    object_datatype: Optional[str] = Field(
+        default=None,
+        description="The absolute IRI typing object_literal, e.g. "
+        "http://www.w3.org/2001/XMLSchema#integer. Omitted means xsd:string. Only valid "
+        "beside object_literal; an xsd datatype this appliance does not know, or a literal "
+        "that is not a valid value of it, is refused rather than stored.",
+    )
     source_document_id: Optional[int] = None
     valid_from: Optional[datetime] = None
     valid_until: Optional[datetime] = None
     fact_type: str = "atemporal"
+
+    @model_validator(mode="after")
+    def _one_object(self):
+        _exactly_one_object(self.object_id, self.object_literal, self.object_datatype)
+        return self
 
 
 class TripleResponse(BaseModel):
@@ -119,16 +150,39 @@ class TripleInvalidateRequest(BaseModel):
 
 
 class TripleSupersedRequest(BaseModel):
-    """Request to create a new triple that supersedes an existing one"""
+    """Request to create a new triple that supersedes an existing one.
+
+    The successor's object follows :class:`TripleCreate`: exactly one of ``object_id`` and
+    ``object_literal``, and ``object_datatype`` only beside a literal.
+    """
 
     subject_id: int
     predicate_id: int
-    object_id: int
+    object_id: Optional[int] = Field(
+        default=None,
+        description="The successor's object as a document node. Exactly one of object_id "
+        "and object_literal must be given.",
+    )
+    object_literal: Optional[str] = Field(
+        default=None,
+        description="The successor's object as a literal value, in its lexical form. "
+        "Exactly one of object_id and object_literal must be given.",
+    )
+    object_datatype: Optional[str] = Field(
+        default=None,
+        description="The absolute IRI typing object_literal; omitted means xsd:string. "
+        "Only valid beside object_literal.",
+    )
     source_document_id: Optional[int] = None
     valid_from: Optional[datetime] = None
     valid_until: Optional[datetime] = None
     fact_type: str = "atemporal"
     reason: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _one_object(self):
+        _exactly_one_object(self.object_id, self.object_literal, self.object_datatype)
+        return self
 
 
 class PathStep(BaseModel):

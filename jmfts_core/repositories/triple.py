@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import select, and_, or_, exists
+from sqlalchemy import select, and_, or_, exists, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, joinedload
 
@@ -24,6 +24,23 @@ class TripleAlreadyInvalidatedError(Exception):
         if invalidated_by is not None:
             msg += f" by triple {invalidated_by}"
         super().__init__(msg)
+
+
+def _check_object_shape(
+    object_id: Optional[int], object_literal: Optional[str], object_datatype: Optional[str]
+) -> None:
+    """Raise ValueError unless the object is one of a node or a literal, typed only if literal.
+
+    Raised here so a caller gets the name of its own mistake rather than the IntegrityError
+    ``ck_triples_object_exactly_one`` would raise after poisoning the transaction.
+    """
+    if (object_id is None) == (object_literal is None):
+        raise ValueError(
+            "a triple's object is exactly one of object_id and object_literal; "
+            f"got object_id={object_id!r}, object_literal={object_literal!r}"
+        )
+    if object_datatype is not None and object_literal is None:
+        raise ValueError("object_datatype types a literal; it cannot type a document node")
 
 
 class TripleRepository:
@@ -153,13 +170,7 @@ class TripleRepository:
         and read-gating the ``object_id`` the row will not carry would be a check on the
         wrong thing.
         """
-        if (object_id is None) == (object_literal is None):
-            raise ValueError(
-                "a triple's object is exactly one of object_id and object_literal; "
-                f"got object_id={object_id!r}, object_literal={object_literal!r}"
-            )
-        if object_datatype is not None and object_literal is None:
-            raise ValueError("object_datatype types a literal; it cannot type a document node")
+        _check_object_shape(object_id, object_literal, object_datatype)
         require_triple_write(self.session, subject_id, object_id)
         triple = Triple(
             subject_id=subject_id,
@@ -181,52 +192,73 @@ class TripleRepository:
         self,
         subject_id: int,
         predicate_id: int,
-        object_id: int,
+        object_id: Optional[int] = None,
         source_document_id: Optional[int] = None,
         valid_from: Optional[datetime] = None,
         valid_until: Optional[datetime] = None,
         fact_type: FactType = FactType.atemporal,
+        object_literal: Optional[str] = None,
+        object_datatype: Optional[str] = None,
     ) -> tuple[Triple, bool]:
         """Insert a triple, returning the existing one if it already exists.
 
         Uses INSERT ... ON CONFLICT DO NOTHING to avoid IntegrityError and
         savepoint rollback issues during bulk ingestion.
 
+        The identity of a fact is the unique key of its object kind. For a node object it is
+        ``(subject_id, predicate_id, object_id)``. For a literal it is exactly
+        ``uq_triple_literal``: ``(subject_id, predicate_id, md5(object_literal),
+        COALESCE(object_datatype, ''))`` — so an untyped literal and one typed
+        ``xsd:string`` are DIFFERENT facts, as the index has them, and a literal never
+        collides with a node-object triple. Invalidated rows count: the key has no
+        ``invalidated_at`` term.
+
         Subtree RBAC as in :meth:`create_triple` — write on the subject, read on the
-        object. The gate runs before the INSERT and therefore before the conflict is
-        known, so re-asserting an existing fact is refused on the same terms as asserting
-        a new one: "this fact still holds" is a write, and a caller that may not write here
-        must not be able to tell an existing fact from a fresh one by which error it gets.
-        ``object_id`` is required on this leg, so there is no literal case to consider.
+        object (a literal has none, so the subject's check is the whole gate). The gate
+        runs before the INSERT and therefore before the conflict is known, so re-asserting
+        an existing fact is refused on the same terms as asserting a new one: "this fact
+        still holds" is a write, and a caller that may not write here must not be able to
+        tell an existing fact from a fresh one by which error it gets.
 
         Returns:
             (triple, created) — created is False if the triple already existed.
         """
+        _check_object_shape(object_id, object_literal, object_datatype)
         require_triple_write(self.session, subject_id, object_id)
-        stmt = (
-            pg_insert(Triple.__table__)
-            .values(
-                subject_id=subject_id,
-                predicate_id=predicate_id,
-                object_id=object_id,
-                source_document_id=source_document_id,
-                valid_from=valid_from,
-                valid_until=valid_until,
-                fact_type=fact_type,
-            )
-            .on_conflict_do_nothing(index_elements=["subject_id", "predicate_id", "object_id"])
+        values = dict(
+            subject_id=subject_id,
+            predicate_id=predicate_id,
+            object_id=object_id,
+            object_literal=object_literal,
+            object_datatype=object_datatype,
+            source_document_id=source_document_id,
+            valid_from=valid_from,
+            valid_until=valid_until,
+            fact_type=fact_type,
         )
-        result = self.session.execute(stmt)
-        created = result.rowcount > 0
-
-        triple = self.session.execute(
-            select(Triple).where(
+        stmt = pg_insert(Triple.__table__).values(**values)
+        if object_id is not None:
+            stmt = stmt.on_conflict_do_nothing(
+                index_elements=["subject_id", "predicate_id", "object_id"]
+            )
+            match = [
                 Triple.subject_id == subject_id,
                 Triple.predicate_id == predicate_id,
                 Triple.object_id == object_id,
-            )
-        ).scalar_one()
-
+            ]
+        else:
+            # uq_triple_literal is an expression index; the only unique index a literal row
+            # can hit (the node-object UNIQUE ignores NULL object_id), so a bare
+            # ON CONFLICT DO NOTHING names it without restating the expressions.
+            stmt = stmt.on_conflict_do_nothing()
+            match = [
+                Triple.subject_id == subject_id,
+                Triple.predicate_id == predicate_id,
+                func.md5(Triple.object_literal) == func.md5(object_literal),
+                func.coalesce(Triple.object_datatype, "") == (object_datatype or ""),
+            ]
+        created = self.session.execute(stmt).rowcount > 0
+        triple = self.session.execute(select(Triple).where(*match)).scalar_one()
         return triple, created
 
     def get_triple(self, triple_id: int) -> Optional[Triple]:
@@ -400,12 +432,14 @@ class TripleRepository:
         old_triple_id: int,
         subject_id: int,
         predicate_id: int,
-        object_id: int,
+        object_id: Optional[int] = None,
         source_document_id: Optional[int] = None,
         valid_from: Optional[datetime] = None,
         valid_until: Optional[datetime] = None,
         fact_type: FactType = FactType.atemporal,
         reason: Optional[str] = None,
+        object_literal: Optional[str] = None,
+        object_datatype: Optional[str] = None,
     ) -> tuple[Optional[Triple], Optional[Triple]]:
         """Create a new triple that supersedes (invalidates) an existing one.
 
@@ -449,6 +483,8 @@ class TripleRepository:
             subject_id=subject_id,
             predicate_id=predicate_id,
             object_id=object_id,
+            object_literal=object_literal,
+            object_datatype=object_datatype,
             source_document_id=source_document_id,
             valid_from=valid_from,
             valid_until=valid_until,
