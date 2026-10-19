@@ -143,6 +143,14 @@ def _server_cli(args, env_token, cwd):
     import sys
 
     env = {k: v for k, v in os.environ.items() if k != "JMFTS_API_TOKEN"}
+    # The child runs from a scratch cwd (so no .env can supply a token), which means it
+    # must be told which tree to import: the one under test, not whatever is installed.
+    import jmfts_client
+    import jmfts_core
+
+    env["PYTHONPATH"] = os.pathsep.join(
+        sorted({os.path.dirname(os.path.dirname(m.__file__)) for m in (jmfts_core, jmfts_client)})
+    )
     if env_token is not None:
         env["JMFTS_API_TOKEN"] = env_token
     return subprocess.run(
