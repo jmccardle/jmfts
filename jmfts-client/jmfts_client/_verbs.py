@@ -2024,7 +2024,7 @@ class _GeneratedVerbs(_VerbTransport):
 
         ``POST /triples`` — TripleService.create_triple
 
-        Raises on 422 (server: InvalidFactTypeError).
+        Raises on 422 (server: InvalidFactTypeError, InvalidLiteralError).
         """
         return self._call(
             "POST",
@@ -2211,7 +2211,7 @@ class _GeneratedVerbs(_VerbTransport):
 
         Raises on 404 (server: LookupError).
         Raises on 409 (server: TripleAlreadyInvalidatedError).
-        Raises on 422 (server: InvalidFactTypeError).
+        Raises on 422 (server: InvalidFactTypeError, InvalidLiteralError).
         """
         return self._call(
             "POST",
@@ -2229,7 +2229,7 @@ class _GeneratedVerbs(_VerbTransport):
 
         ``PUT /triples`` — TripleService.upsert_triple
 
-        Raises on 422 (server: InvalidFactTypeError).
+        Raises on 422 (server: InvalidFactTypeError, InvalidLiteralError).
         """
         return self._call(
             "PUT",

@@ -2744,16 +2744,26 @@ export interface TopDescendantItem {
 /**
  * Request to create a triple.
  *
- * The object stays a document node on this surface. ``triples.object_literal`` exists in
- * the schema as of 0.3.0 and the repository can write it, but no REST verb mints a
- * literal fact yet — literals arrive from the sheet reader (``SPRINT_0_3_0.md`` 6.5),
- * which is a later step, and an idempotent ``PUT /triples`` over literals needs the
- * uniqueness question settled first.
+ * The object is EXACTLY ONE of a document node (``object_id``) or a literal value
+ * (``object_literal``, optionally typed by ``object_datatype``). Neither, or both, is a
+ * 422. ``object_datatype`` without ``object_literal`` is a 422 too: a datatype belongs to
+ * a literal, and the schema's ``ck_triples_object_exactly_one`` refuses it on a node.
  */
 export interface TripleCreate {
   subject_id: number;
   predicate_id: number;
-  object_id: number;
+  /**
+   * The object as a document node. Exactly one of object_id and object_literal must be given.
+   */
+  object_id?: number | null;
+  /**
+   * The object as a literal value, in its lexical form. Exactly one of object_id and object_literal must be given.
+   */
+  object_literal?: string | null;
+  /**
+   * The absolute IRI typing object_literal, e.g. http://www.w3.org/2001/XMLSchema#integer. Omitted means xsd:string. Only valid beside object_literal; an xsd datatype this appliance does not know, or a literal that is not a valid value of it, is refused rather than stored.
+   */
+  object_datatype?: string | null;
   source_document_id?: number | null;
   valid_from?: string | null;
   valid_until?: string | null;
@@ -2813,12 +2823,26 @@ export interface TripleResponse {
 }
 
 /**
- * Request to create a new triple that supersedes an existing one
+ * Request to create a new triple that supersedes an existing one.
+ *
+ * The successor's object follows :class:`TripleCreate`: exactly one of ``object_id`` and
+ * ``object_literal``, and ``object_datatype`` only beside a literal.
  */
 export interface TripleSupersedRequest {
   subject_id: number;
   predicate_id: number;
-  object_id: number;
+  /**
+   * The successor's object as a document node. Exactly one of object_id and object_literal must be given.
+   */
+  object_id?: number | null;
+  /**
+   * The successor's object as a literal value, in its lexical form. Exactly one of object_id and object_literal must be given.
+   */
+  object_literal?: string | null;
+  /**
+   * The absolute IRI typing object_literal; omitted means xsd:string. Only valid beside object_literal.
+   */
+  object_datatype?: string | null;
   source_document_id?: number | null;
   valid_from?: string | null;
   valid_until?: string | null;

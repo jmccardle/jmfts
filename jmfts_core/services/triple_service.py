@@ -13,6 +13,7 @@ without a call-site check:
 - ``LookupError``          → 404 (predicate/triple not found)
 - ``PredicateConflictError`` → 409 (predicate name already exists)
 - ``InvalidFactTypeError`` → 422 (fact_type not in the allowed set)
+- ``InvalidLiteralError``  → 422 (unknown datatype, or a literal that is not a value of it)
 
 The 404 detail strings ("Predicate not found" / "Triple not found"), the 409 string,
 and the 422 string are all preserved verbatim.
@@ -38,6 +39,7 @@ from jmfts_client.contracts.triple import (
     TripleSupersedRequest,
 )
 from jmfts_core.access import readable_id_subset
+from jmfts_core.literals import InvalidLiteralError, check_literal
 from jmfts_core.models.triple import FactType
 from jmfts_core.registry import expose, register_service
 from jmfts_core.repositories.triple import TripleAlreadyInvalidatedError, TripleRepository
@@ -163,7 +165,7 @@ class TripleService:
         "/triples",
         response_model=TripleResponse,
         status_code=201,
-        errors={InvalidFactTypeError: 422},
+        errors={InvalidFactTypeError: 422, InvalidLiteralError: 422},
         tags=["triples"],
         summary="Create a new triple",
     )
@@ -176,14 +178,23 @@ class TripleService:
         than raising ``IntegrityError``. Pairs with the exposed ``supersede``/
         ``invalidate`` legs to form a complete assert/retract/supersede fact API. Without
         the flag the plain insert still raises on a duplicate fact (unchanged behaviour).
+
+        The object is a document node (``object_id``) or a literal (``object_literal`` with
+        an optional ``object_datatype``). A literal fact's identity is ``uq_triple_literal``,
+        so a duplicate literal create without ``dedup`` raises the same way a duplicate
+        node-object create does.
         """
         fact_type = _parse_fact_type(request.fact_type)
+        if request.object_literal is not None:
+            check_literal(request.object_literal, request.object_datatype)
         repo = TripleRepository(self.session)
         if dedup:
             triple, _created = repo.upsert_triple(
                 subject_id=request.subject_id,
                 predicate_id=request.predicate_id,
                 object_id=request.object_id,
+                object_literal=request.object_literal,
+                object_datatype=request.object_datatype,
                 source_document_id=request.source_document_id,
                 valid_from=request.valid_from,
                 valid_until=request.valid_until,
@@ -194,6 +205,8 @@ class TripleService:
                 subject_id=request.subject_id,
                 predicate_id=request.predicate_id,
                 object_id=request.object_id,
+                object_literal=request.object_literal,
+                object_datatype=request.object_datatype,
                 source_document_id=request.source_document_id,
                 valid_from=request.valid_from,
                 valid_until=request.valid_until,
@@ -207,7 +220,7 @@ class TripleService:
         "PUT",
         "/triples",
         response_model=TripleResponse,
-        errors={InvalidFactTypeError: 422},
+        errors={InvalidFactTypeError: 422, InvalidLiteralError: 422},
         tags=["triples"],
         summary="Assert a fact idempotently (insert-or-return the existing triple)",
     )
@@ -227,13 +240,24 @@ class TripleService:
         object is ``supersede_triple`` / ``invalidate_triple``, which preserves the version chain;
         a silent metadata overwrite here would fork that history. Re-assert = "this fact still
         holds", not "rewrite this fact".
+
+        **A literal fact's identity is exactly ``uq_triple_literal``** (``schema.sql``):
+        ``(subject_id, predicate_id, md5(object_literal), COALESCE(object_datatype, ''))``.
+        Same text, same datatype, same subject and predicate is the same fact; the same text
+        under a different datatype is a different one, and an untyped literal is distinct
+        from one explicitly typed ``xsd:string`` because the index says so. A literal never
+        collides with a node-object triple.
         """
         fact_type = _parse_fact_type(request.fact_type)
+        if request.object_literal is not None:
+            check_literal(request.object_literal, request.object_datatype)
         repo = TripleRepository(self.session)
         triple, _created = repo.upsert_triple(
             subject_id=request.subject_id,
             predicate_id=request.predicate_id,
             object_id=request.object_id,
+            object_literal=request.object_literal,
+            object_datatype=request.object_datatype,
             source_document_id=request.source_document_id,
             valid_from=request.valid_from,
             valid_until=request.valid_until,
@@ -385,7 +409,12 @@ class TripleService:
         "/triples/{triple_id}/supersede",
         response_model=TripleResponse,
         status_code=201,
-        errors={LookupError: 404, InvalidFactTypeError: 422, TripleAlreadyInvalidatedError: 409},
+        errors={
+            LookupError: 404,
+            InvalidFactTypeError: 422,
+            InvalidLiteralError: 422,
+            TripleAlreadyInvalidatedError: 409,
+        },
         tags=["triples"],
         summary="Create a new triple that supersedes (invalidates) an existing one",
     )
@@ -402,11 +431,15 @@ class TripleService:
         if not old_triple:
             raise LookupError("Triple not found")
         fact_type = _parse_fact_type(request.fact_type)
+        if request.object_literal is not None:
+            check_literal(request.object_literal, request.object_datatype)
         new_triple, _ = repo.supersede_triple(
             old_triple_id=triple_id,
             subject_id=request.subject_id,
             predicate_id=request.predicate_id,
             object_id=request.object_id,
+            object_literal=request.object_literal,
+            object_datatype=request.object_datatype,
             source_document_id=request.source_document_id,
             valid_from=request.valid_from,
             valid_until=request.valid_until,
