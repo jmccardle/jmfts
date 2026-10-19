@@ -10,6 +10,9 @@ DDL, so a database built from it is already at the newest schema; the deltas in
 ``jmfts_core/sql/migrations/`` exist for databases that predate a change and are applied by
 an operator who knows which ones the target has already seen.
 
+Run against a database that already holds tables, it loads nothing (``schema.sql`` is bare
+``CREATE TABLE``) and reports as ``--pending`` does: see :func:`report_initialised`.
+
 ``--pending`` is how the operator finds that out without remembering it. It reads the
 target's ledger and prints the shipped deltas the ledger does not name; it applies nothing,
 because applying a delta stays a deliberate act. Before it existed the only reading
@@ -23,6 +26,7 @@ answering MaxSim queries from an index fitted to an empty table, with no error a
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 
 import psycopg2
@@ -268,6 +272,74 @@ def report_pending() -> int:
     return PENDING_SOME
 
 
+def existing_tables() -> set[str]:
+    """The ordinary tables in the configured database's ``public`` schema."""
+    settings = get_settings()
+    conn = psycopg2.connect(
+        host=settings.db_host,
+        port=settings.db_port,
+        user=settings.db_user,
+        password=settings.db_password,
+        database=settings.db_name,
+    )
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')"
+        )
+        return {row[0] for row in cursor.fetchall()}
+    finally:
+        conn.close()
+
+
+#: The two tables whose presence defines "initialised": the root of the data model and the
+#: ledger that says which deltas it has seen. The same ledger ``--pending`` reads, so there
+#: is one notion of an initialised database, not two.
+_INITIALISED_MARKERS = ("documents", jmfts_sql.LEDGER_TABLE)
+
+
+def report_initialised(tables: set[str]) -> int:
+    """A database that already holds tables: apply nothing, say what it is missing or owes.
+
+    ``schema.sql`` is bare ``CREATE TABLE`` and is for an empty database; running it again
+    fails, and "repairing" a partial database by re-running it would hide the cause. Deltas
+    are never applied here either — choosing to apply one is the operator's act, and some
+    (024, 025) can refuse or delete data. So this returns the ``--pending`` answer: 0 when
+    nothing is outstanding, 1 with the names and the ``psql`` command when something is.
+    """
+    settings = get_settings()
+    missing_markers = [t for t in _INITIALISED_MARKERS if t not in tables]
+    if missing_markers:
+        schema_tables = set(re.findall(r"^CREATE TABLE (\w+)", jmfts_sql.schema_sql(), re.M))
+        missing = sorted(schema_tables - tables)
+        print(
+            f"error: database '{settings.db_name}' is partially initialised: it has "
+            f"{len(tables)} table(s) but no {' and no '.join(missing_markers)} table. "
+            f"Tables schema.sql creates that are missing: {', '.join(missing) or 'none'}.",
+            file=sys.stderr,
+        )
+        print(
+            "Nothing was changed. Not repaired automatically: re-running schema.sql would fail "
+            "on the tables that exist. Restore the database, drop it, or (if it predates "
+            "migration 017) apply 017_migration_ledger.sql and re-run.",
+            file=sys.stderr,
+        )
+        return 1
+
+    code = report_pending()
+    if code == PENDING_NONE:
+        print(f"Database '{settings.db_name}' already initialised, 0 pending. Nothing applied.")
+        return 0
+    if code == PENDING_SOME:
+        print(
+            f"error: database '{settings.db_name}' is already initialised but has pending "
+            "migrations (named above). Nothing was applied; apply them yourself, in order.",
+            file=sys.stderr,
+        )
+    return code
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="jmfts-init-db",
@@ -311,7 +383,11 @@ def main(argv: list[str] | None = None) -> int:
     print()
 
     try:
-        create_database()
+        created = create_database()
+        if not created:
+            tables = existing_tables()
+            if tables:
+                return report_initialised(tables)
         apply_schema()
         count = check_connection()
     except Exception as exc:

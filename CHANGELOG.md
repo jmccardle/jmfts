@@ -70,6 +70,14 @@ come out in order, and every no-anchor 409 says why for the node in front of it.
 
 ### Changed
 
+- **`jmfts-init-db` on a database that already holds tables loads nothing and answers like
+  `--pending`.** Current: prints `already initialised, 0 pending`, exit 0. Deltas outstanding:
+  names them with the `psql -v ON_ERROR_STOP=1 -f` command, exit 1, applies nothing. Tables but
+  no `documents` / `schema_migrations`: exit 1 naming what is missing, nothing repaired. A fresh
+  or empty database behaves as before. A deploy that ran `jmfts-init-db` and ignored its exit
+  status on an existing database used to fail on every run; now it fails only when deltas are
+  outstanding.
+
 - **The MaxSim and filtered recall gates print what they measured.** Every run of
   `tests/test_maxsim_recall.py` and `tests/test_filtered_recall.py` ends with a `readings`
   section, without `-s`: gated and open hits out of 240 with the margin over the floor in
@@ -90,6 +98,10 @@ come out in order, and every no-anchor 409 says why for the node in front of it.
 
 ### Fixed
 
+- **`jmfts-init-db` no longer fails on its second run (#50).** It skipped `CREATE DATABASE` for
+  an existing database and then ran `schema.sql`, which is bare `CREATE TABLE`, so
+  `jmfts-init-db && jmfts-server` did not survive a restart. It now detects an initialised
+  database from the same ledger `--pending` reads and loads nothing (see Changed).
 - **`PUT /templates/{id}` no longer confirms that a hidden template exists.** It validated
   the category before the access gate, so a caller with no read access who sent an invalid
   category got 422 for a template under an access-control root and 404 for an id that does

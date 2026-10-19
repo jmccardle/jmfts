@@ -128,7 +128,11 @@ call log does not show; `jmfts-web/README.md` says how that is held.
 
 `jmfts-init-db` loads `jmfts_core/sql/schema.sql` and never a migration. That file is the
 complete current DDL, so a database it builds is already current and has nothing
-outstanding. A database from an earlier version is the other case, and the upgrade deltas
+outstanding. Run again against a database that already holds the schema, it loads nothing:
+it prints `already initialised, 0 pending` and exits 0 (so `jmfts-init-db && jmfts-server`
+survives a restart), or, when deltas are outstanding, names them and exits 1 without applying
+them. A database with tables but no `documents` or `schema_migrations` table is refused,
+naming what is missing, rather than repaired. A database from an earlier version is the other case, and the upgrade deltas
 ship inside the package as `jmfts_core/sql/migrations/`.
 
 ```bash

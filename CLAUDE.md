@@ -29,7 +29,7 @@ pip install -e ".[web]"     # + jmfts-web, the console at /app (install ./jmfts-
 pip install -e ".[dev]"     # + pytest/black/ruff; implies [embed] [office] [rdf] [sketch]
 
 # Database setup
-jmfts-init-db
+jmfts-init-db               # idempotent: on an initialised db applies nothing, reports pending (exit 1 if any)
 jmfts-init-db --pending     # shipped migrations THIS database has not applied (exit 1 if any)
 
 # Run API server
