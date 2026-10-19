@@ -154,6 +154,7 @@ For a working PostgreSQL and API in one command, the compose file brings up
 `pgvector/pgvector:pg16` alongside the API, and a LibreOffice converter beside them:
 
 ```bash
+export JMFTS_API_TOKEN="$(openssl rand -base64 32)"   # required: the API refuses to start without one
 docker compose up
 ```
 

@@ -13,6 +13,19 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
 
 ## [Unreleased]
 
+### Breaking
+
+- **An empty `JMFTS_API_TOKEN` now makes the API server refuse to start.** Until now an
+  empty or unset token made the server generate a one-off token and print it to stdout, so a
+  client sharing the same environment (a compose file, a Secret) sent an empty bearer and got
+  401 on every call (#51). Affected: anyone who started `jmfts-server`, `uvicorn
+  jmfts_core.rest.main:app` or the compose stack with a blank token and read the printed one.
+  Whitespace-only counts as blank. Fix: set `JMFTS_API_TOKEN` (for example
+  `export JMFTS_API_TOKEN="$(openssl rand -base64 32)"`) and give clients the same value.
+  `docker-compose.yml` no longer defaults it to `jmfts-dev-local`; `docker compose up` stops
+  and says so. `JMFTS_RUNNER_KEY` is unchanged (blank turns `/runner` off, 503). The worker,
+  eval, init-db and batch worker never authenticate with this token and are unaffected.
+
 ### Added
 
 - **`jmfts-eval beir`: the README's BEIR table can be reproduced from a release.** The

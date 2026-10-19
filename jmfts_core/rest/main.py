@@ -24,6 +24,7 @@ from jmfts_core.rest.auth import (
     JMFTS_RUNNER_SCHEME,
     PUBLIC_PATHS,
     RUNNER_PREFIX,
+    ApiTokenNotConfigured,
     get_effective_token,
     require_token,
 )
@@ -36,9 +37,8 @@ John McCardle's Fusion Tree Search — a retrieval appliance with matryoshka emb
 ColBERT-style late interaction (MaxSim) and BM25 over a tree-structured document store.
 
 **Authentication.** Every operation below needs `Authorization: Bearer <token>`. Press
-**Authorize** and paste `JMFTS_API_TOKEN`; if that setting is empty the server generated a
-token at startup and printed it to the boot log. Two carve-outs: `GET /health` is open so a
-liveness probe needs no secret, and `/runner/*` takes the separate `JMFTS_RUNNER_KEY`
+**Authorize** and paste `JMFTS_API_TOKEN`; the server refuses to start without one. Two carve-outs:
+`GET /health` is open so a liveness probe needs no secret, and `/runner/*` takes the separate `JMFTS_RUNNER_KEY`
 instead — it embeds text and owns no documents, so the two credentials are kept disjoint.
 
 **This page is public.** `/docs`, `/redoc` and `/openapi.json` answer without a token,
@@ -60,15 +60,12 @@ _SWAGGER_UI_PARAMETERS = {
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    # Resolve the effective auth token at startup (CR-4). With no
-    # JMFTS_API_TOKEN configured this GENERATES and PRINTS the ephemeral token
-    # in the boot log — rather than lazily on the first Bearer request, which
-    # left an operator reading the startup output with no token to use.
+    # Resolve the effective auth token at startup (CR-4). An empty token raises
+    # ApiTokenNotConfigured here: the server refuses to start rather than generate one
+    # that a client sharing this environment could never know (issue #51).
     settings = get_settings()
-    if settings.api_token:
-        print("JMFTS: auth enabled — using the configured JMFTS_API_TOKEN.")
-    else:
-        get_effective_token()  # generates + prints the ephemeral token
+    get_effective_token()
+    print("JMFTS: auth enabled — using the configured JMFTS_API_TOKEN.")
 
     # The in-process ingest worker (INGEST_SPEC.md 5.8). It lives for exactly the
     # lifespan of the app: started before the first request can arrive, and JOINED on
@@ -473,6 +470,13 @@ def run(argv: list[str] | None = None):
         "--no-reload", dest="reload", action="store_false", help="serve without the reloader"
     )
     args = parser.parse_args(argv)
+
+    # Refuse here, after --help has had its say, with one line rather than a traceback
+    # out of uvicorn's lifespan (and before the reloader forks a child that would fail).
+    try:
+        get_effective_token()
+    except ApiTokenNotConfigured as exc:
+        raise SystemExit(f"jmfts-server: {exc}") from None
 
     uvicorn.run(
         "jmfts_core.rest.main:app",

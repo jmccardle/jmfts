@@ -11,7 +11,7 @@ Model (see ``migration 006`` and ``jmfts_core/models/principal.py``):
   * A document under NO ACR is unprotected — readable and writable by anyone. This is
     the single-user default and is exactly what keeps the benchmark/default path
     byte-identical: with no grants anywhere, every function below is a no-op.
-  * The synthetic OWNER (the shared bearer / ephemeral boot token) and the absence of
+  * The synthetic OWNER (the shared bearer) and the absence of
     a bound principal (in-process callers) both BYPASS every check.
 
 ``documents.path`` is a JSONB array of STRICT ancestors (root-first, excludes self),
