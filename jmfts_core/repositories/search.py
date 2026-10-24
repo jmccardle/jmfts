@@ -1,10 +1,10 @@
 """Search Repository - Vector, BM25, and Hybrid Search"""
 
-import fnmatch
 import logging
 import math
 import re
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Iterable, Optional
 from dataclasses import dataclass
 from sqlalchemy import select, func, text, and_, or_
@@ -194,6 +194,23 @@ def _as_of_utc(as_of: Optional[datetime]) -> Optional[datetime]:
     return as_of
 
 
+@lru_cache(maxsize=64)
+def _compile_usetype_globs(globs: tuple[str, ...]) -> "re.Pattern[str]":
+    """ONE regex for a set of usetype globs: the in-memory twin of ``LIKE``.
+
+    ``*`` is any run of characters and ``?`` one character; every other character is
+    literal, ``[`` included. ``fnmatch`` is deliberately not used because it gives ``[`` a
+    meaning ``LIKE`` does not have, and the positive filter and the hold-out lists must
+    mean in Python what they mean in SQL. Cached per tuple, so a loop that asks about
+    every document of an index compiles once.
+    """
+    alternatives = (
+        "".join(".*" if c == "*" else "." if c == "?" else re.escape(c) for c in glob)
+        for glob in globs
+    )
+    return re.compile("|".join(f"(?:{alt})" for alt in alternatives) or "(?!)", re.DOTALL)
+
+
 def _usetype_matches(globs: tuple[str, ...], usetype_value: Optional[str]) -> bool:
     """In-memory match of one document's usetype against a set of globs (BM25 post-filter).
 
@@ -202,14 +219,7 @@ def _usetype_matches(globs: tuple[str, ...], usetype_value: Optional[str]) -> bo
     """
     if usetype_value is None:
         return False
-    return any(
-        (
-            fnmatch.fnmatch(usetype_value, glob)
-            if _usetype_has_wildcard(glob)
-            else usetype_value == glob
-        )
-        for glob in globs
-    )
+    return _compile_usetype_globs(tuple(globs)).fullmatch(usetype_value) is not None
 
 
 def _usetype_predicate(globs: tuple[str, ...]):
@@ -232,7 +242,7 @@ def _usetype_predicate(globs: tuple[str, ...]):
         clauses.append(Document.usetype == exact[0])
     elif exact:
         clauses.append(Document.usetype.in_(exact))
-    clauses.extend(Document.usetype.like(_usetype_to_like(glob)) for glob in wild)
+    clauses.extend(Document.usetype.like(_usetype_to_like(glob), escape="\\") for glob in wild)
 
     # `usetype_globs` guarantees at least one glob, so `clauses` is never empty and this
     # never degenerates into `or_()` — which is SQL false, and would turn a filter the
@@ -277,7 +287,12 @@ def _usetype_sql(globs: tuple[str, ...], alias: str) -> tuple[str, dict]:
         fragments.append(f"{alias}.usetype = ANY(CAST(:usetype_exact AS text[]))")
         params["usetype_exact"] = exact
     if wild:
-        fragments.append(f"{alias}.usetype LIKE ANY(CAST(:usetype_globs AS text[]))")
+        # `LIKE ANY(array)` has no ESCAPE clause in PostgreSQL, so the escape character is
+        # made explicit by unnesting the array.
+        fragments.append(
+            "EXISTS (SELECT 1 FROM unnest(CAST(:usetype_globs AS text[])) AS g(p) "
+            f"WHERE {alias}.usetype LIKE g.p ESCAPE '\\')"
+        )
         params["usetype_globs"] = [_usetype_to_like(glob) for glob in wild]
 
     return "(" + " OR ".join(fragments) + ")", params
@@ -286,9 +301,11 @@ def _usetype_sql(globs: tuple[str, ...], alias: str) -> tuple[str, dict]:
 def _split_exclusions(patterns: Iterable[str]) -> tuple[list[str], list[str]]:
     """``(exact, wildcard)`` halves of a hold-out list: ``registry:*`` is a pattern, ``summary`` a name.
 
-    The same split :func:`_usetype_predicate` makes for a positive filter, for the same
-    reason: exact names stay on ``IN``/``=`` and the btree behind ``idx_documents_usetype``,
-    and only an entry that actually contains ``*`` or ``?`` becomes a ``LIKE``.
+    The same split :func:`_usetype_predicate` makes for a positive filter: exact names stay
+    on a plain membership test and only an entry that actually contains ``*`` or ``?``
+    becomes a ``LIKE``. For a hold-out list that is ``NOT IN`` / ``<> ALL``, which the btree
+    behind ``idx_documents_usetype`` does not serve: an exclusion is a filter, not an index
+    probe.
     """
     patterns = list(patterns)
     exact = [p for p in patterns if not _usetype_has_wildcard(p)]
@@ -301,23 +318,13 @@ def usetype_is_excluded(patterns: Iterable[str], usetype_value: Optional[str]) -
 
     The one place Python-side hold-out checks (BM25 indexing, the BM25 result post-filter)
     read ``JMFTS_*_EXCLUDE_USETYPES``, so they cannot disagree with the SQL about what a
-    pattern means. ``*`` and ``?`` are the only wildcards: ``fnmatch`` is deliberately not
-    used, because it would also give ``[`` meaning, which ``LIKE`` does not. A NULL usetype is
-    never excluded.
+    pattern means. Same translation as the positive filter's :func:`_usetype_matches`. A
+    NULL usetype is never excluded.
     """
-    if usetype_value is None:
+    patterns = tuple(patterns)
+    if usetype_value is None or not patterns:
         return False
-    exact, wild = _split_exclusions(patterns)
-    if usetype_value in exact:
-        return True
-    return any(
-        re.fullmatch(
-            "".join(".*" if c == "*" else "." if c == "?" else re.escape(c) for c in glob),
-            usetype_value,
-            re.DOTALL,
-        )
-        for glob in wild
-    )
+    return _usetype_matches(patterns, usetype_value)
 
 
 def usetype_not_excluded(patterns: Iterable[str]):
@@ -330,7 +337,7 @@ def usetype_not_excluded(patterns: Iterable[str]):
     held_out = []
     if exact:
         held_out.append(Document.usetype.notin_(exact))
-    held_out.extend(Document.usetype.notlike(_usetype_to_like(glob)) for glob in wild)
+    held_out.extend(Document.usetype.notlike(_usetype_to_like(glob), escape="\\") for glob in wild)
     return or_(Document.usetype.is_(None), and_(*held_out))
 
 
@@ -344,7 +351,10 @@ def _usetype_exclusion_sql(patterns: list[str], alias: str) -> tuple[str, dict]:
         clauses.append(f"{alias}.usetype <> ALL(CAST(:excl_exact AS text[]))")
         params["excl_exact"] = exact
     if wild:
-        clauses.append(f"{alias}.usetype NOT LIKE ALL(CAST(:excl_globs AS text[]))")
+        clauses.append(
+            "NOT EXISTS (SELECT 1 FROM unnest(CAST(:excl_globs AS text[])) AS g(p) "
+            f"WHERE {alias}.usetype LIKE g.p ESCAPE '\\')"
+        )
         params["excl_globs"] = [_usetype_to_like(glob) for glob in wild]
     fragments.append("(" + " AND ".join(clauses) + ")")
     return "(" + " OR ".join(fragments) + ")", params

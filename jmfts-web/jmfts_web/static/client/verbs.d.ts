@@ -254,7 +254,7 @@ export interface AutoSearchRequest {
    */
   usetype?: string | Array<string> | null;
   /**
-   * Exclude documents with these usetypes. When omitted, the server default applies (JMFTS_SEARCH_EXCLUDE_USETYPES; entity, entities, summary, derived out of the box). Pass [] to disable all exclusion.
+   * Exclude documents with these usetypes. When omitted, the server default applies (JMFTS_SEARCH_EXCLUDE_USETYPES; entity, entities, summary, derived out of the box). Entries are exact usetypes or globs (`*` any run of characters, `?` one character), so `registry:*` holds out every `registry:` usetype and `["*"]` holds out every non-NULL usetype. Pass [] to disable all exclusion.
    */
   exclude_types?: Array<string> | null;
   parent_id?: number | null;
@@ -1129,7 +1129,7 @@ export interface HybridSearchRequest {
    */
   usetype?: string | Array<string> | null;
   /**
-   * Exclude documents with these usetypes. When omitted, the server default applies (JMFTS_SEARCH_EXCLUDE_USETYPES; entity, entities, summary, derived out of the box). Pass [] to disable all exclusion.
+   * Exclude documents with these usetypes. When omitted, the server default applies (JMFTS_SEARCH_EXCLUDE_USETYPES; entity, entities, summary, derived out of the box). Entries are exact usetypes or globs (`*` any run of characters, `?` one character), so `registry:*` holds out every `registry:` usetype and `["*"]` holds out every non-NULL usetype. Pass [] to disable all exclusion.
    */
   exclude_types?: Array<string> | null;
   parent_id?: number | null;
@@ -2099,7 +2099,7 @@ export interface SearchRequest {
    */
   usetype?: string | Array<string> | null;
   /**
-   * Exclude documents with these usetypes. When omitted, the server default applies (JMFTS_SEARCH_EXCLUDE_USETYPES; entity, entities, summary, derived out of the box). Pass [] to disable all exclusion.
+   * Exclude documents with these usetypes. When omitted, the server default applies (JMFTS_SEARCH_EXCLUDE_USETYPES; entity, entities, summary, derived out of the box). Entries are exact usetypes or globs (`*` any run of characters, `?` one character), so `registry:*` holds out every `registry:` usetype and `["*"]` holds out every non-NULL usetype. Pass [] to disable all exclusion.
    */
   exclude_types?: Array<string> | null;
   parent_id?: number | null;
