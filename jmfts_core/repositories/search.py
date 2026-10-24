@@ -86,6 +86,14 @@ class IndexRefreshDeniedError(AccessDeniedError):
 #: where the scan mode changes how the walk terminates.
 HNSW_ITERATIVE_SCAN = "strict_order"
 
+#: How many times ``limit`` containers the BM25 candidate pass considers (#57). The pass
+#: ranks by distinct query terms matched, which is an APPROXIMATION of BM25 (see
+#: ``_container_candidates``), so a container that would score in the top ``limit`` can sit
+#: below position ``limit`` in that order. The leaf query used to fetch ``limit * 2`` and
+#: this pass inherited it; the leaf over-fetch went with the post-filter, and this is the
+#: container pass's own bound. The final merge still truncates to ``limit``.
+_CONTAINER_CANDIDATE_FACTOR = 2
+
 #: Where the per-connection answer to "does this server register ``hnsw.iterative_scan``"
 #: is cached. ``Connection.info`` is keyed to the DBAPI connection rather than to the
 #: Session, which is the right lifetime: the probe below loads a shared library into one
@@ -212,7 +220,7 @@ def _compile_usetype_globs(globs: tuple[str, ...]) -> "re.Pattern[str]":
 
 
 def _usetype_matches(globs: tuple[str, ...], usetype_value: Optional[str]) -> bool:
-    """In-memory match of one document's usetype against a set of globs (BM25 post-filter).
+    """In-memory match of one document's usetype against a set of globs.
 
     ANY, not ALL: the globs are alternatives. A NULL usetype matches no positive filter,
     which is the same rule the SQL paths get for free from ``LIKE``/``=`` on NULL.
@@ -316,7 +324,7 @@ def _split_exclusions(patterns: Iterable[str]) -> tuple[list[str], list[str]]:
 def usetype_is_excluded(patterns: Iterable[str], usetype_value: Optional[str]) -> bool:
     """In-memory twin of :func:`_apply_usetype_exclusion`: is this usetype held out?
 
-    The one place Python-side hold-out checks (BM25 indexing, the BM25 result post-filter)
+    The one place Python-side hold-out checks (BM25 indexing, the index refresh)
     read ``JMFTS_*_EXCLUDE_USETYPES``, so they cannot disagree with the SQL about what a
     pattern means. Same translation as the positive filter's :func:`_usetype_matches`. A
     NULL usetype is never excluded.
@@ -824,6 +832,31 @@ class SearchRepository:
         if acl_sql is not None:
             doc_where += f" AND {acl_sql}"
 
+        # THE USETYPE PREDICATES ARE IN THE SCORED STATEMENT TOO (#57), for the same reason
+        # as the settled gate: they used to be applied in Python after `LIMIT limit * 2`, so
+        # a query whose top hits were all of a held-out usetype came back SHORT. Same
+        # precedence the vector and MaxSim paths use: a positive filter wins, otherwise the
+        # request's `exclude_types`, otherwise `JMFTS_SEARCH_EXCLUDE_USETYPES`
+        # (`effective_exclude_types`). BM25 used to ignore the setting at query time and rely
+        # on `bm25_exclude_usetypes` at index time alone, while `applied.exclude_types`
+        # reported it as applied. With default settings this adds nothing FOR LEAVES, because
+        # search_exclude is a subset of bm25_exclude (`config.py`). Containers have no
+        # postings, so `bm25_exclude_usetypes` never applied to them: a contentless container
+        # whose usetype is in `search_exclude_usetypes` is now dropped from default BM25,
+        # where it used to be returned. That matches vector search.
+        usetype_params: dict = {}
+        if globs is not None:
+            leaf_usetype, usetype_params = _usetype_sql(globs, alias="d")
+            container_usetype, _ = _usetype_sql(globs, alias="a")
+        else:
+            excluded = effective_exclude_types(usetype, exclude_types)
+            leaf_usetype = container_usetype = None
+            if excluded:
+                leaf_usetype, usetype_params = _usetype_exclusion_sql(excluded, alias="d")
+                container_usetype, _ = _usetype_exclusion_sql(excluded, alias="a")
+        if leaf_usetype is not None:
+            doc_where += f" AND {leaf_usetype}"
+
         # The same three predicates, against the CONTAINER row rather than the descendant
         # that matched, for `_container_scores`. Built here beside their originals so the
         # two cannot fall out of step: a predicate added above and not here would be a
@@ -846,6 +879,10 @@ class SearchRepository:
         container_acl = readable_sql(self.session, alias="a")
         if container_acl is not None:
             container_gate += f" AND {container_acl}"
+        # The container's OWN usetype, not its descendant's: a held-out container is held out
+        # however well its children match, and a positive filter asks about the node returned.
+        if container_usetype is not None:
+            container_gate += f" AND {container_usetype}"
 
         bm25_query = text(f"""
             WITH query_terms AS (
@@ -891,7 +928,8 @@ class SearchRepository:
             "avg_doc_length": index.avg_doc_length or 1,
             "k1": k1,
             "b": b,
-            "limit": limit * 2,  # Get extra to filter by usetype
+            "limit": limit,
+            **usetype_params,
         }
         if parent_id is not None:
             bind_params["parent_id"] = parent_id
@@ -905,7 +943,7 @@ class SearchRepository:
         # the SAME statistics without writing a posting; see its docstring for why the two
         # identities it sums are exact. Merged and re-sorted here rather than unioned into
         # the SQL, because the container pass needs the frontier walk between two queries.
-        container_gate_params = {}
+        container_gate_params = dict(usetype_params)
         if parent_id is not None:
             container_gate_params["parent_id"] = parent_id
         if as_of is not None:
@@ -915,7 +953,7 @@ class SearchRepository:
             terms,
             k1,
             b,
-            bind_params["limit"],
+            limit * _CONTAINER_CANDIDATE_FACTOR,
             gate=container_gate,
             gate_params=container_gate_params,
         )
@@ -924,23 +962,14 @@ class SearchRepository:
                 list(scored) + list(containers.items()), key=lambda row: row[1], reverse=True
             )[: bind_params["limit"]]
 
-        # Fetch documents and apply usetype/exclusion filters
-        # BM25 entities/summaries are excluded at index time; exclude_types adds runtime post-filter
-        effective_exclusions = (
-            exclude_types if (globs is None and exclude_types is not None) else []
-        )
+        # Both usetype predicates were applied in SQL above, so every row here is already
+        # one the request may see and `limit` rows is a full page.
         results = []
         for doc_id, score in scored:
             doc = self.session.get(Document, doc_id)
             if not doc:
                 continue
-            if globs is not None and not _usetype_matches(globs, doc.usetype):
-                continue
-            if effective_exclusions and usetype_is_excluded(effective_exclusions, doc.usetype):
-                continue
             results.append(SearchResult(document=doc, score=float(score), method="bm25"))
-            if len(results) >= limit:
-                break
 
         return results
 

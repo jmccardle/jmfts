@@ -292,6 +292,11 @@ class Settings(BaseSettings):
     #
     # Same entry syntax as `bm25_exclude_usetypes`: exact names or `*`/`?` globs, and setting
     # the list replaces the defaults (#52).
+    #
+    # RECIPE: to hold a corpus out of default search while keeping it in its own named BM25
+    # index, put its glob (`registry:*`) here and NOT in `bm25_exclude_usetypes`. Default
+    # searches drop it on every method, BM25 included; a request with `usetype="registry:*"`
+    # (which overrides this list) finds it (#52, #57).
     search_exclude_usetypes: list[str] = ["entity", "entities", "summary", "derived"]
 
     # LLM endpoint (any OpenAI-compatible server: llama-server, vLLM, Ollama, ensonet, or

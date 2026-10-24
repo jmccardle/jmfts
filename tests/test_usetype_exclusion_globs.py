@@ -157,7 +157,11 @@ class TestEveryMethod:
         repo = SearchRepository(db_session)
         for doc_id in seeded.values():
             repo.index_document(doc_id, "exclusion_globs_runtime")
-        everything = repo.bm25_search(base.BEACON, index_name="exclusion_globs_runtime", limit=50)
+        # `exclude_types=[]` because the fixture's search list names the namespace and BM25
+        # applies that list at query time since #57.
+        everything = repo.bm25_search(
+            base.BEACON, index_name="exclusion_globs_runtime", limit=50, exclude_types=[]
+        )
         assert base._names(seeded, everything) == set(FIXTURE)
         narrowed = repo.bm25_search(
             base.BEACON,
