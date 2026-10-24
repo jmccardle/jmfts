@@ -109,6 +109,17 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
 
 ### Fixed
 
+- **BM25 applies usetype filters inside the scored query, so a page is no longer short
+  (#57).** `bm25_search` fetched `limit * 2` rows and dropped the positive `usetype` and
+  `exclude_types` in Python, so whenever the top hits were filtered out the page came back
+  short. The predicates now sit in the scoring SQL beside the `settled` gate, for the leaf
+  scan and the container pass, and the over-fetch and Python post-filter are gone.
+  Behaviour change: BM25 now also applies `JMFTS_SEARCH_EXCLUDE_USETYPES` at query time when
+  the request names neither `usetype` nor `exclude_types`, which `applied.exclude_types` had
+  already been reporting. With default settings that changes nothing (the search list is a
+  subset of the BM25 index-time list). It matters for the recipe in the setting's
+  description: hold a corpus out of default search with a `search_exclude_usetypes` glob,
+  and keep it in its own named index by leaving it out of `bm25_exclude_usetypes`.
 - **`POST /documents` with `auto_index_bm25` now indexes into the named index that covers the
   document (#53).** It always wrote to `default`, so a document created under a named index's
   root was invisible to that index's BM25 search and leaked into `default`. It now indexes

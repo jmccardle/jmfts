@@ -377,6 +377,10 @@ also excludes at INDEX time — {_code_list(_default("bm25_exclude_usetypes"))} 
 written to an inverted index at all — so no search argument brings them back to the bm25
 leg. Re-indexing does. Entries of `JMFTS_BM25_EXCLUDE_USETYPES` follow the same syntax: an
 exact name, or a glob where `*` is any run of characters and `?` one character.
+
+To hold a corpus out of default search while keeping it in its own named index, put its glob in
+`JMFTS_SEARCH_EXCLUDE_USETYPES` and leave it out of `JMFTS_BM25_EXCLUDE_USETYPES`: BM25 applies
+the search-time list inside its scored query, and a request with a positive `usetype` overrides it.
 """
 
 
