@@ -160,3 +160,87 @@ def test_hybrid_search_without_the_model_stack_answers_501(client_with_db, monke
     # The message is the whole value of the exception — it names both ways out — and a
     # status that threw it away was half the defect.
     assert "JMFTS_RUNNER_URL" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# No LLM endpoint configured (#56)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def no_llm(monkeypatch):
+    """Blank both sources of the LLM endpoint on the settings object the services read."""
+    from jmfts_core.config import get_settings
+
+    settings = get_settings()
+    for name in ("llm_base_url", "llm_model", "ensonet_url", "ensonet_model"):
+        monkeypatch.setattr(settings, name, "")
+
+
+def test_every_operation_maps_an_unconfigured_llm_to_501():
+    """Blank ``JMFTS_LLM_*`` is a supported deployment, so it is 501 and not 503.
+
+    503 tells a client to retry; no retry supplies an endpoint. See ``DEFAULT_ERRORS``.
+    """
+    from jmfts_core.config import LlmNotConfiguredError
+
+    for spec in REGISTRY:
+        status = _status_for(LlmNotConfiguredError("x"), spec.effective_errors)
+        assert status == 501, spec.name
+
+
+@pytest.fixture
+def api_with_children(db_session):
+    """A parent with two embedded children, created through the API with a stub embedder."""
+    from unittest.mock import patch
+
+    from tests.conftest import AUTH_HEADERS
+    from tests.test_review_fixes import _MockEmbeddingService
+
+    svc = _MockEmbeddingService()
+
+    def _override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = _override_get_db
+    with (
+        patch("jmfts_core.repositories.document.get_embedder", return_value=svc),
+        patch("jmfts_core.repositories.search.get_embedding_service", return_value=svc),
+    ):
+        client = TestClient(app, headers=AUTH_HEADERS)
+        parent = client.post(
+            "/documents",
+            json={
+                "title": "Parent",
+                "content": "A parent document with some content.",
+                "usetype": "section",
+            },
+        )
+        assert parent.status_code in (200, 201), parent.text
+        parent_id = parent.json()["id"]
+        for i in range(2):
+            child = client.post(
+                "/documents",
+                json={
+                    "title": f"Child {i}",
+                    "content": f"Child number {i} says something long enough to extract.",
+                    "usetype": "chunk",
+                    "parent_id": parent_id,
+                },
+            )
+            assert child.status_code in (200, 201), child.text
+        yield client, parent_id
+    app.dependency_overrides.pop(get_db, None)
+
+
+def test_extract_facts_and_raptor_without_an_llm_answer_501(api_with_children, no_llm):
+    client, parent_id = api_with_children
+
+    facts = client.post(f"/documents/{parent_id}/extract-facts", json={})
+    assert facts.status_code == 501, facts.text
+    # The message names the variable to set, which is the whole value of the exception.
+    assert "JMFTS_LLM_BASE_URL" in facts.json()["detail"]
+
+    raptor = client.post(f"/documents/{parent_id}/raptor", json={})
+    assert raptor.status_code == 501, raptor.text
+    assert "JMFTS_LLM_BASE_URL" in raptor.json()["detail"]

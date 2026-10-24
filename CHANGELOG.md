@@ -95,6 +95,13 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
   document created under a named root no longer appears in a BM25 or hybrid search that names
   neither `parent_id` nor `index_name`. Postings already in `default` from before the fix are
   not migrated.
+
+- **An LLM-backed verb with no `JMFTS_LLM_*` endpoint answers 501, not a bare 500 (#56).**
+  `POST /documents/{id}/extract-facts`, `/raptor` and every other exposed verb that reaches
+  `Settings.require_llm` now map `LlmNotConfiguredError` to 501 with the message in `detail`
+  (it names `JMFTS_LLM_BASE_URL` and `JMFTS_LLM_MODEL`). 501, not 503: this is an install
+  fact and retrying cannot fix it. `/search/synthesize` is unchanged: it still answers 200
+  with `llm_available: false`.
 - **`jmfts-init-db` no longer fails on its second run (#50).** It skipped `CREATE DATABASE` for
   an existing database and then ran `schema.sql`, which is bare `CREATE TABLE`, so
   `jmfts-init-db && jmfts-server` did not survive a restart. It now detects an initialised

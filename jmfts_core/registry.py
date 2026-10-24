@@ -32,6 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from jmfts_core.config import LlmNotConfiguredError
 from jmfts_core.embedding import ModelStackNotInstalled, TokenizerNotCached
 from jmfts_core.office import OfficeStackNotInstalled
 
@@ -64,6 +65,10 @@ DEFAULT_ERRORS: dict[type, int] = {
     # The same kind of fact about the deployment: an offline host whose HF cache lacks the
     # tokenizer cannot embed, and a bare 500 would tell the caller to retry (#6).
     TokenizerNotCached: 501,
+    # No ``JMFTS_LLM_*`` endpoint is configured: blank is a supported deployment (see
+    # ``Settings.require_llm``), and no retry supplies one. Reachable from extract-facts,
+    # RAPTOR and any other verb that summarizes or synthesizes (#56).
+    LlmNotConfiguredError: 501,
 }
 
 
