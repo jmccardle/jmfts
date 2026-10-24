@@ -13,6 +13,19 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-10-24
+
+**A request the server would have ignored is refused, and a conflict names the row it hit.**
+Every JSON request body now rejects an undeclared field with a 422 that names it (#47), and
+a duplicate triple or predicate answers 409 with `existing_id` instead of a 500 (#54, #55).
+An appliance with no LLM answers 501 instead of 500 (#56), an empty API token stops startup
+(#51), and `jmfts-init-db` survives a second run (#50). A corpus can be held out of default
+search by usetype glob while staying in its own named index (#52, #57), and `/subtree`
+filters by usetype (#49). BM25 applies its usetype filters inside the scored SQL, so a
+filtered page is no longer short (#57). The release also tracks two dependency majors that
+had turned CI red since 0.7.1: PyMuPDF 2.0 (floor `>=1.27.1`) and `ffwf-tau-llm` 0.14 (floor
+`>=0.14.1`).
+
 ### Breaking
 
 - **An empty `JMFTS_API_TOKEN` now makes the API server refuse to start.** Until now an
@@ -1312,7 +1325,8 @@ says. Both paragraphs become steps in the 0.6.0 plan, and they are the entry con
 
 First release with packaging metadata and the tests that make a release possible.
 
-[Unreleased]: https://github.com/jmccardle/jmfts/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/jmccardle/jmfts/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/jmccardle/jmfts/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/jmccardle/jmfts/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/jmccardle/jmfts/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/jmccardle/jmfts/compare/v0.6.1...v0.6.2
