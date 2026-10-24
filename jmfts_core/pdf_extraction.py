@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import pymupdf
+import pymupdf.table
 
 logger = logging.getLogger(__name__)
 
@@ -404,6 +405,43 @@ class _PageTables:
     rejected: list[dict] = field(default_factory=list)
 
 
+#: ``find_tables`` keyword arguments that pin its behaviour across PyMuPDF majors.
+#:
+#: PyMuPDF 2.0 added ``use_layout`` (default True): when the optional ``pymupdf-layout``
+#: package is importable, an ML layout model gates the ruling-line tables and invents grids
+#: of its own for regions that have none. Measured on 2.0 with ``pymupdf-layout`` installed
+#: (it arrives as a dependency of ``pymupdf4llm`` 2.0): a ruled 3x3 table came back as 3x5
+#: with a blank column between every pair, and rotated pages found no table at all. Which
+#: tables this module finds must not depend on whether an unrelated package happens to be
+#: installed, so the ruling-line detector 1.x always ran is asked for by name. 1.x has no such
+#: argument and no layout model, so there is nothing to pin.
+_FIND_TABLES_KWARGS: dict = {"use_layout": False} if pymupdf.pymupdf_version_tuple >= (2, 0) else {}
+
+
+def _extract_rows(table) -> list:
+    """The table's cell text, one list per row, ``None`` where the grid has no cell.
+
+    This replaces ``Table.extract()``. That method rebuilds each cell from per-character
+    boxes, grouping characters into lines by the vertical position of their tops, and on
+    PyMuPDF 2.0 those boxes are the INK of each glyph (``find_tables`` switches on
+    ``set_small_glyph_heights``, which 1.x answered with a uniform line box and 2.0 answers
+    with the glyph's own extent). A full stop's top sits at the baseline, more than the 3 pt
+    line tolerance below a digit's, so ``4.92`` came out as ``492`` on one line and ``.`` on
+    the next — ``| 28.4 |`` became ``| 284 . |``. Commas, hyphens and quotes do the same.
+
+    ``extract_cells`` reads the same text page ``find_tables`` built, but takes MuPDF's own
+    line segmentation instead of re-deriving it, and is what ``Table.to_markdown`` calls. That
+    page was made on the de-rotated page, so its coordinates are the cells' on a rotated one.
+    """
+    return [
+        [
+            None if cell is None else pymupdf.table.extract_cells(table.textpage, cell)
+            for cell in row.cells
+        ]
+        for row in table.rows
+    ]
+
+
 def _find_page_tables(page: pymupdf.Page) -> _PageTables:
     """The page's tables worth rendering, plus what was rejected and why.
 
@@ -418,7 +456,7 @@ def _find_page_tables(page: pymupdf.Page) -> _PageTables:
     """
     result = _PageTables()
     try:
-        found = page.find_tables()
+        found = page.find_tables(**_FIND_TABLES_KWARGS)
     except Exception as exc:  # noqa: BLE001 — recorded on the result, never dropped
         result.errors.append(f"{type(exc).__name__}: {exc}")
         return result
@@ -432,7 +470,7 @@ def _find_page_tables(page: pymupdf.Page) -> _PageTables:
         if table.row_count < 2 or table.col_count < 2:
             continue
         try:
-            rows = table.extract()
+            rows = _extract_rows(table)
         except Exception as exc:  # noqa: BLE001 — recorded on the result, never dropped
             result.errors.append(f"table {index}: {type(exc).__name__}: {exc}")
             continue

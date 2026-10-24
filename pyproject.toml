@@ -138,7 +138,11 @@ dependencies = [
     "python-igraph>=1.0",
     "leidenalg>=0.11",
     "markdown-it-py>=4.0",
-    "pymupdf>=1.24",
+    # 1.27.1 is the first release whose find_tables() leaves the text page on each Table
+    # (`Table.textpage`), which pdf_extraction._extract_rows reads. Verified on 1.27.1, 1.28.2
+    # and 2.0; 1.26.3 and earlier fail loudly on the missing attribute. Table.extract() cannot
+    # be used on 2.0: it splits "4.92" into "492" and ".".
+    "pymupdf>=1.27.1",
     "markdownify>=1.2",
     # Reads an OLE2 compound file's directory. In BASE rather than in the `office` extra
     # below, and the reason is that `probe` runs on every install and has to schedule

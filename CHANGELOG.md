@@ -130,6 +130,24 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
 
 ### Fixed
 
+- **PDF tables on PyMuPDF 2.0: grids invented, rotated tables lost, decimals split.** CI installs
+  fresh dependencies and began getting `pymupdf` 2.0 on 2026-10-18; the local environment still
+  had 1.28.2, which is why only CI went red (19 tests in `test_pdf_extraction.py` and
+  `test_table_tasks.py`). Two separate changes in 2.0. (1) `Page.find_tables` gained
+  `use_layout=True`: when `pymupdf-layout` is importable (`pymupdf4llm` 2.0 depends on it) an ML
+  model gates and replaces the ruling-line grids. On our fixtures it returned a ruled 3x3 table
+  as 3x5 with a blank column between each pair and found no table on `/Rotate 90` and `/Rotate
+  270` pages. Which tables we find must not depend on an unrelated package being installed, so
+  2.0 is now asked for the ruling-line detector by name (`use_layout=False`). (2) `Table.extract()`
+  groups characters into lines by glyph top, and 2.0 reports each glyph's ink box rather than
+  the line box, so a full stop (top at the baseline) landed on its own line: `28.4` became
+  `284` and `.`, and a table cell read `| 23 . |`. Cell text is now read with
+  `pymupdf.table.extract_cells` on the text page `find_tables` built, which uses MuPDF's own
+  line segmentation (the same call `Table.to_markdown` makes) and gives the same result on 1.x.
+  **The floor is `pymupdf>=1.27.1`, up from `>=1.24`:** `Table.textpage` first exists in 1.27.1.
+  Older releases fail with `AttributeError` on the first table rather than degrade. Verified on
+  1.27.1, 1.28.2 and 2.0; no test expectation changed.
+
 - **BM25 applies usetype filters inside the scored query, so a page is no longer short
   (#57).** `bm25_search` fetched `limit * 2` rows and dropped the positive `usetype` and
   `exclude_types` in Python, so whenever the top hits were filtered out the page came back
