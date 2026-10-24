@@ -23,7 +23,7 @@ caller who passed text would silently get UTF-8 bytes and a wrong content hash.
 from dataclasses import dataclass
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from jmfts_client.contracts.attempt import AttemptRecord
 
@@ -131,6 +131,8 @@ class CollectionOptionsRequest(BaseModel):
     at upload time rather than at plan time; re-applying is a re-ingest, and the recorded
     row is what makes the difference computable.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     options: dict = Field(
         description=(

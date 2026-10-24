@@ -25,7 +25,7 @@ types, and this package is installed by consumers who have neither.
 
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ExplainIngestRequest(BaseModel):
@@ -37,6 +37,8 @@ class ExplainIngestRequest(BaseModel):
     with a prober gets an answer that says which conditions it could not decide, rather
     than one built on a guess about the file.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     format: str = Field(
         min_length=1,

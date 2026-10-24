@@ -17,6 +17,8 @@ from pydantic import BaseModel, ConfigDict, Field
 class PrincipalCreate(BaseModel):
     """Request to create a non-owner identity."""
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str
 
 
@@ -40,6 +42,8 @@ class PrincipalResponse(BaseModel):
 
 class TokenCreate(BaseModel):
     """Request to mint a bearer token for a principal."""
+
+    model_config = ConfigDict(extra="forbid")
 
     label: Optional[str] = None
     expires_at: Optional[datetime] = None
@@ -84,6 +88,8 @@ class TokenResponse(BaseModel):
 
 class GrantCreate(BaseModel):
     """Request to grant a principal read/write on a document (making it an ACR)."""
+
+    model_config = ConfigDict(extra="forbid")
 
     principal_id: int
     level: str = Field(description="'read' or 'write' (write implies read)")

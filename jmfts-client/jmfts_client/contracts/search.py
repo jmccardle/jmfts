@@ -7,7 +7,7 @@ depend on them without importing FastAPI. ``api/schemas.py`` re-exports these na
 from datetime import datetime
 from typing import Any, Literal, Optional, Sequence, Union
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from jmfts_client.contracts.document import DocumentResponse
 
@@ -183,6 +183,8 @@ class Projection(BaseModel):
     branch summary would otherwise have the summary held out by the default exclusion.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     to: Literal["parent"] = Field(
         default="parent",
         description="Which related node to return. Only `parent` exists today.",
@@ -315,6 +317,8 @@ USETYPE_FIELD_DESCRIPTION = (
 
 class HybridSearchRequest(BaseModel):
     """Hybrid search request"""
+
+    model_config = ConfigDict(extra="forbid")
 
     query: str
     limit: int = Field(default=10, ge=1, le=100)
@@ -481,6 +485,8 @@ class SearchResponse(BaseModel):
 class SearchRequest(BaseModel):
     """Search request"""
 
+    model_config = ConfigDict(extra="forbid")
+
     query: str
     limit: int = Field(default=10, ge=1, le=100)
     usetype: Optional[UsetypeFilter] = Field(default=None, description=USETYPE_FIELD_DESCRIPTION)
@@ -507,6 +513,8 @@ class SearchRequest(BaseModel):
 
 class AutoSearchRequest(BaseModel):
     """Auto search request — heuristic router picks the best method"""
+
+    model_config = ConfigDict(extra="forbid")
 
     query: str
     limit: int = Field(default=10, ge=1, le=100)
@@ -543,6 +551,8 @@ class AutoSearchResponse(BaseModel):
 
 class SynthesizeRequest(BaseModel):
     """Request to synthesize an answer from search results"""
+
+    model_config = ConfigDict(extra="forbid")
 
     query: str
     search_method: str = Field(

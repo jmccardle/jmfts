@@ -18,13 +18,28 @@ from pydantic import BaseModel, ConfigDict, Field
 class TemplateVariable(BaseModel):
     """A variable placeholder in a template"""
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     description: str = ""
     required: bool = True
 
 
+class StoredTemplateVariable(TemplateVariable):
+    """A variable placeholder as it is READ BACK from storage: undeclared keys are dropped.
+
+    ``TemplateResponse.variables`` is built from ``structured_content``, which may hold keys
+    written before the request contract forbade extras (#47); a 422 there would be a 500 on
+    read. Requests use ``TemplateVariable``, which refuses them.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+
 class TemplateCreate(BaseModel):
     """Request to create a prompt template"""
+
+    model_config = ConfigDict(extra="forbid")
 
     title: str
     content: str = Field(description="Template body with {{variable}} placeholders")
@@ -36,6 +51,8 @@ class TemplateCreate(BaseModel):
 
 class TemplateUpdate(BaseModel):
     """Request to update a prompt template"""
+
+    model_config = ConfigDict(extra="forbid")
 
     title: Optional[str] = None
     content: Optional[str] = None
@@ -50,7 +67,7 @@ class TemplateResponse(BaseModel):
     title: str
     content: str
     category: str
-    variables: list[TemplateVariable]
+    variables: list[StoredTemplateVariable]
     usage_count: int = 0
     success_rate: float = 0.0
     last_used: Optional[datetime] = None
@@ -84,6 +101,8 @@ class TemplateResponse(BaseModel):
 class TemplateRenderRequest(BaseModel):
     """Request to render a template with variables"""
 
+    model_config = ConfigDict(extra="forbid")
+
     variables: dict[str, str] = Field(description="Variable name -> value mapping for substitution")
 
 
@@ -97,6 +116,8 @@ class TemplateRenderResponse(BaseModel):
 
 class TemplateSearchRequest(BaseModel):
     """Request to search templates by semantic similarity"""
+
+    model_config = ConfigDict(extra="forbid")
 
     query: str
     category: Optional[str] = None

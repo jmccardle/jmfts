@@ -2501,6 +2501,19 @@ export interface SpineResponse {
 }
 
 /**
+ * A variable placeholder as it is READ BACK from storage: undeclared keys are dropped.
+ *
+ * ``TemplateResponse.variables`` is built from ``structured_content``, which may hold keys
+ * written before the request contract forbade extras (#47); a 422 there would be a 500 on
+ * read. Requests use ``TemplateVariable``, which refuses them.
+ */
+export interface StoredTemplateVariable {
+  name: string;
+  description?: string;
+  required?: boolean;
+}
+
+/**
  * Request to split a document on markdown heading boundaries
  */
 export interface StructuralSplitRequest {
@@ -2653,7 +2666,7 @@ export interface TemplateResponse {
   title: string;
   content: string;
   category: string;
-  variables: Array<TemplateVariable>;
+  variables: Array<StoredTemplateVariable>;
   usage_count?: number;
   success_rate?: number;
   last_used?: string | null;

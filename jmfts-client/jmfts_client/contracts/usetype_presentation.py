@@ -13,6 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class UsetypePresentationCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     usetype: str = Field(..., description="The usetype this rule applies to (or '*' for catch-all)")
     renderer: str = Field(..., description="markdown | code | json-table | transcript | plain")
     child_handling: str = Field(
@@ -24,6 +26,8 @@ class UsetypePresentationCreate(BaseModel):
 
 
 class UsetypePresentationUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     renderer: Optional[str] = None
     child_handling: Optional[str] = None
     link_handling: Optional[str] = None

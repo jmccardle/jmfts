@@ -134,6 +134,8 @@ class DocumentEvidenceResponse(BaseModel):
 class DocumentCreate(BaseModel):
     """Request to create a document"""
 
+    model_config = ConfigDict(extra="forbid")
+
     title: Optional[str] = None
     content: Optional[str] = None
     parent_id: Optional[int] = None
@@ -177,6 +179,8 @@ class DocumentCreate(BaseModel):
 class DocumentUpdate(BaseModel):
     """Request to update a document"""
 
+    model_config = ConfigDict(extra="forbid")
+
     title: Optional[str] = None
     content: Optional[str] = None
     usetype: Optional[str] = None
@@ -212,6 +216,8 @@ class SubtreeResponse(BaseModel):
 
 class LinkCreate(BaseModel):
     """Request to create a document link"""
+
+    model_config = ConfigDict(extra="forbid")
 
     source_id: int
     target_id: int
@@ -344,6 +350,8 @@ class DocumentCellsResponse(BaseModel):
 class StructuralSplitRequest(BaseModel):
     """Request to split a document on markdown heading boundaries"""
 
+    model_config = ConfigDict(extra="forbid")
+
     auto_embed: bool = Field(
         default=True,
         description="Whether to auto-embed the created child documents",
@@ -380,6 +388,8 @@ class StructuralSplitResponse(BaseModel):
 
 class SegmentRequest(BaseModel):
     """Request to segment a document's children by topic"""
+
+    model_config = ConfigDict(extra="forbid")
 
     penalty: float = Field(
         default=1.0,
@@ -524,6 +534,8 @@ class ChunkResponse(BaseModel):
 class RaptorRequest(BaseModel):
     """Request to run RAPTOR hierarchical summarization on a document's children"""
 
+    model_config = ConfigDict(extra="forbid")
+
     max_depth: int = Field(default=5, ge=1, le=20, description="Maximum recursion depth")
     min_cluster_size: int = Field(
         default=2, ge=2, description="Minimum documents per Leiden cluster"
@@ -542,6 +554,8 @@ class RaptorRequest(BaseModel):
 
 class PortfolioRaptorRequest(BaseModel):
     """Request to run cross-document RAPTOR over report-level summaries in a portfolio"""
+
+    model_config = ConfigDict(extra="forbid")
 
     max_depth: int = Field(default=5, ge=1, le=20, description="Maximum recursion depth")
     min_cluster_size: int = Field(
@@ -580,6 +594,8 @@ class RaptorResponse(BaseModel):
 
 class FactExtractionRequest(BaseModel):
     """Request to extract knowledge triples from a document's segments"""
+
+    model_config = ConfigDict(extra="forbid")
 
     llm_model: Optional[str] = Field(default=None, description="Override the extraction LLM model")
     max_facts: Optional[int] = Field(

@@ -14,7 +14,7 @@ media type rather than the adapter growing another special case.
 from datetime import datetime
 from typing import Any, Literal, NewType, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 #: A request body that arrives as ``text/turtle`` rather than as JSON.
 #:
@@ -179,6 +179,8 @@ class ShapeBindingCreate(BaseModel):
     runs, and a scope with no query behind it would silently match nothing.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     shape_iri: str
     usetype_pattern: Optional[str] = Field(
         default=None, description="scope_type 'usetype' — matched against documents.usetype"
@@ -211,6 +213,8 @@ class ShapeValidationRequest(BaseModel):
     names the ontology, the shape and the scope, and a request that re-stated any of them
     would be free to disagree with the row it names.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     binding_id: int = Field(
         description=(
@@ -292,6 +296,8 @@ class RuleDerivationRequest(BaseModel):
     is a fixpoint over a store that also accepts writes. A field here would be the way to ask
     for exactly that, so there is not one.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     binding_id: int = Field(
         description=(

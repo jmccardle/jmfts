@@ -10,7 +10,7 @@ communities, diff, stats, lint) — none of them carries an ORM document, so the
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # -- centrality ---------------------------------------------------------------
 
@@ -44,6 +44,8 @@ class CentralityResponse(BaseModel):
 class Seed(BaseModel):
     """A document the walk starts from, and how much of the restart mass it gets."""
 
+    model_config = ConfigDict(extra="forbid")
+
     document_id: int
     weight: float = Field(
         default=1.0,
@@ -60,6 +62,8 @@ class SeededRankRequest(BaseModel):
     points at it from near them. Seeds are ids rather than a query, so the verb composes
     with any search method — search, then pass the hits and their scores.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     seeds: list[Seed] = Field(min_length=1, max_length=100)
     scope: Literal["links", "triples", "both"] = Field(
@@ -283,6 +287,8 @@ class GraphStatsResponse(BaseModel):
 
 class LintRequest(BaseModel):
     """Request body for POST /graph/lint."""
+
+    model_config = ConfigDict(extra="forbid")
 
     scope: str = Field(default="links", description="links | triples | both")
     parent_id: Optional[int] = None

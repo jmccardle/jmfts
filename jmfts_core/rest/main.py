@@ -17,7 +17,6 @@ from jmfts_core.ingest_worker import build_worker_from_settings
 # Importing the services package runs @register_service, populating the @expose
 # REGISTRY that build_exposed_router() reads. Must happen before the router is built.
 import jmfts_core.services  # noqa: F401
-from jmfts_core.rest.ignored_fields import IGNORED_FIELDS_HEADER, IGNORED_FIELDS_HEADER_DOC
 from jmfts_core.rest.wiring import build_exposed_router, build_openapi_tags
 from jmfts_core.rest.routers import runner
 from jmfts_core.rest.auth import (
@@ -143,8 +142,6 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    # A browser caller cannot read the ignored-fields signal unless CORS exposes it.
-    expose_headers=[IGNORED_FIELDS_HEADER],
 )
 
 # Include routers
@@ -229,29 +226,9 @@ _generated_openapi = app.openapi
 _HTTP_METHODS = frozenset({"get", "put", "post", "delete", "options", "head", "patch", "trace"})
 
 
-def _document_ignored_fields_header(path_item: dict) -> None:
-    """Declare ``X-JMFTS-Ignored-Fields`` on the success responses of every JSON-body route.
-
-    The header is added by ``IgnoredFieldsRoute`` to any response, but it can only be
-    meaningful where there was a body to compare, so that is where the document says so.
-    """
-    for method, operation in path_item.items():
-        if method.lower() not in _HTTP_METHODS:
-            continue
-        content = (operation.get("requestBody") or {}).get("content", {})
-        if not any("json" in media for media in content):
-            continue
-        for status, response in operation.get("responses", {}).items():
-            if str(status).startswith("2"):
-                response.setdefault("headers", {})[
-                    IGNORED_FIELDS_HEADER
-                ] = IGNORED_FIELDS_HEADER_DOC
-
-
 def _openapi_matching_the_gate() -> dict:
     schema = _generated_openapi()
     for path, path_item in schema.get("paths", {}).items():
-        _document_ignored_fields_header(path_item)
         if path in PUBLIC_PATHS:
             required: list[dict] = []
         elif path.startswith(RUNNER_PREFIX):

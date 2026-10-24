@@ -22,6 +22,8 @@ from pydantic import BaseModel, ConfigDict
 class IndexCreate(BaseModel):
     """Request to create a search index"""
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     description: Optional[str] = None
     config: Optional[dict] = None

@@ -85,6 +85,7 @@ from jmfts_client.contracts import (  # noqa: F401
     TemplateSearchRequest,
     TemplateUpdate,
     TemplateVariable,
+    StoredTemplateVariable,
     TokenEmbeddingResponse,
     TopDescendantItem,
     TripleCreate,

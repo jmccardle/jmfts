@@ -26,6 +26,21 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
   and says so. `JMFTS_RUNNER_KEY` is unchanged (blank turns `/runner` off, 503). The worker,
   eval, init-db and batch worker never authenticate with this token and are unaffected.
 
+- **A request field the contract does not declare is now a 422 (#47, completing #33).** Every
+  request contract in `jmfts_client.contracts` (44 models: the request bodies, the models
+  nested in them, and the two `/runner` bodies) sets `extra="forbid"`, so an undeclared field
+  is refused instead of read and dropped. The detail names it:
+  `{"detail": [{"type": "extra_forbidden", "loc": ["body", "max_context_tokens"], "msg":
+  "Extra inputs are not permitted", "input": 5}]}`; a nested one has the path in `loc`
+  (`["body", "project", "shade"]`). Response models are unchanged. Constructing a request
+  model in-process with an extra keyword now raises `ValidationError` too. Affected: any
+  caller on an older wire format; tectum's `max_context_tokens` (removed in 0.6.0) is the
+  known one. Fix: stop sending the field. **The `X-JMFTS-Ignored-Fields` header is gone**
+  (0.6.2 added it; with nothing left to ignore it had no case to report), along with the
+  CORS exposure and the OpenAPI header documentation. Stored template variables stay lenient:
+  `TemplateResponse` reads them through the new `StoredTemplateVariable`, so a template saved
+  with an extra key still reads back.
+
 ### Added
 
 - **`GET /documents/{id}/subtree` takes an optional `usetype` (#49).** It keeps only the
@@ -496,6 +511,7 @@ to what the suite runs on, and ten dead items the restored dead-code scan found.
   tectum's `max_context_tokens`, dropped silently since 0.6.0, is the case that found it.
   Rejecting such fields (`extra="forbid"`) is planned for 0.7.0 (#33).
   *(Corrected 2026-10-17: moved to 0.8.0, for every request contract — #47.)*
+  *(Corrected 2026-10-24: shipped in 0.8.0 as a 422 on every request contract, and the header was removed in the same release — #47.)*
 - **`llm_error` on the synthesize response:** `{reason: not_configured|refused|failed,
   status, message, attempts}`. `llm_available` is unchanged on the wire (#32).
 - **A 502, 503 or 504 from the LLM is retried during synthesis**, the wait doubling from
