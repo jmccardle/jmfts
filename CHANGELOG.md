@@ -32,7 +32,13 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
   is refused instead of read and dropped. The detail names it:
   `{"detail": [{"type": "extra_forbidden", "loc": ["body", "max_context_tokens"], "msg":
   "Extra inputs are not permitted", "input": 5}]}`; a nested one has the path in `loc`
-  (`["body", "project", "shade"]`). Response models are unchanged. Constructing a request
+  (`["body", "project", "shade"]`). Response models are unchanged except that `TemplateResponse.variables` now references a new
+  OpenAPI component, `StoredTemplateVariable`, a subclass of `TemplateVariable` with the same
+  fields. Only JSON bodies are covered: FastAPI still drops unknown query parameters
+  (`GET /search/?q=x&bogus=1` is a 200) and extra multipart form fields on `/ingest/file` and
+  `/ingest/analyze`. The `/runner` bodies forbid too, so a worker and a runner on different
+  releases can get a 422 (classified PERMANENT); keep `JMFTS_RUNNER_URL` workers and their
+  runners on the same release. Constructing a request
   model in-process with an extra keyword now raises `ValidationError` too. Affected: any
   caller on an older wire format; tectum's `max_context_tokens` (removed in 0.6.0) is the
   known one. Fix: stop sending the field. **The `X-JMFTS-Ignored-Fields` header is gone**
@@ -511,7 +517,7 @@ to what the suite runs on, and ten dead items the restored dead-code scan found.
   tectum's `max_context_tokens`, dropped silently since 0.6.0, is the case that found it.
   Rejecting such fields (`extra="forbid"`) is planned for 0.7.0 (#33).
   *(Corrected 2026-10-17: moved to 0.8.0, for every request contract — #47.)*
-  *(Corrected 2026-10-24: shipped in 0.8.0 as a 422 on every request contract, and the header was removed in the same release — #47.)*
+  *(Corrected 2026-10-24: lands in 0.8.0 (#47) as a 422 on every request contract; the header is removed in the same release.)*
 - **`llm_error` on the synthesize response:** `{reason: not_configured|refused|failed,
   status, message, attempts}`. `llm_available` is unchanged on the wire (#32).
 - **A 502, 503 or 504 from the LLM is retried during synthesis**, the wait doubling from
