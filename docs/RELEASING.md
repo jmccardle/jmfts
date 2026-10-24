@@ -158,6 +158,15 @@ quoted `jmfts-client==` pin to `pyproject.toml`. So after the bump run
 > `v0.6.0` tag failed CI on exactly that README pin: the full suite had run BEFORE the bump,
 > and the bump was gated on the first two test files only. **Run the full suite on the
 > bumped commit, not on the one before it.**
+>
+> **Superseded 2026-10-24.** The 0.6.0 failure came from a targeted set that omitted
+> `test_doc_drift.py`, not from the absence of a full run. The full suite now runs once
+> locally, on the last code commit (step 2). The bump commit runs only the tests that read a
+> version literal or the CHANGELOG: `pytest tests/test_packaging.py
+> tests/test_web_distribution.py tests/test_doc_drift.py tests/test_readme_links.py`. Re-grep
+> that list each release with `grep -lE "__version__|CHANGELOG" tests/`, plus
+> `test_doc_drift.py`. The full run on the bumped commit is CI's: `publish.yml`'s `gate` job
+> uses `ci.yml`, so a tag whose commit fails the suite cannot publish.
 
 **Why lockstep rather than independent versions.** `jmfts-client/jmfts_client/_verbs.py`
 is generated from the server's resolved route table. A client built from a different
@@ -175,6 +184,11 @@ would have needed a tag namespace per distribution and a filter in `publish.yml`
 > version is how it gets installed by accident (that is what happened at 0.6.2).
 
 ### 2. Gate
+
+> **2026-10-24:** run this ONCE per release, on the last commit that changes code, so it
+> happens before step 1's bump rather than after it. On branches, run only the tests for
+> what changed; the full suite is the release gate and nothing else. Run one gate on the
+> machine at a time. Five concurrent runs took 2 h each instead of about 15 min alone.
 
 ```bash
 ./scripts/run_tests_docker.sh -rf --tb=line         # the full suite, throwaway pgvector
