@@ -427,24 +427,31 @@ class TestTriplesQueryEndpoint:
 
 @requires_db
 class TestPredicatesListEndpoint:
-    """GET /triples/predicates returns only active predicates by default."""
+    """GET /triples/predicates lists every predicate unless with_triples_only is set."""
 
-    def test_predicates_default_excludes_ghosts(self, client_with_db, db_session):
-        """Default /triples/predicates omits predicates with 0 triples."""
+    def test_predicates_default_includes_ghosts(self, client_with_db, db_session):
+        """Default /triples/predicates lists a predicate with 0 triples (#54)."""
         triple_repo = TripleRepository(db_session)
 
-        # Create a ghost predicate (no triples)
         triple_repo.create_predicate(name="ghost_for_api_test_no_triples")
         db_session.flush()
 
         resp = client_with_db.get("/triples/predicates")
         assert resp.status_code == 200
-        data = resp.json()
+        names = {p["name"] for p in resp.json()}
+        assert "ghost_for_api_test_no_triples" in names
 
-        names = {p["name"] for p in data}
-        assert (
-            "ghost_for_api_test_no_triples" not in names
-        ), "Ghost predicate must not appear in default /triples/predicates response"
+    def test_predicates_with_triples_only_true_excludes_ghosts(self, client_with_db, db_session):
+        """?with_triples_only=true omits predicates with 0 triples."""
+        triple_repo = TripleRepository(db_session)
+
+        triple_repo.create_predicate(name="ghost_for_api_only_test")
+        db_session.flush()
+
+        resp = client_with_db.get("/triples/predicates", params={"with_triples_only": True})
+        assert resp.status_code == 200
+        names = {p["name"] for p in resp.json()}
+        assert "ghost_for_api_only_test" not in names
 
     def test_predicates_with_triples_only_false_includes_ghosts(self, client_with_db, db_session):
         """?with_triples_only=false includes ghost predicates."""

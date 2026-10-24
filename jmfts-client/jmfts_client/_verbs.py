@@ -2029,6 +2029,7 @@ class _GeneratedVerbs(_VerbTransport):
 
         ``POST /triples`` — TripleService.create_triple
 
+        Raises on 409 (server: TripleConflictError).
         Raises on 422 (server: InvalidFactTypeError, InvalidLiteralError).
         """
         return self._call(
@@ -2152,7 +2153,7 @@ class _GeneratedVerbs(_VerbTransport):
         self,
         *,
         namespace: Optional[str] = None,
-        with_triples_only: bool = True,
+        with_triples_only: bool = False,
     ) -> list[PredicateResponse]:
         """List predicates
 

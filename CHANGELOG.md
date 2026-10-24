@@ -110,6 +110,19 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
   (it names `JMFTS_LLM_BASE_URL` and `JMFTS_LLM_MODEL`). 501, not 503: this is an install
   fact and retrying cannot fix it. `/search/synthesize` is unchanged: it still answers 200
   with `llm_available: false`.
+- **A duplicate triple or predicate is a 409 that names the row already there (#54, #55).**
+  `POST /triples` of an existing fact (node or literal object, without `dedup`) was a 500, and
+  a duplicate predicate said only "already exists". Both now answer 409 with a `detail` object,
+  `{"message": ..., "existing_id": N}`, so the caller can fetch the row. The predicate 409 used
+  to carry a bare string `detail`; a client reading it as text must read `detail.message`. The
+  create runs in a savepoint, so two concurrent creates of one predicate give one 201 and the
+  rest the same 409 rather than a 500. A new predicate name carrying an IRI another predicate
+  already holds is the same 409, naming that predicate. Only those unique keys become a 409;
+  any other constraint violation still raises unchanged.
+- **`GET /triples/predicates` lists predicates with no triples by default (#54).** The service
+  defaulted `with_triples_only` to true while the repository defaulted to false, so a predicate
+  you had just created (201) was missing from the list. Pass `with_triples_only=true` for the
+  old listing.
 - **`jmfts-init-db` no longer fails on its second run (#50).** It skipped `CREATE DATABASE` for
   an existing database and then ran `schema.sql`, which is bare `CREATE TABLE`, so
   `jmfts-init-db && jmfts-server` did not survive a restart. It now detects an initialised

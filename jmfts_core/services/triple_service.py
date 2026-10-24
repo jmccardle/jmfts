@@ -12,6 +12,7 @@ without a call-site check:
 
 - ``LookupError``          → 404 (predicate/triple not found)
 - ``PredicateConflictError`` → 409 (predicate name already exists)
+- ``TripleConflictError``  → 409 (the fact is already asserted)
 - ``InvalidFactTypeError`` → 422 (fact_type not in the allowed set)
 - ``InvalidLiteralError``  → 422 (unknown datatype, or a literal that is not a value of it)
 
@@ -24,6 +25,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from jmfts_client.contracts.document import DocumentResponse
@@ -45,12 +47,42 @@ from jmfts_core.registry import expose, register_service
 from jmfts_core.repositories.triple import TripleAlreadyInvalidatedError, TripleRepository
 
 
-class PredicateConflictError(Exception):
+class _ConflictError(Exception):
+    """A create collided with a row that already exists (→ HTTP 409).
+
+    The wire body is ``{"message": ..., "existing_id": N}`` through ``http_detail``, so a
+    client that hit the conflict can fetch the row instead of listing to find it (#54).
+    """
+
+    def __init__(self, message: str, existing_id: int):
+        self.existing_id = existing_id
+        self.http_detail = {"message": message, "existing_id": existing_id}
+        super().__init__(message)
+
+
+class PredicateConflictError(_ConflictError):
     """A predicate with the requested name already exists (→ HTTP 409)."""
+
+
+class TripleConflictError(_ConflictError):
+    """The ``(subject, predicate, object)`` fact is already asserted (→ HTTP 409)."""
 
 
 class InvalidFactTypeError(Exception):
     """A fact_type value outside the allowed set was supplied (→ HTTP 422)."""
+
+
+#: The two unique keys that make a triple a duplicate fact: the node-object UNIQUE
+#: (Postgres' default name for it) and the literal expression index.
+_TRIPLE_FACT_KEYS = frozenset(
+    {"triples_subject_id_predicate_id_object_id_key", "uq_triple_literal"}
+)
+
+
+def _violated_constraint(exc: IntegrityError) -> Optional[str]:
+    """The name of the constraint a driver error reports, or None if it names none."""
+    diag = getattr(exc.orig, "diag", None)
+    return getattr(diag, "constraint_name", None)
 
 
 def _parse_fact_type(value: str) -> FactType:
@@ -86,9 +118,13 @@ class TripleService:
         self,
         *,
         namespace: Optional[str] = None,
-        with_triples_only: bool = True,
+        with_triples_only: bool = False,
     ) -> list[PredicateResponse]:
-        """List predicates. By default returns only predicates with at least one triple.
+        """List predicates. By default returns every predicate, including those with no triples.
+
+        ``with_triples_only=true`` drops the ones nothing has asserted yet. It defaults to
+        false, as the repository does: a predicate you just created and got a 201 for must
+        be listable (#54).
 
         ``namespace`` was called ``domain`` before 0.3.0. It never meant ``rdfs:domain``
         and no writer ever set it; the rename happened before RDF vocabulary made the
@@ -112,15 +148,36 @@ class TripleService:
     def create_predicate(self, request: PredicateCreate) -> PredicateResponse:
         """Create a new predicate."""
         repo = TripleRepository(self.session)
+        message = f"Predicate '{request.name}' already exists"
         existing = repo.get_predicate_by_name(request.name)
         if existing:
-            raise PredicateConflictError(f"Predicate '{request.name}' already exists")
-        pred = repo.create_predicate(
-            name=request.name,
-            namespace=request.namespace,
-            description=request.description,
-            iri=request.iri,
-        )
+            raise PredicateConflictError(message, existing.id)
+        # The check above is a courtesy for the common case. Two creates can both pass it,
+        # and the loser then fails on predicates_name_key; the savepoint keeps that
+        # IntegrityError from poisoning the session while the winner's row is looked up.
+        try:
+            with self.session.begin_nested():
+                pred = repo.create_predicate(
+                    name=request.name,
+                    namespace=request.namespace,
+                    description=request.description,
+                    iri=request.iri,
+                )
+        except IntegrityError as exc:
+            # Named constraints only. begin_nested() flushes whatever the caller left
+            # pending, so an IntegrityError here can be the caller's own; looking a row up
+            # on a poisoned session would replace it with PendingRollbackError.
+            constraint = _violated_constraint(exc)
+            if constraint == "predicates_name_key":
+                existing = repo.get_predicate_by_name(request.name)
+            elif constraint == "predicates_iri_key":
+                existing = repo.get_predicate_by_iri(request.iri)
+                message = f"A predicate with IRI '{request.iri}' already exists"
+            else:
+                raise
+            if existing is None:
+                raise
+            raise PredicateConflictError(message, existing.id)
         response = PredicateResponse(**pred.to_dict())
         # Commit before responding: get_db's teardown commit runs after the
         # response is sent, so a client acting on the returned id would race it.
@@ -165,7 +222,11 @@ class TripleService:
         "/triples",
         response_model=TripleResponse,
         status_code=201,
-        errors={InvalidFactTypeError: 422, InvalidLiteralError: 422},
+        errors={
+            InvalidFactTypeError: 422,
+            InvalidLiteralError: 422,
+            TripleConflictError: 409,
+        },
         tags=["triples"],
         summary="Create a new triple",
     )
@@ -175,14 +236,14 @@ class TripleService:
         With ``dedup=true`` this is the idempotent "assert this fact" verb: the
         ``(subject, predicate, object)`` unique key is honoured via ``INSERT ... ON
         CONFLICT DO NOTHING``, and an already-asserted fact is returned unchanged rather
-        than raising ``IntegrityError``. Pairs with the exposed ``supersede``/
-        ``invalidate`` legs to form a complete assert/retract/supersede fact API. Without
-        the flag the plain insert still raises on a duplicate fact (unchanged behaviour).
+        than raising. Pairs with the exposed ``supersede``/``invalidate`` legs to form a
+        complete assert/retract/supersede fact API. Without the flag a duplicate fact is a
+        409 whose body carries ``existing_id``, the row that already holds it.
 
         The object is a document node (``object_id``) or a literal (``object_literal`` with
         an optional ``object_datatype``). A literal fact's identity is ``uq_triple_literal``,
-        so a duplicate literal create without ``dedup`` raises the same way a duplicate
-        node-object create does.
+        so a duplicate literal create without ``dedup`` is the same 409 a duplicate
+        node-object create is.
         """
         fact_type = _parse_fact_type(request.fact_type)
         if request.object_literal is not None:
@@ -201,17 +262,34 @@ class TripleService:
                 fact_type=fact_type,
             )
         else:
-            triple = repo.create_triple(
-                subject_id=request.subject_id,
-                predicate_id=request.predicate_id,
-                object_id=request.object_id,
-                object_literal=request.object_literal,
-                object_datatype=request.object_datatype,
-                source_document_id=request.source_document_id,
-                valid_from=request.valid_from,
-                valid_until=request.valid_until,
-                fact_type=fact_type,
-            )
+            # Savepoint: the unique violation must not poison the caller's transaction
+            # before the row that caused it can be read back (#55).
+            try:
+                with self.session.begin_nested():
+                    triple = repo.create_triple(
+                        subject_id=request.subject_id,
+                        predicate_id=request.predicate_id,
+                        object_id=request.object_id,
+                        object_literal=request.object_literal,
+                        object_datatype=request.object_datatype,
+                        source_document_id=request.source_document_id,
+                        valid_from=request.valid_from,
+                        valid_until=request.valid_until,
+                        fact_type=fact_type,
+                    )
+            except IntegrityError as exc:
+                if _violated_constraint(exc) not in _TRIPLE_FACT_KEYS:
+                    raise  # not the fact's unique key, so not a 409 (see create_predicate)
+                existing = repo.find_fact(
+                    request.subject_id,
+                    request.predicate_id,
+                    request.object_id,
+                    request.object_literal,
+                    request.object_datatype,
+                )
+                if existing is None:
+                    raise
+                raise TripleConflictError("Triple already exists", existing.id)
         response = TripleResponse(**triple.to_dict())
         self.session.commit()
         return response

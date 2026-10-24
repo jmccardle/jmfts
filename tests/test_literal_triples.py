@@ -14,7 +14,6 @@ from contextlib import contextmanager
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.exc import IntegrityError
 
 from jmfts_client import RemoteJmftsClient
 from jmfts_client.contracts.triple import TripleCreate, TripleSupersedRequest
@@ -140,16 +139,16 @@ def test_a_vocabulary_datatype_outside_xsd_is_stored_opaquely(http, facts):
     assert r.status_code == 201
 
 
-def test_duplicate_create_without_dedup_matches_the_node_object_behaviour(db_session, facts):
-    """A plain duplicate raises IntegrityError for a node object; a literal does the same."""
+def test_duplicate_create_without_dedup_is_a_409_naming_the_row(http, facts):
+    """A plain duplicate is a 409 for a node object and for a literal alike (#55)."""
     s, o, p = facts
-    svc = TripleService(db_session)
-    svc.create_triple(TripleCreate(subject_id=s, predicate_id=p, object_id=o))
-    svc.create_triple(TripleCreate(subject_id=s, predicate_id=p, object_literal="en"))
-    with pytest.raises(IntegrityError), db_session.begin_nested():
-        svc.create_triple(TripleCreate(subject_id=s, predicate_id=p, object_id=o))
-    with pytest.raises(IntegrityError), db_session.begin_nested():
-        svc.create_triple(TripleCreate(subject_id=s, predicate_id=p, object_literal="en"))
+    node = http.post("/triples", json=_body(facts, object_id=o))
+    lit = http.post("/triples", json=_body(facts, object_literal="en"))
+    assert node.status_code == lit.status_code == 201
+    for first, extra in ((node, {"object_id": o}), (lit, {"object_literal": "en"})):
+        again = http.post("/triples", json=_body(facts, **extra))
+        assert again.status_code == 409
+        assert again.json()["detail"]["existing_id"] == first.json()["id"]
 
 
 def test_duplicate_create_with_dedup_returns_the_existing_literal_fact(http, facts):

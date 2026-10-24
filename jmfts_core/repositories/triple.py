@@ -241,25 +241,54 @@ class TripleRepository:
             stmt = stmt.on_conflict_do_nothing(
                 index_elements=["subject_id", "predicate_id", "object_id"]
             )
-            match = [
-                Triple.subject_id == subject_id,
-                Triple.predicate_id == predicate_id,
-                Triple.object_id == object_id,
-            ]
         else:
             # uq_triple_literal is an expression index; the only unique index a literal row
             # can hit (the node-object UNIQUE ignores NULL object_id), so a bare
             # ON CONFLICT DO NOTHING names it without restating the expressions.
             stmt = stmt.on_conflict_do_nothing()
-            match = [
-                Triple.subject_id == subject_id,
-                Triple.predicate_id == predicate_id,
-                func.md5(Triple.object_literal) == func.md5(object_literal),
-                func.coalesce(Triple.object_datatype, "") == (object_datatype or ""),
-            ]
+        match = self._fact_match(
+            subject_id, predicate_id, object_id, object_literal, object_datatype
+        )
         created = self.session.execute(stmt).rowcount > 0
         triple = self.session.execute(select(Triple).where(*match)).scalar_one()
         return triple, created
+
+    @staticmethod
+    def _fact_match(
+        subject_id: int,
+        predicate_id: int,
+        object_id: Optional[int],
+        object_literal: Optional[str],
+        object_datatype: Optional[str],
+    ) -> list:
+        """The WHERE clauses that select the row a fact's unique key names."""
+        if object_id is not None:
+            return [
+                Triple.subject_id == subject_id,
+                Triple.predicate_id == predicate_id,
+                Triple.object_id == object_id,
+            ]
+        return [
+            Triple.subject_id == subject_id,
+            Triple.predicate_id == predicate_id,
+            func.md5(Triple.object_literal) == func.md5(object_literal),
+            func.coalesce(Triple.object_datatype, "") == (object_datatype or ""),
+        ]
+
+    def find_fact(
+        self,
+        subject_id: int,
+        predicate_id: int,
+        object_id: Optional[int] = None,
+        object_literal: Optional[str] = None,
+        object_datatype: Optional[str] = None,
+    ) -> Optional[Triple]:
+        """The triple a fact's unique key names, or None. Invalidated rows count."""
+        _check_object_shape(object_id, object_literal, object_datatype)
+        match = self._fact_match(
+            subject_id, predicate_id, object_id, object_literal, object_datatype
+        )
+        return self.session.execute(select(Triple).where(*match)).scalar_one_or_none()
 
     def get_triple(self, triple_id: int) -> Optional[Triple]:
         return self.session.get(Triple, triple_id)
