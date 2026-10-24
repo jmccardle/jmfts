@@ -244,3 +244,12 @@ def test_extract_facts_and_raptor_without_an_llm_answer_501(api_with_children, n
     raptor = client.post(f"/documents/{parent_id}/raptor", json={})
     assert raptor.status_code == 501, raptor.text
     assert "JMFTS_LLM_BASE_URL" in raptor.json()["detail"]
+
+
+def test_an_unconfigured_llm_is_permanent_for_the_task_queue():
+    """A setting does not appear on a retry. ``LlmNotConfiguredError`` is a RuntimeError, so
+    without its own arm it would fall to the RETRYABLE default and burn the retry budget."""
+    from jmfts_core.config import LlmNotConfiguredError
+    from jmfts_core.task_errors import ErrorType, classify_exception
+
+    assert classify_exception(LlmNotConfiguredError("x")) is ErrorType.PERMANENT
