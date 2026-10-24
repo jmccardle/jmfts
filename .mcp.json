@@ -1,9 +1,0 @@
-{
-    "mcpServers": {
-        "forgejo": {
-            "type": "stdio",
-            "command": "/home/john/Development/forgejo-mcp/forgejo-mcp",
-            "args": ["stdio", "--server", "https://dev.ffwf.net/forgejo/", "--token", "c7eda376d09cc82a2e2779809f162547c819fac9"]
-        }
-    }
-}

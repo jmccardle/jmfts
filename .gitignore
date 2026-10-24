@@ -55,3 +55,5 @@ uv.lock
 
 # jmfts-eval result files (jmfts_core/eval/cli.py); results live beside the run, not in the tree
 eval-results/
+
+.mcp.json
