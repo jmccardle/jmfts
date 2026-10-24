@@ -70,6 +70,7 @@ from jmfts_client.contracts import (  # noqa: F401
     SpineBranchPoint,
     SpineItem,
     SpineResponse,
+    StoredTemplateVariable,
     StructuralSplitRequest,
     StructuralSplitResponse,
     StructuralSplitSectionItem,

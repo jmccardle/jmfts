@@ -16,6 +16,8 @@ from jmfts_client.contracts.document import DocumentResponse
 class PredicateCreate(BaseModel):
     """Request to create a predicate"""
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     #: Renamed from ``domain`` in 0.3.0. ``rdfs:domain`` means "the class a subject must
     #: belong to"; this has always meant "the group this predicate belongs to", and the
@@ -59,6 +61,8 @@ class TripleCreate(BaseModel):
     422. ``object_datatype`` without ``object_literal`` is a 422 too: a datatype belongs to
     a literal, and the schema's ``ck_triples_object_exactly_one`` refuses it on a node.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     subject_id: int
     predicate_id: int
@@ -145,6 +149,8 @@ class TripleDetailResponse(BaseModel):
 class TripleInvalidateRequest(BaseModel):
     """Request to invalidate a triple"""
 
+    model_config = ConfigDict(extra="forbid")
+
     reason: Optional[str] = None
     superseding_triple_id: Optional[int] = None
 
@@ -155,6 +161,8 @@ class TripleSupersedRequest(BaseModel):
     The successor's object follows :class:`TripleCreate`: exactly one of ``object_id`` and
     ``object_literal``, and ``object_datatype`` only beside a literal.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     subject_id: int
     predicate_id: int

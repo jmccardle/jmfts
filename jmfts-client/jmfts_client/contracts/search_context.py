@@ -15,6 +15,8 @@ from pydantic import BaseModel, ConfigDict, Field
 class SearchContextCreate(BaseModel):
     """Request to create a search context preset"""
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     description: Optional[str] = None
     config: dict = Field(
@@ -28,6 +30,8 @@ class SearchContextCreate(BaseModel):
 
 class SearchContextUpdate(BaseModel):
     """Request to update a search context preset"""
+
+    model_config = ConfigDict(extra="forbid")
 
     description: Optional[str] = None
     config: Optional[dict] = None

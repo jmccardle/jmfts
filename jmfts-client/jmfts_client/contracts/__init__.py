@@ -142,6 +142,7 @@ from jmfts_client.contracts.search_context import (
     SearchContextUpdate,
 )
 from jmfts_client.contracts.template import (
+    StoredTemplateVariable,
     TemplateCreate,
     TemplateRenderRequest,
     TemplateRenderResponse,
@@ -305,6 +306,7 @@ __all__ = [
     "SearchContextCreate",
     "SearchContextResponse",
     "SearchContextUpdate",
+    "StoredTemplateVariable",
     "TemplateCreate",
     "TemplateRenderRequest",
     "TemplateRenderResponse",

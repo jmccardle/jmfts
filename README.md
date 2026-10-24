@@ -230,8 +230,7 @@ this repository's CI, and a change to the API is accepted here together with the
 updating whatever calls it. A caller that hand-writes its own client takes on keeping that
 client current; one that uses `jmfts-client` at the matching version gets the change as a
 typed error at import or validation time instead. Breaking changes are listed in
-`CHANGELOG.md`, and a request field the server does not read is reported back in the
-`X-JMFTS-Ignored-Fields` response header.
+`CHANGELOG.md`, and a JSON body field the server does not read is a 422 that names it.
 
 Press **Authorize** and paste `JMFTS_API_TOKEN` before trying an operation; the page names
 which of the two credentials each one takes, since `/runner/*` uses `JMFTS_RUNNER_KEY`

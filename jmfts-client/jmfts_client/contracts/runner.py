@@ -49,7 +49,7 @@ from __future__ import annotations
 import base64
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:  # annotations only — no runtime import, so no runtime dependency
     import numpy as np
@@ -161,6 +161,8 @@ class RunnerInfo(BaseModel):
 class RunnerEmbedRequest(BaseModel):
     """Ask for a document vector alone — the 8192-token path, no attention pass."""
 
+    model_config = ConfigDict(extra="forbid")
+
     text: str = Field(..., description="Text to embed")
     prefix: str = Field(
         "search_document: ",
@@ -197,6 +199,8 @@ class RunnerEmbedTokensRequest(BaseModel):
     which materialises layers x heads x seq^2 floats, and it is bounded by
     ``embedding_token_window`` for that reason rather than by anything the model cannot do.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     text: str = Field(..., description="Text to embed; must fit the token window")
     prefix: str = Field("search_document: ", description="Task prefix for the model")

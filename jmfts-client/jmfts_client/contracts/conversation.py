@@ -9,11 +9,13 @@ Rule of the house: core may import contracts; contracts may not import ``api``/`
 
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ConversationMessage(BaseModel):
     """A single message in a conversation"""
+
+    model_config = ConfigDict(extra="forbid")
 
     role: str = Field(description="Speaker role: user, assistant, system, etc.")
     content: str = Field(description="Message text content")
@@ -24,6 +26,8 @@ class ConversationMessage(BaseModel):
 
 class ConversationIngestRequest(BaseModel):
     """Request to ingest a conversation through the full pipeline"""
+
+    model_config = ConfigDict(extra="forbid")
 
     messages: Optional[list[ConversationMessage]] = Field(
         default=None, description="Simple message array format"
