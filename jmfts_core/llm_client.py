@@ -66,16 +66,28 @@ than 408/429 is ``PERMANENT``, so a context-length 400 fails its task on the fir
 The two paragraphs above are history from here on, except for the timeout: τ still reports
 one as a bare message with no status, so it is ``status=None`` and stays ``RETRYABLE``
 rather than ``TIMEOUT``. The regex goes when τ 0.13 carries the status itself (#45).
+
+**2026-10-24, τ 0.14.** It has. ``ProviderHttpError.status_code`` replaces the regex, and
+τ now retries by default, so every call passes ``retry=False`` (see :func:`_options`).
+The paragraphs above that describe τ 0.12's bare ``Exception`` are history.
 """
 
 from __future__ import annotations
 
 import asyncio
-import re
 from dataclasses import dataclass
 from typing import Any
 
-from tau_llm import Model, TextContent, ThinkingContent, aclose_providers, complete_simple
+from tau_llm import (
+    Model,
+    ProviderConnectionError,
+    ProviderHttpError,
+    ProviderStreamError,
+    TextContent,
+    ThinkingContent,
+    aclose_providers,
+    complete_simple,
+)
 from tau_llm.types import AssistantMessage
 
 from jmfts_core.config import Settings
@@ -115,15 +127,6 @@ class LlmCompletion:
     usage: dict[str, Any]
 
 
-#: τ's wording for a non-200, which is the only place the status survives: τ (through
-#: 0.12.0) reports it as ``"HTTP {status} from model {id!r} at {base_url!r}: {message}"``
-#: on an error event and ``complete_simple`` raises that text as a bare ``Exception``.
-#: Read here and NOWHERE else; ``tests/test_synthesis_refusal.py::TestTheTypedError``
-#: fails if τ's wording moves, so a change there cannot silently turn every refusal into
-#: a status-less failure.
-_TAU_HTTP_STATUS = re.compile(r"^HTTP (\d{3}) from model ")
-
-
 class LlmCallError(Exception):
     """A configured endpoint did not answer a completion. Forgejo john/jmfts #32.
 
@@ -133,9 +136,8 @@ class LlmCallError(Exception):
     (``"... is loading"``, ``"... exceeds the available context size"``).
 
     This is the typed error ``task_errors.classify_exception`` was missing (the module
-    docstring above). The status is read out of τ's message text — once, here — because τ
-    carries it nowhere else; when τ raises a typed error of its own, :func:`_from_tau`
-    reads the attribute instead and the regex goes.
+    docstring above). The status is read from τ's ``ProviderHttpError.status_code``
+    (τ 0.14); there is no message parsing left.
     """
 
     def __init__(self, message: str, *, status: int | None, attempts: int = 1):
@@ -146,10 +148,24 @@ class LlmCallError(Exception):
         self.attempts = attempts
 
 
-def _from_tau(exc: Exception) -> LlmCallError:
-    message = str(exc)
-    match = _TAU_HTTP_STATUS.match(message)
-    return LlmCallError(message, status=int(match.group(1)) if match else None)
+def _from_tau(exc: Exception) -> LlmCallError | None:
+    """Our error for a failure of the endpoint; None for an exception that is not one.
+
+    τ 0.14 types what it knows: ``ProviderHttpError`` carries the status the endpoint
+    answered with, ``ProviderConnectionError`` says nothing answered, and
+    ``ProviderStreamError`` is an error frame inside a 200 (its ``status`` is set only when
+    the frame's code reads as HTTP). A timeout is still a bare ``Exception`` carrying
+    text, which is ``status=None`` like any other no-answer. Anything else typed — a
+    ``ValueError`` naming a bad model description — is a different statement and is not
+    ours to relabel.
+    """
+    if isinstance(exc, ProviderHttpError):
+        return LlmCallError(str(exc), status=exc.status_code)
+    if isinstance(exc, ProviderStreamError):
+        return LlmCallError(str(exc), status=exc.status)
+    if isinstance(exc, ProviderConnectionError) or type(exc) is Exception:
+        return LlmCallError(str(exc), status=None)
+    return None
 
 
 def build_model(*, base_url: str, model: str, max_tokens: int, settings: Settings) -> Model:
@@ -200,6 +216,11 @@ def _options(
     options: dict[str, Any] = {
         "api_key": settings.llm_api_key or NO_KEY_SENTINEL,
         "temperature": temperature,
+        # JMFTS's budgets are the only retry authority. τ 0.14 retries a 408/429/502/503/
+        # 504/529 or a refused connection by default (~3 times, honouring Retry-After),
+        # which would multiply `synthesis_retry_budget` and the task queue's attempts and
+        # hide the first refusal from both.
+        "retry": False,
     }
     if extra_body:
         options.update(extra_body)
@@ -237,8 +258,8 @@ async def complete(
     ``messages`` are OpenAI-shaped dicts — ``{"role": ..., "content": ...}`` — which is
     what the four callers already build and what τ passes through unchanged.
 
-    Raises :class:`LlmCallError` when the endpoint did not answer — the bare ``Exception``
-    τ raises for an error event, and only that: a typed exception from τ (a ``ValueError``
+    Raises :class:`LlmCallError` when the endpoint did not answer — see :func:`_from_tau` —
+    and only then: a typed exception from τ (a ``ValueError``
     naming a bad model description, say) is a different statement and propagates as it is.
     """
     tau_model = build_model(
@@ -251,9 +272,10 @@ async def complete(
             _options(settings=settings, temperature=temperature, extra_body=extra_body),
         )
     except Exception as exc:
-        if type(exc) is not Exception:
+        ours = _from_tau(exc)
+        if ours is None:
             raise
-        raise _from_tau(exc) from exc
+        raise ours from exc
     return LlmCompletion(text=_text_of(message), model=model, usage=message.usage.model_dump())
 
 

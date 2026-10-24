@@ -165,10 +165,9 @@ class TestBoundedRetry:
 class TestTheTypedError:
     """``llm_client.complete`` turns τ's bare ``Exception`` into :class:`LlmCallError`.
 
-    τ (through 0.12.0) reports a non-200 only as message text. The status is read back out
-    of that text in ONE place, and this is the test that fails if τ's wording moves —
-    rather than every status silently becoming ``None`` and every refusal reading as
-    ``failed``.
+    τ 0.14 raises ``ProviderHttpError`` carrying ``status_code``; a refused connection is
+    ``ProviderConnectionError``. These are the tests that fail if τ's types move — rather
+    than every status silently becoming ``None`` and every refusal reading as ``failed``.
     """
 
     def _call(self, settings: Settings):
@@ -202,7 +201,7 @@ class TestTheTypedError:
         """Forgejo #8, end to end from the wire: the 400 a llama-server sends for an
         over-long prompt reaches ``classify_exception`` as PERMANENT, so the task queue
         settles the node instead of spending its retry budget on a request that is refused
-        identically every time. One request, because τ 0.12 does not retry either."""
+        identically every time. One request, because ``llm_client`` turns τ's own retry off."""
         from jmfts_core.task_errors import ErrorType, classify_exception
 
         too_long = "the request (9000 tokens) exceeds the available context size (8192)"

@@ -114,10 +114,10 @@ def classify_exception(exception: BaseException) -> ErrorType:
     # is what the endpoint said, and a 400 for "exceeds the available context size" is said
     # identically on every attempt: before this arm it burned the whole retry budget first.
     #
-    # The status is read out of τ's message text, once, in `llm_client._TAU_HTTP_STATUS`;
-    # this arm reads the typed attribute, so spec 3.4 — policy by classification, never by
-    # a string match here — still holds. Safe on τ 0.12.x, which retries nothing itself, so
-    # the task queue is the only retry layer; τ 0.13's own retries are Forgejo #45.
+    # The status is τ's `ProviderHttpError.status_code`, carried over by `llm_client`; this
+    # arm reads the typed attribute, so spec 3.4 — policy by classification, never by a
+    # string match here — still holds. τ 0.14 retries on its own unless told not to, and
+    # `llm_client` tells it not to, so the task queue is the only retry layer.
     if isinstance(exception, LlmCallError) and exception.status is not None:
         return _classify_status(exception.status)
 

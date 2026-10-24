@@ -133,7 +133,7 @@ dependencies = [
     # answer when it does: it falls back to a character-class ESTIMATE (`exact=False`), and
     # every token count here is a measurement. τ 0.10.0's breaking changes are in the
     # agent/session layer, not in the five names llm_client.py imports.
-    "ffwf-tau-llm>=0.12.0",
+    "ffwf-tau-llm>=0.14.1",
     "ruptures>=1.1.8",
     "python-igraph>=1.0",
     "leidenalg>=0.11",
