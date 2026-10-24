@@ -613,8 +613,14 @@ class DocumentService:
         *,
         max_depth: Optional[int] = None,
         include_in_flight: bool = False,
+        usetype: Optional[str] = None,
     ) -> SubtreeResponse:
         """Get all documents in a subtree.
+
+        ``usetype`` keeps only descendants of exactly that usetype, at any depth and with
+        no row cap: this is the way to ask for "all descendants of type X" (``children``
+        with ``depth=-1`` is capped by its ``limit``). The root is returned regardless,
+        and ``total`` counts the root plus the descendants that survive the filter.
 
         ``include_in_flight`` opts in to nodes that are not settled. Off by default: an
         unfinished subtree is not an answer, and an in-flight ROOT is a 409 rather than
@@ -622,7 +628,10 @@ class DocumentService:
         """
         repo = DocumentRepository(self.session)
         docs = repo.get_subtree(
-            document_id, max_depth=max_depth, include_in_flight=include_in_flight
+            document_id,
+            max_depth=max_depth,
+            include_in_flight=include_in_flight,
+            usetype=usetype,
         )
         if not docs:
             raise LookupError(f"Document {document_id} not found")

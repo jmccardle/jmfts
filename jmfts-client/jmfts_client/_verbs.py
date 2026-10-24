@@ -708,6 +708,7 @@ class _GeneratedVerbs(_VerbTransport):
         *,
         max_depth: Optional[int] = None,
         include_in_flight: bool = False,
+        usetype: Optional[str] = None,
     ) -> SubtreeResponse:
         """Get all documents in a subtree
 
@@ -720,7 +721,11 @@ class _GeneratedVerbs(_VerbTransport):
             "GET",
             "/documents/{document_id}/subtree",
             path={"document_id": document_id},
-            query={"max_depth": max_depth, "include_in_flight": include_in_flight},
+            query={
+                "max_depth": max_depth,
+                "include_in_flight": include_in_flight,
+                "usetype": usetype,
+            },
             response=SubtreeResponse,
         )
 

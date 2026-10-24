@@ -28,6 +28,14 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
 
 ### Added
 
+- **`GET /documents/{id}/subtree` takes an optional `usetype` (#49).** It keeps only the
+  descendants whose usetype is exactly that, at any depth and with no row cap, which is the
+  way to ask for "all descendants of type X": `children?depth=-1&usetype=X` answers the same
+  question but stops at its `limit` (100 by default). The root is returned whatever its
+  usetype, `total` counts the root plus the descendants that match (not the unfiltered
+  subtree), and a usetype nothing carries gives an empty `descendants`, not an error.
+  `children` is unchanged. `/capabilities` was already typed (`CapabilitiesResponse`).
+
 - **A triple's object can be a literal over REST, not only a document node (#48).**
   `POST /triples`, `PUT /triples` and `POST /triples/{id}/supersede` take `object_literal`
   (the lexical form) and an optional `object_datatype` (an absolute IRI; omitted means

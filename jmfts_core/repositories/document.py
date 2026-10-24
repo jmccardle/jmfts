@@ -821,6 +821,7 @@ class DocumentRepository:
         root_id: int,
         max_depth: Optional[int] = None,
         include_in_flight: bool = False,
+        usetype: Optional[str] = None,
     ) -> list[Document]:
         """
         Get all documents in a subtree using the path array.
@@ -828,6 +829,9 @@ class DocumentRepository:
         Args:
             root_id: Root document ID
             max_depth: Maximum depth to traverse (None for unlimited)
+            usetype: Keep only descendants whose usetype equals this (exact match, as
+                ``get_children``). The ROOT is returned regardless; a usetype that matches
+                nothing yields ``[root]``, not an error.
             include_in_flight: Whether nodes that are not settled ('in_flight' or
                 'failed') are returned. Default False — a settled-only view, which is
                 what every reader outside the ingest machinery wants: a tree that is
@@ -862,6 +866,9 @@ class DocumentRepository:
         if max_depth is not None:
             root_depth = len(root.path) if root.path else 0
             stmt = stmt.where(func.jsonb_array_length(Document.path) <= root_depth + max_depth)
+
+        if usetype is not None:
+            stmt = stmt.where(Document.usetype == usetype)
 
         descendants = list(self.session.execute(stmt).scalars().all())
 

@@ -3370,6 +3370,7 @@ export declare class JmftsClient extends JmftsTransport {
     document_id: number;
     max_depth?: number | null;
     include_in_flight?: boolean;
+    usetype?: string | null;
   }): Promise<SubtreeResponse>;
 
   /**

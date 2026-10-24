@@ -767,7 +767,8 @@ export const OPERATIONS = Object.freeze(
     "path_slash_params": [],
     "query_params": [
       "max_depth",
-      "include_in_flight"
+      "include_in_flight",
+      "usetype"
     ],
     "body_param": null,
     "body_media_type": null,
