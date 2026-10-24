@@ -76,6 +76,7 @@ from jmfts_client.contracts.document import (
     SubtreeResponse,
     TokenEmbeddingResponse,
 )
+from jmfts_core.config import get_settings
 from jmfts_core.embedding import TextTooLongError, get_embedding_service
 from jmfts_core.fact_extraction import extract_facts
 from jmfts_core.index_tasks import covering_indexes
@@ -1219,6 +1220,10 @@ class DocumentService:
         convergence or max_depth is reached. Bridge links are created for cross-cluster
         context via DocumentLink (link_type="bridge").
         """
+        # Refuse before any work: the LLM check otherwise comes after clustering and bridge
+        # links, which the failed request then rolls back (#56).
+        get_settings().require_llm("RAPTOR summarization", request.llm_model)
+
         repo = DocumentRepository(self.session)
         parent = repo.get(document_id)
         if not parent:
@@ -1279,6 +1284,10 @@ class DocumentService:
         LLM summarization. Requires that per-document RAPTOR has already been run
         on each report.
         """
+        # Refuse before any work: the LLM check otherwise comes after clustering and bridge
+        # links, which the failed request then rolls back (#56).
+        get_settings().require_llm("RAPTOR summarization", request.llm_model)
+
         repo = DocumentRepository(self.session)
         parent = repo.get(document_id)
         if not parent:

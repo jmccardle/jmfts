@@ -36,6 +36,7 @@ from enum import Enum
 
 import httpx
 
+from jmfts_core.config import LlmNotConfiguredError
 from jmfts_core.llm_client import LlmCallError
 
 
@@ -119,6 +120,12 @@ def classify_exception(exception: BaseException) -> ErrorType:
     # the task queue is the only retry layer; τ 0.13's own retries are Forgejo #45.
     if isinstance(exception, LlmCallError) and exception.status is not None:
         return _classify_status(exception.status)
+
+    # No LLM endpoint is configured: a setting does not appear on the second attempt. It is a
+    # RuntimeError, so none of the arms below would catch it and it would fall to the
+    # RETRYABLE default; the message names the variable to set (#56).
+    if isinstance(exception, LlmNotConfiguredError):
+        return ErrorType.PERMANENT
 
     # Data and programming errors. See the module docstring: this includes our own bugs
     # on purpose, because retrying a bug three times only delays noticing it.
