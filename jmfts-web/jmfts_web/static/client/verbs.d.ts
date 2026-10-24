@@ -1820,11 +1820,11 @@ export interface RetrievalCapability {
    */
   default_weights: Record<string, number>;
   /**
-   * Usetypes held out of vector/full-text/MaxSim results when a request names no `exclude_types` (`JMFTS_SEARCH_EXCLUDE_USETYPES`).
+   * Usetypes held out of vector/full-text/MaxSim results when a request names no `exclude_types` (`JMFTS_SEARCH_EXCLUDE_USETYPES`). An entry containing `*` or `?` is a glob (`registry:*`), listed as written; any other entry is an exact name.
    */
   search_exclude_usetypes: Array<string>;
   /**
-   * Usetypes never written to a BM25 index in the first place (`JMFTS_BM25_EXCLUDE_USETYPES`). Excluded at index time, so re-indexing is what changes this, not a search argument.
+   * Usetypes never written to a BM25 index in the first place (`JMFTS_BM25_EXCLUDE_USETYPES`). Excluded at index time, so re-indexing is what changes this, not a search argument. Entries follow the same exact-or-glob syntax as `search_exclude_usetypes`.
    */
   bm25_exclude_usetypes: Array<string>;
 }

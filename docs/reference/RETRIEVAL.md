@@ -40,7 +40,7 @@ Pass an explicit `weights` map to control this, or `{}` for equal-weight RRF.
 | filter | default | what it does |
 |---|---|---|
 | `usetype` | unset | keep only this usetype. Supports `*` and `?`. Overrides `exclude_types` entirely. |
-| `exclude_types` | `entity`, `entities`, `summary`, `derived` | drop these usetypes. **Applied when the request names none** — this is the filter that shortens a result list with no explanation. Pass `[]` to disable it. |
+| `exclude_types` | `entity`, `entities`, `summary`, `derived` | drop these usetypes. **Applied when the request names none** — this is the filter that shortens a result list with no explanation. Pass `[]` to disable it. An entry with `*` or `?` is a glob (`registry:*`), in the request and in `JMFTS_SEARCH_EXCLUDE_USETYPES`. |
 | `parent_id` | unset | keep only documents in this subtree. |
 | `as_of` | unset | keep only documents whose domain clock `COALESCE(event_time, created_at)` is at or before this instant. |
 | `threshold` | `0.0` | vector search only: minimum cosine similarity. |
@@ -53,4 +53,5 @@ Pass an explicit `weights` map to control this, or `{}` for equal-weight RRF.
 `exclude_types` is a search-time filter and is reported in `applied.exclude_types`. BM25
 also excludes at INDEX time — `entity`, `entities`, `summary`, `derived`, `cell` are never
 written to an inverted index at all — so no search argument brings them back to the bm25
-leg. Re-indexing does.
+leg. Re-indexing does. Entries of `JMFTS_BM25_EXCLUDE_USETYPES` follow the same syntax: an
+exact name, or a glob where `*` is any run of characters and `?` one character.
