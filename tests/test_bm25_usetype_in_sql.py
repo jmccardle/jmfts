@@ -112,6 +112,39 @@ class TestThePageStaysFull:
 
 
 @requires_db
+def test_a_container_past_limit_by_term_hits_but_top_by_score_still_makes_the_page(
+    db_session, monkeypatch
+):
+    """The candidate pass orders by distinct terms matched, not BM25; it must look past `limit`."""
+    from tests.test_container_bm25 import _node
+
+    monkeypatch.setattr(get_settings(), "search_exclude_usetypes", [])
+    repo = SearchRepository(db_session)
+    repo.create_index("container_depth")
+    filler = " ".join(["lorem"] * 100)
+    leaves = []
+    # Two containers matching all three terms, weakly (long leaves): hits = 3.
+    for i in range(2):
+        weak = _node(db_session, usetype="section", title=f"weak{i}")
+        leaves.append(
+            _node(db_session, parent=weak.id, position=0, content=f"alpha beta gamma {filler}")
+        )
+    # One matching two terms, strongly: third by hits, first by score.
+    strong = _node(db_session, usetype="section", title="strong")
+    leaves.append(_node(db_session, parent=strong.id, position=0, content="alpha alpha alpha beta"))
+    for i in range(10):
+        leaves.append(_node(db_session, content=f"epsilon zeta unrelated{i}"))
+    for leaf in leaves:
+        assert repo.index_document(leaf.id, "container_depth")
+    db_session.flush()
+
+    results = repo.bm25_search("alpha beta gamma", index_name="container_depth", limit=2)
+
+    assert len(results) == 2
+    assert strong.id in {r.document.id for r in results}
+
+
+@requires_db
 class TestTheNamedIndexRecipe:
     """`registry:topic` is held out of default search and found by asking for it."""
 
@@ -164,7 +197,12 @@ class TestTheNamedIndexRecipe:
 
 
 def test_default_settings_make_the_query_time_exclusion_a_no_op():
-    """search_exclude is a subset of bm25_exclude, so nothing the index holds is dropped."""
+    """For LEAVES, search_exclude is a subset of bm25_exclude, so nothing the index holds is dropped.
+
+    Containers are the exception: they have no postings, so ``bm25_exclude_usetypes`` never
+    applied to them, and a contentless container whose usetype is in the default
+    ``search_exclude_usetypes`` is now dropped from default BM25 (as vector search already did).
+    """
     fields = Settings.model_fields
     search = set(fields["search_exclude_usetypes"].default)
     bm25 = set(fields["bm25_exclude_usetypes"].default)

@@ -86,6 +86,14 @@ class IndexRefreshDeniedError(AccessDeniedError):
 #: where the scan mode changes how the walk terminates.
 HNSW_ITERATIVE_SCAN = "strict_order"
 
+#: How many times ``limit`` containers the BM25 candidate pass considers (#57). The pass
+#: ranks by distinct query terms matched, which is an APPROXIMATION of BM25 (see
+#: ``_container_candidates``), so a container that would score in the top ``limit`` can sit
+#: below position ``limit`` in that order. The leaf query used to fetch ``limit * 2`` and
+#: this pass inherited it; the leaf over-fetch went with the post-filter, and this is the
+#: container pass's own bound. The final merge still truncates to ``limit``.
+_CONTAINER_CANDIDATE_FACTOR = 2
+
 #: Where the per-connection answer to "does this server register ``hnsw.iterative_scan``"
 #: is cached. ``Connection.info`` is keyed to the DBAPI connection rather than to the
 #: Session, which is the right lifetime: the probe below loads a shared library into one
@@ -831,8 +839,11 @@ class SearchRepository:
         # request's `exclude_types`, otherwise `JMFTS_SEARCH_EXCLUDE_USETYPES`
         # (`effective_exclude_types`). BM25 used to ignore the setting at query time and rely
         # on `bm25_exclude_usetypes` at index time alone, while `applied.exclude_types`
-        # reported it as applied. With default settings this adds nothing, because
-        # search_exclude is a subset of bm25_exclude (`config.py`).
+        # reported it as applied. With default settings this adds nothing FOR LEAVES, because
+        # search_exclude is a subset of bm25_exclude (`config.py`). Containers have no
+        # postings, so `bm25_exclude_usetypes` never applied to them: a contentless container
+        # whose usetype is in `search_exclude_usetypes` is now dropped from default BM25,
+        # where it used to be returned. That matches vector search.
         usetype_params: dict = {}
         if globs is not None:
             leaf_usetype, usetype_params = _usetype_sql(globs, alias="d")
@@ -942,7 +953,7 @@ class SearchRepository:
             terms,
             k1,
             b,
-            bind_params["limit"],
+            limit * _CONTAINER_CANDIDATE_FACTOR,
             gate=container_gate,
             gate_params=container_gate_params,
         )

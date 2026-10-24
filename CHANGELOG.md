@@ -116,8 +116,12 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
   scan and the container pass, and the over-fetch and Python post-filter are gone.
   Behaviour change: BM25 now also applies `JMFTS_SEARCH_EXCLUDE_USETYPES` at query time when
   the request names neither `usetype` nor `exclude_types`, which `applied.exclude_types` had
-  already been reporting. With default settings that changes nothing (the search list is a
-  subset of the BM25 index-time list). It matters for the recipe in the setting's
+  already been reporting. With default settings that changes nothing for leaves (the search
+  list is a subset of the BM25 index-time list). Containers have no postings, so the index-time
+  list never applied to them: a contentless container whose usetype is in
+  `search_exclude_usetypes` is now dropped from default BM25, where it used to be returned,
+  which matches vector search. The container candidate pass keeps its own bound of twice
+  `limit`. The setting matters for the recipe in the setting's
   description: hold a corpus out of default search with a `search_exclude_usetypes` glob,
   and keep it in its own named index by leaving it out of `bm25_exclude_usetypes`.
 - **`POST /documents` with `auto_index_bm25` now indexes into the named index that covers the
