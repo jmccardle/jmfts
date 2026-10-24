@@ -309,7 +309,9 @@ class TestPredicateShape:
         assert self._sql(_usetype_predicate(("chunk",))) == self._sql(Document.usetype == "chunk")
 
     def test_a_single_wildcard_glob_compiles_to_the_statement_it_always_did(self):
-        assert self._sql(_usetype_predicate(("a/*",))) == self._sql(Document.usetype.like("a/%"))
+        assert self._sql(_usetype_predicate(("a/*",))) == self._sql(
+            Document.usetype.like("a/%", escape="\\")
+        )
 
     def test_exact_globs_share_one_membership_test(self):
         """Two exact names are ``IN``, not two ``LIKE``s, so the btree is still searchable."""

@@ -145,7 +145,9 @@ class TestEveryMethod:
         repo.create_index("exclusion_globs_rebuild")
         for doc_id in seeded.values():
             repo.add_root_to_index("exclusion_globs_rebuild", doc_id)
-        repo.refresh_index("exclusion_globs_rebuild")
+        db_session.flush()  # the members are only add()ed; the rebuild reads them by query
+        refreshed = repo.refresh_index("exclusion_globs_rebuild")
+        assert refreshed["indexed"] == len(KEPT), refreshed
         results = repo.bm25_search(base.BEACON, index_name="exclusion_globs_rebuild", limit=50)
         assert base._names(seeded, results) == KEPT
 
