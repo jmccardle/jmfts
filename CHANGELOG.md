@@ -85,6 +85,16 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
 
 ### Fixed
 
+- **`POST /documents` with `auto_index_bm25` now indexes into the named index that covers the
+  document (#53).** It always wrote to `default`, so a document created under a named index's
+  root was invisible to that index's BM25 search and leaked into `default`. It now indexes
+  into every index `covering_indexes()` returns (root is the document or an ancestor).
+  This DIFFERS from the queued path in one case: with no covering index the queued path
+  (INGEST_SPEC §11.5) writes nothing, while `POST /documents` still falls back to `default`,
+  so an uncovered inline-created document stays findable by default BM25. User-visible: a
+  document created under a named root no longer appears in a BM25 or hybrid search that names
+  neither `parent_id` nor `index_name`. Postings already in `default` from before the fix are
+  not migrated.
 - **`jmfts-init-db` no longer fails on its second run (#50).** It skipped `CREATE DATABASE` for
   an existing database and then ran `schema.sql`, which is bare `CREATE TABLE`, so
   `jmfts-init-db && jmfts-server` did not survive a restart. It now detects an initialised

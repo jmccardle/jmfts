@@ -78,6 +78,7 @@ from jmfts_client.contracts.document import (
 )
 from jmfts_core.embedding import TextTooLongError, get_embedding_service
 from jmfts_core.fact_extraction import extract_facts
+from jmfts_core.index_tasks import covering_indexes
 from jmfts_core.models.document import (
     Document,
     USETYPE_FILE,
@@ -372,7 +373,17 @@ class DocumentService:
             # holds out by usetype or that tokenises to nothing, which are both correct
             # outcomes; anything it RAISES is a broken index and belongs at the call site,
             # not swallowed into a document that reports success and cannot be found.
-            SearchRepository(self.session).index_document(doc.id, index_name="default")
+            #
+            # Which index follows the queued path's covering rule
+            # (`index_tasks.covering_indexes`): the indexes whose registered root is this
+            # document or an ancestor. It DIFFERS from the queued path in one case: when no
+            # named index covers the document, the queued path (INGEST_SPEC.md 11.5) writes
+            # nothing, and this falls back to `default`, so an uncovered inline-created
+            # document stays findable by default BM25. A covered document no longer leaks
+            # into `default`.
+            search_repo = SearchRepository(self.session)
+            for index_name in covering_indexes(self.session, doc) or ["default"]:
+                search_repo.index_document(doc.id, index_name=index_name)
         response = DocumentResponse.from_document(doc)
         # Commit before responding: get_db's teardown commit runs after the
         # response is sent, so a client acting on the returned id would race it.

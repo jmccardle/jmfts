@@ -702,8 +702,10 @@ class SearchRepository:
         # its own `settled` column still reads `in_flight`, because `settle_node` sets that
         # column after the planner it just asked returns nothing. It is invisible here until
         # it does, which is the correct answer and is this gate producing it. Nothing else
-        # is narrowed: `POST /documents` still writes into `default` inline when
-        # `auto_index_bm25` is set (`document_service.create_document`), and
+        # is narrowed: `POST /documents` writes inline when `auto_index_bm25` is set
+        # (`document_service.create_document`) [corrected for #53: it wrote into `default`
+        # unconditionally when this was written; it now writes into the covering named
+        # indexes first and into `default` only when none covers the document], and
         # `POST /indexes/{name}/index-document/{id}` writes any node into any index.
         #
         # IN the scored CTE rather than after it, for the reason the ACL note below already

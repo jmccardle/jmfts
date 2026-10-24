@@ -270,6 +270,54 @@ def test_create_document_indexes_for_bm25(api, db_session):
     assert doc_id in [h["document"]["id"] for h in hits.json()["results"]]
 
 
+def _entry_indexes(db_session, doc_id):
+    from sqlalchemy import select
+
+    from jmfts_core.models.search_index import SearchIndex, SearchIndexEntry
+
+    return set(
+        db_session.execute(
+            select(SearchIndex.name)
+            .join(SearchIndexEntry, SearchIndexEntry.index_id == SearchIndex.id)
+            .where(SearchIndexEntry.document_id == doc_id)
+        ).scalars()
+    )
+
+
+@requires_db
+def test_create_document_indexes_into_the_covering_named_index(api, db_session):
+    """#53: a document under a named index's root lands there, not in `default`."""
+    from jmfts_core.repositories.search import SearchRepository
+
+    repo = SearchRepository(db_session)
+    root = api.post(
+        "/documents",
+        json={"title": "R", "content": "root", "usetype": "chunk", "auto_index_bm25": False},
+    ).json()["id"]
+    repo.create_index("scoped_53")
+    assert repo.add_root_to_index("scoped_53", root)
+    db_session.flush()
+
+    covered = api.post(
+        "/documents",
+        json={
+            "title": "under",
+            "content": "Babbage designed the engine",
+            "usetype": "chunk",
+            "parent_id": root,
+        },
+    )
+    assert covered.status_code in (200, 201), covered.text
+    assert _entry_indexes(db_session, covered.json()["id"]) == {"scoped_53"}
+
+    uncovered = api.post(
+        "/documents",
+        json={"title": "elsewhere", "content": "Turing machines", "usetype": "chunk"},
+    )
+    assert uncovered.status_code in (200, 201), uncovered.text
+    assert _entry_indexes(db_session, uncovered.json()["id"]) == {"default"}
+
+
 @requires_db
 def test_opting_out_of_bm25_indexing_leaves_the_document_out_of_the_index(api):
     created = api.post(
