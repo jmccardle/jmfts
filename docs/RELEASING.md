@@ -189,6 +189,30 @@ would have needed a tag namespace per distribution and a filter in `publish.yml`
 > happens before step 1's bump rather than after it. On branches, run only the tests for
 > what changed; the full suite is the release gate and nothing else. Run one gate on the
 > machine at a time. Five concurrent runs took 2 h each instead of about 15 min alone.
+>
+> **Superseded later on 2026-10-24: the release gate is GitHub CI, not a local run.** The
+> local full suite passed 3491/0 on `7c2534e`. CI's fresh install failed 32 tests on the
+> same tree, because CI resolved `pymupdf` 2.0 and `ffwf-tau-llm` 0.14.1 and the local venv
+> still held 1.28.2 and 0.12.0. CI had been red on every master push since 2026-10-18 without
+> anyone reading it. A long-lived venv cannot answer "does `pip install jmfts` work today";
+> a fresh install can. The procedure is now:
+>
+> 1. Bump and write the CHANGELOG heading (step 1). Run only the four version-reading test
+>    files locally, then commit.
+> 2. Push to both remotes. `ci.yml` runs on the push to `master`. Read it on THAT sha:
+>    `gh run list -R jmccardle/jmfts --workflow CI -L 3`, then `gh run watch <id>`. Green on
+>    the bumped sha is the gate. A red run is read with `gh run view <id> --log-failed`,
+>    never re-run to green (rule 4 of the `release` skill).
+> 3. Rehearse the build without uploading: `gh workflow run publish.yml -R jmccardle/jmfts
+>    --ref master`. It runs CI again, then `build` with `twine check --strict`. Then
+>    `gh run download <id> -R jmccardle/jmfts` fetches `dist-jmfts`, `dist-jmfts-client` and
+>    `dist-jmfts-web`, kept for 7 days. Smoke-install those wheels (step 6). They are the
+>    files the tag would upload, built by the same job.
+> 4. Tag and push the tag (step 7). That is still the only irreversible step.
+>
+> A local full run is optional and costs about 17 min of this machine. Run it when a change
+> needs a database-backed debugging loop, not as a gate. Read CI on every master push, not
+> only at release time.
 
 ```bash
 ./scripts/run_tests_docker.sh -rf --tb=line         # the full suite, throwaway pgvector
