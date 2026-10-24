@@ -1,11 +1,11 @@
 """Search Repository - Vector, BM25, and Hybrid Search"""
 
-import fnmatch
 import logging
 import math
 import re
 from datetime import datetime, timezone
-from typing import Optional
+from functools import lru_cache
+from typing import Iterable, Optional
 from dataclasses import dataclass
 from sqlalchemy import select, func, text, and_, or_
 from sqlalchemy.orm import Session
@@ -174,8 +174,9 @@ def _usetype_to_like(usetype: str) -> str:
     ``transcript:%,obsidian:%`` — a pattern matching nothing, on a named preset, on every
     install, with an empty page and no error to say why.
     """
-    # Escape SQL LIKE special chars first
-    pattern = usetype.replace("%", r"\%").replace("_", r"\_")
+    # Escape SQL LIKE special chars first. The backslash is one of them: it is LIKE's own
+    # escape character, so a literal one left bare would swallow the character after it.
+    pattern = usetype.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
     # Then convert glob wildcards
     pattern = pattern.replace("*", "%").replace("?", "_")
     return pattern
@@ -193,6 +194,23 @@ def _as_of_utc(as_of: Optional[datetime]) -> Optional[datetime]:
     return as_of
 
 
+@lru_cache(maxsize=64)
+def _compile_usetype_globs(globs: tuple[str, ...]) -> "re.Pattern[str]":
+    """ONE regex for a set of usetype globs: the in-memory twin of ``LIKE``.
+
+    ``*`` is any run of characters and ``?`` one character; every other character is
+    literal, ``[`` included. ``fnmatch`` is deliberately not used because it gives ``[`` a
+    meaning ``LIKE`` does not have, and the positive filter and the hold-out lists must
+    mean in Python what they mean in SQL. Cached per tuple, so a loop that asks about
+    every document of an index compiles once.
+    """
+    alternatives = (
+        "".join(".*" if c == "*" else "." if c == "?" else re.escape(c) for c in glob)
+        for glob in globs
+    )
+    return re.compile("|".join(f"(?:{alt})" for alt in alternatives) or "(?!)", re.DOTALL)
+
+
 def _usetype_matches(globs: tuple[str, ...], usetype_value: Optional[str]) -> bool:
     """In-memory match of one document's usetype against a set of globs (BM25 post-filter).
 
@@ -201,14 +219,7 @@ def _usetype_matches(globs: tuple[str, ...], usetype_value: Optional[str]) -> bo
     """
     if usetype_value is None:
         return False
-    return any(
-        (
-            fnmatch.fnmatch(usetype_value, glob)
-            if _usetype_has_wildcard(glob)
-            else usetype_value == glob
-        )
-        for glob in globs
-    )
+    return _compile_usetype_globs(tuple(globs)).fullmatch(usetype_value) is not None
 
 
 def _usetype_predicate(globs: tuple[str, ...]):
@@ -231,7 +242,7 @@ def _usetype_predicate(globs: tuple[str, ...]):
         clauses.append(Document.usetype == exact[0])
     elif exact:
         clauses.append(Document.usetype.in_(exact))
-    clauses.extend(Document.usetype.like(_usetype_to_like(glob)) for glob in wild)
+    clauses.extend(Document.usetype.like(_usetype_to_like(glob), escape="\\") for glob in wild)
 
     # `usetype_globs` guarantees at least one glob, so `clauses` is never empty and this
     # never degenerates into `or_()` — which is SQL false, and would turn a filter the
@@ -276,18 +287,88 @@ def _usetype_sql(globs: tuple[str, ...], alias: str) -> tuple[str, dict]:
         fragments.append(f"{alias}.usetype = ANY(CAST(:usetype_exact AS text[]))")
         params["usetype_exact"] = exact
     if wild:
-        fragments.append(f"{alias}.usetype LIKE ANY(CAST(:usetype_globs AS text[]))")
+        # `LIKE ANY(array)` has no ESCAPE clause in PostgreSQL, so the escape character is
+        # made explicit by unnesting the array.
+        fragments.append(
+            "EXISTS (SELECT 1 FROM unnest(CAST(:usetype_globs AS text[])) AS g(p) "
+            f"WHERE {alias}.usetype LIKE g.p ESCAPE '\\')"
+        )
         params["usetype_globs"] = [_usetype_to_like(glob) for glob in wild]
 
     return "(" + " OR ".join(fragments) + ")", params
 
 
+def _split_exclusions(patterns: Iterable[str]) -> tuple[list[str], list[str]]:
+    """``(exact, wildcard)`` halves of a hold-out list: ``registry:*`` is a pattern, ``summary`` a name.
+
+    The same split :func:`_usetype_predicate` makes for a positive filter: exact names stay
+    on a plain membership test and only an entry that actually contains ``*`` or ``?``
+    becomes a ``LIKE``. For a hold-out list that is ``NOT IN`` / ``<> ALL``, which the btree
+    behind ``idx_documents_usetype`` does not serve: an exclusion is a filter, not an index
+    probe.
+    """
+    patterns = list(patterns)
+    exact = [p for p in patterns if not _usetype_has_wildcard(p)]
+    wild = [p for p in patterns if _usetype_has_wildcard(p)]
+    return exact, wild
+
+
+def usetype_is_excluded(patterns: Iterable[str], usetype_value: Optional[str]) -> bool:
+    """In-memory twin of :func:`_apply_usetype_exclusion`: is this usetype held out?
+
+    The one place Python-side hold-out checks (BM25 indexing, the BM25 result post-filter)
+    read ``JMFTS_*_EXCLUDE_USETYPES``, so they cannot disagree with the SQL about what a
+    pattern means. Same translation as the positive filter's :func:`_usetype_matches`. A
+    NULL usetype is never excluded.
+    """
+    patterns = tuple(patterns)
+    if usetype_value is None or not patterns:
+        return False
+    return _usetype_matches(patterns, usetype_value)
+
+
+def usetype_not_excluded(patterns: Iterable[str]):
+    """The ORM predicate that keeps a document the hold-out list does not name.
+
+    NULL usetype is never excluded. An empty list is a caller error here, as it was for the
+    ``notin_`` it replaces being a no-op: callers branch on emptiness first.
+    """
+    exact, wild = _split_exclusions(patterns)
+    held_out = []
+    if exact:
+        held_out.append(Document.usetype.notin_(exact))
+    held_out.extend(Document.usetype.notlike(_usetype_to_like(glob), escape="\\") for glob in wild)
+    return or_(Document.usetype.is_(None), and_(*held_out))
+
+
+def _usetype_exclusion_sql(patterns: list[str], alias: str) -> tuple[str, dict]:
+    """:func:`usetype_not_excluded` for the hand-written MaxSim SQL: ``(fragment, params)``."""
+    exact, wild = _split_exclusions(patterns)
+    fragments = [f"{alias}.usetype IS NULL"]
+    params: dict = {}
+    clauses = []
+    if exact:
+        clauses.append(f"{alias}.usetype <> ALL(CAST(:excl_exact AS text[]))")
+        params["excl_exact"] = exact
+    if wild:
+        clauses.append(
+            "NOT EXISTS (SELECT 1 FROM unnest(CAST(:excl_globs AS text[])) AS g(p) "
+            f"WHERE {alias}.usetype LIKE g.p ESCAPE '\\')"
+        )
+        params["excl_globs"] = [_usetype_to_like(glob) for glob in wild]
+    fragments.append("(" + " AND ".join(clauses) + ")")
+    return "(" + " OR ".join(fragments) + ")", params
+
+
 def _apply_usetype_exclusion(query, exclude_usetypes: list[str]):
-    """Exclude documents with specific usetypes from results. NULL usetype is never excluded."""
+    """Exclude documents with specific usetypes from results. NULL usetype is never excluded.
+
+    Entries are exact names or ``*``/``?`` patterns (``registry:*``); see
+    :func:`usetype_not_excluded`.
+    """
     if not exclude_usetypes:
         return query
-    query = query.where(or_(Document.usetype.is_(None), Document.usetype.notin_(exclude_usetypes)))
-    return query
+    return query.where(usetype_not_excluded(exclude_usetypes))
 
 
 def effective_exclude_types(
@@ -855,7 +936,7 @@ class SearchRepository:
                 continue
             if globs is not None and not _usetype_matches(globs, doc.usetype):
                 continue
-            if effective_exclusions and doc.usetype in effective_exclusions:
+            if effective_exclusions and usetype_is_excluded(effective_exclusions, doc.usetype):
                 continue
             results.append(SearchResult(document=doc, score=float(score), method="bm25"))
             if len(results) >= limit:
@@ -1125,7 +1206,6 @@ class SearchRepository:
             filter_conditions.append("COALESCE(d.event_time, d.created_at) <= :as_of")
 
         # Track parameterized exclusion separately so we don't inline user input into SQL
-        excl_types_param: Optional[list[str]] = None
         usetype_params: dict = {}
         if globs is not None:
             fragment, usetype_params = _usetype_sql(globs, alias="d")
@@ -1133,10 +1213,8 @@ class SearchRepository:
         else:
             effective = effective_exclude_types(usetype, exclude_types)
             if effective:
-                filter_conditions.append(
-                    "(d.usetype IS NULL OR NOT (d.usetype = ANY(CAST(:excl_types AS text[]))))"
-                )
-                excl_types_param = effective
+                fragment, usetype_params = _usetype_exclusion_sql(effective, alias="d")
+                filter_conditions.append(fragment)
 
         # Subtree RBAC fragment (inlined int PKs; None for owner/unbound or no ACRs).
         # `documents d` is already joined below, so this rides the same scan.
@@ -1196,8 +1274,6 @@ class SearchRepository:
             """)
 
             ann_params: dict = {"query_vec": embed_str, "k": k_per_token, **usetype_params}
-            if excl_types_param is not None:
-                ann_params["excl_types"] = excl_types_param
             if as_of is not None:
                 ann_params["as_of"] = as_of
             results = self.session.execute(ann_query, ann_params).fetchall()
@@ -1616,7 +1692,7 @@ class SearchRepository:
 
         # Skip excluded usetypes (e.g. entity, summary) — Kanban #279
         settings = get_settings()
-        if doc.usetype and doc.usetype in settings.bm25_exclude_usetypes:
+        if usetype_is_excluded(settings.bm25_exclude_usetypes, doc.usetype):
             return False
 
         # Get or create index.
@@ -1998,7 +2074,7 @@ class SearchRepository:
         from psycopg2.extras import execute_values
 
         settings = get_settings()
-        excluded = set(settings.bm25_exclude_usetypes or ())
+        excluded = list(settings.bm25_exclude_usetypes or ())
         cur = self.session.connection().connection.driver_connection.cursor()
 
         CHUNK_DOCS = 5000
@@ -2030,7 +2106,7 @@ class SearchRepository:
         for doc in unique_docs:
             if not doc.content:
                 continue
-            if doc.usetype and doc.usetype in excluded:
+            if usetype_is_excluded(excluded, doc.usetype):
                 continue
             term_freqs = Counter(self._tokenize(doc.content))
             if not term_freqs:

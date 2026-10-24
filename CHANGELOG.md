@@ -36,6 +36,22 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
   subtree), and a usetype nothing carries gives an empty `descendants`, not an error.
   `children` is unchanged. `/capabilities` was already typed (`CapabilitiesResponse`).
 
+- **`JMFTS_SEARCH_EXCLUDE_USETYPES` and `JMFTS_BM25_EXCLUDE_USETYPES` accept globs (#52).**
+  An entry containing `*` (any run of characters) or `?` (one character) is a pattern:
+  `["registry:*"]` holds `registry:topic` and `registry:source` out of default search without
+  naming each, and leaves `registrar` alone. Every other character is literal, so `_`, `%`
+  and `\` in a usetype are not wildcards; exact entries still match exactly. Setting either
+  list still replaces its defaults. A request's `exclude_types` takes the same syntax. **Behaviour
+  change:** a literal `*` or `?` in a request entry is now a wildcard, so `exclude_types:
+  ["*"]` drops every non-NULL usetype; before, it matched a usetype literally named `*`.
+  The positive `usetype` filter's in-memory BM25 leg now reads `[` literally, as its SQL
+  `LIKE` already did, instead of as an `fnmatch` character class. `GET /capabilities` lists
+  the entries as written. The
+  same `usetype_not_excluded` / `usetype_is_excluded` pair serves the SQL paths, the MaxSim
+  statement, BM25 indexing and the BM25 result post-filter. Also fixed: a literal backslash
+  in a positive `usetype` glob is now escaped for `LIKE` instead of swallowing the next
+  character.
+
 - **A triple's object can be a literal over REST, not only a document node (#48).**
   `POST /triples`, `PUT /triples` and `POST /triples/{id}/supersede` take `object_literal`
   (the lexical form) and an optional `object_datatype` (an absolute IRI; omitted means

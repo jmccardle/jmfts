@@ -275,6 +275,11 @@ class Settings(BaseSettings):
     # to embed is in the index only through whatever of its columns were long enough to be
     # chunked into `chunk` pieces. Its SHORT values are in no index. 4.3 names that case —
     # "a search for a distinctive single value in a wide row" — and holds it open.
+    #
+    # Each entry is an exact usetype name or a glob: `*` matches any run of characters and
+    # `?` one character, so `registry:*` holds out `registry:topic` and `registry:source` but
+    # not `registrar`. Nothing else is a wildcard — `_`, `%` and `[` are literal. Setting the
+    # list REPLACES the defaults, so keep the ones you still want (#52).
     bm25_exclude_usetypes: list[str] = ["entity", "entities", "summary", "derived", "cell"]
     #
     # `summary` here is an ordinary default again, as of 0.7.0. Until then it was
@@ -284,6 +289,9 @@ class Settings(BaseSettings):
     # twice. Those nodes now carry no vector (`ROADMAP.md` gap 11, migration 025), so what
     # this entry still keeps out is a RAPTOR summary, whose own LLM text has its own vector
     # and is a deliberate opt-in rather than a default result.
+    #
+    # Same entry syntax as `bm25_exclude_usetypes`: exact names or `*`/`?` globs, and setting
+    # the list replaces the defaults (#52).
     search_exclude_usetypes: list[str] = ["entity", "entities", "summary", "derived"]
 
     # LLM endpoint (any OpenAI-compatible server: llama-server, vLLM, Ollama, ensonet, or

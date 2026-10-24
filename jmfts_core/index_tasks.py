@@ -104,7 +104,7 @@ from jmfts_core.ingest_tasks import TASK_INDEX_BM25, TaskOutcome, register_task_
 from jmfts_core.models.document import Document, SETTLED_SETTLED
 from jmfts_core.models.search_index import SearchIndex, SearchIndexEntry, SearchIndexMember
 from jmfts_core.models.task_queue import TaskQueue, WRITE_SELF
-from jmfts_core.repositories.search import SearchRepository
+from jmfts_core.repositories.search import SearchRepository, usetype_not_excluded
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +182,7 @@ def outstanding_documents(session: Session, node: Document, index_name: str) -> 
     )
     if excluded:
         query = query.where(
-            or_(Document.usetype.is_(None), Document.usetype.notin_(excluded)),
+            usetype_not_excluded(excluded),
         )
     return list(session.execute(query).scalars().all())
 

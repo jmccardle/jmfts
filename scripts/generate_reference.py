@@ -316,7 +316,8 @@ def render_retrieval() -> str:
                 _code_list(_default("search_exclude_usetypes")),
                 "drop these usetypes. **Applied when the request names none** — this is the "
                 "filter that shortens a result list with no explanation. Pass `[]` to "
-                "disable it.",
+                "disable it. An entry with `*` or `?` is a glob (`registry:*`), in the "
+                "request and in `JMFTS_SEARCH_EXCLUDE_USETYPES`.",
             ],
             ["`parent_id`", "unset", "keep only documents in this subtree."],
             [
@@ -374,7 +375,8 @@ Pass an explicit `weights` map to control this, or `{{}}` for equal-weight RRF.
 `exclude_types` is a search-time filter and is reported in `applied.exclude_types`. BM25
 also excludes at INDEX time — {_code_list(_default("bm25_exclude_usetypes"))} are never
 written to an inverted index at all — so no search argument brings them back to the bm25
-leg. Re-indexing does.
+leg. Re-indexing does. Entries of `JMFTS_BM25_EXCLUDE_USETYPES` follow the same syntax: an
+exact name, or a glob where `*` is any run of characters and `?` one character.
 """
 
 
