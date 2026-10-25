@@ -49,6 +49,21 @@ LO_COMMIT = "0ea8f79d15a62dfb5a0325640ed5771fc8b75ef2"  # master, read 2026-10-2
 LO_DIRS = {"lo-sw": "sw/qa", "lo-sc": "sc/qa", "lo-sd": "sd/qa"}
 OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
+#: How long one file may take, probe to extract, before it is recorded as ``timeout`` and its
+#: worker process is killed. Longer than unoserver's own --conversion-timeout (300 s in
+#: Dockerfile.libreoffice), so a conversion that hangs is ended by the converter first and
+#: reaches here as a convert_error; this bound is for the extract step, which has no other.
+FILE_TIMEOUT_SECONDS = 420
+
+#: How long to wait for unoserver to come back after a conversion fails on a dropped
+#: connection. The container restarts after --conversion-timeout kills LibreOffice, and the
+#: files that arrive during the restart are not the files that caused it.
+CONVERTER_RESTART_WAIT_SECONDS = 120
+
+#: The outcome for "unoserver did not come back". Never written to files.jsonl: it ends the
+#: shard instead, because every file after it would wait out the same restart for nothing.
+CONVERTER_DOWN = "converter_down"
+
 #: Larger than any file in the sources; a guard against reading something absurd into RAM.
 MAX_FILE_BYTES = 256 << 20
 
@@ -74,6 +89,12 @@ class Ole2Extract(Workload):
         parser.add_argument("--poi", action=argparse.BooleanOptionalAction, default=True)
         parser.add_argument("--lo", action=argparse.BooleanOptionalAction, default=True)
         parser.add_argument("--limit", type=int, default=0, help="OLE2 files per shard (0: all)")
+        parser.add_argument(
+            "--file-timeout",
+            type=float,
+            default=FILE_TIMEOUT_SECONDS,
+            help="seconds one file may take before it is recorded as a timeout",
+        )
 
     def plan(self, args):
         shards = []
@@ -86,7 +107,12 @@ class Ole2Extract(Workload):
             shards.append({"id": "poi", "source": "poi"})
         if args.lo:
             shards += [{"id": k, "source": "lo", "dir": v} for k, v in LO_DIRS.items()]
-        params = {"limit": args.limit, "poi_commit": POI_COMMIT, "lo_commit": LO_COMMIT}
+        params = {
+            "limit": args.limit,
+            "file_timeout": args.file_timeout,
+            "poi_commit": POI_COMMIT,
+            "lo_commit": LO_COMMIT,
+        }
         return params, shards
 
     # -- sources ------------------------------------------------------------------------
@@ -127,7 +153,9 @@ class Ole2Extract(Workload):
         outcomes: Counter = Counter()
         processed = 0
         started = time.monotonic()
-        with open(ctx.outdir / "files.jsonl", "w") as out:
+        guard = FileGuard(params.get("file_timeout", FILE_TIMEOUT_SECONDS))
+        converter_down = None
+        with guard, open(ctx.outdir / "files.jsonl", "w") as out:
             for name, data in self._files(shard, params, ctx):
                 if ctx.stop.is_set():
                     break
@@ -137,7 +165,10 @@ class Ole2Extract(Workload):
                 formats["ole2"] += 1
                 if params["limit"] and processed >= params["limit"]:
                     continue
-                record = measure_one(name, data)
+                record = guard.measure(name, data)
+                if record["outcome"] == CONVERTER_DOWN:
+                    converter_down = record["error"]
+                    break
                 out.write(json.dumps(record, sort_keys=True) + "\n")
                 outcomes[record["outcome"]] += 1
                 processed += 1
@@ -152,10 +183,12 @@ class Ole2Extract(Workload):
                     "processed": processed,
                     "seconds": round(time.monotonic() - started, 1),
                     "interrupted": ctx.stop.is_set(),
+                    "converter_down": converter_down,
                 }
             )
         )
-        return 0
+        # 90: the host could not measure (runner.HOST_FAILURE_STATUS); released, not DONE.
+        return 90 if converter_down else 0
 
     def summarize(self, results):
         outcomes: Counter = Counter()
@@ -216,7 +249,17 @@ def measure_one(name: str, data: bytes) -> dict:
     try:
         converted = timed("convert", lambda: convert_bytes(data, to=target))
     except Exception as exc:  # noqa: BLE001
-        return {**record, "outcome": "convert_error", "error": _err(exc)}
+        if not _connection_error(exc):
+            return {**record, "outcome": "convert_error", "error": _err(exc)}
+        if not _wait_for_converter():
+            # Not this file's doing, and not a reading: the shard stops and is released.
+            return {**record, "outcome": CONVERTER_DOWN, "error": _err(exc)}
+        # The converter was restarting, which says nothing about THIS file. Once more.
+        record["convert_retried"] = _err(exc)
+        try:
+            converted = timed("convert", lambda: convert_bytes(data, to=target))
+        except Exception as exc2:  # noqa: BLE001
+            return {**record, "outcome": "convert_error", "error": _err(exc2)}
     record["ooxml_bytes"] = len(converted)
 
     try:
@@ -258,6 +301,85 @@ def _extract(target: str, data: bytes) -> tuple[str, dict]:
         cells += measured.non_empty_cells
         parts.append(measured.rendered_markdown or "")
     return "\n\n".join(parts), {"sheets": len(sheets), "sheet_errors": sheet_errors, "cells": cells}
+
+
+def _connection_error(exc: BaseException) -> bool:
+    """A dropped or refused connection to unoserver, as opposed to LibreOffice refusing."""
+    import xmlrpc.client
+
+    seen = exc
+    while seen is not None:
+        if isinstance(seen, xmlrpc.client.Fault):
+            return False
+        if isinstance(seen, (ConnectionError, OSError, xmlrpc.client.ProtocolError)):
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
+def _wait_for_converter() -> bool:
+    """Poll unoserver until it answers, up to CONVERTER_RESTART_WAIT_SECONDS."""
+    import socket
+
+    from jmfts_core.convert import converter_target
+
+    target = converter_target()
+    deadline = time.monotonic() + CONVERTER_RESTART_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((target.host, int(target.port)), timeout=5):
+                time.sleep(5)  # listening is not the same as LibreOffice being up
+                return True
+        except OSError:
+            time.sleep(3)
+    return False
+
+
+class FileGuard:
+    """Runs :func:`measure_one` in a child process so one file cannot stall a shard.
+
+    One long-lived child, reused file after file (importing jmfts_core per file would cost
+    more than most conversions). A file that overruns ``timeout`` is recorded as
+    ``timeout`` and the child is killed and replaced.
+    """
+
+    def __init__(self, timeout: float):
+        self.timeout = timeout
+        self._pool = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._close()
+
+    def _close(self):
+        if self._pool is not None:
+            self._pool.terminate()
+            self._pool.join()
+            self._pool = None
+
+    def measure(self, name: str, data: bytes) -> dict:
+        import multiprocessing
+
+        if self._pool is None:
+            self._pool = multiprocessing.get_context("spawn").Pool(1)
+        pending = self._pool.apply_async(measure_one, (name, data))
+        try:
+            return pending.get(self.timeout)
+        except multiprocessing.TimeoutError:
+            self._close()
+            return {
+                "name": name,
+                "ext": Path(name).suffix.lower().lstrip("."),
+                "bytes": len(data),
+                "sha256": hashlib.sha256(data).hexdigest()[:16],
+                "outcome": "timeout",
+                "error": f"no result within {self.timeout:g}s; worker killed",
+            }
+        except Exception as exc:  # noqa: BLE001 — the child died (a segfault in a C library)
+            self._close()
+            return {"name": name, "bytes": len(data), "outcome": "worker_died", "error": _err(exc)}
 
 
 def _err(exc: BaseException) -> str:
