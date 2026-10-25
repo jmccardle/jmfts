@@ -155,7 +155,12 @@ class Runner:
                             if self._current is current:
                                 current["claim"], current["tag"] = claim, tagged[1]
                     else:
+                        # Taken over: this host went quiet for longer than the stale period
+                        # (it was starved, not dead) and another host now owns the shard.
+                        # Stop working on it, and never upload over the new owner's files.
                         logger.warning("lost the claim on %s to another host", current["id"])
+                        current["lost"] = True
+                        current["stop"].set()
                 if _ts() > self.deadline:
                     self._halt("deadline")
                 if on_azure and _preempt_pending(vm_name):
@@ -168,6 +173,9 @@ class Runner:
             logger.warning("stopping: %s", reason)
             self.stop_reason = reason
             self.stop.set()
+        with self._lock:
+            if self._current is not None:
+                self._current["stop"].set()
 
     def _write_host(self, state: str) -> None:
         with self._lock:
@@ -196,15 +204,26 @@ class Runner:
         outdir.mkdir(parents=True)
         cachedir = self.workdir / "cache"
         cachedir.mkdir(parents=True, exist_ok=True)
+        #: The shard's own stop: set by a host-wide halt AND by losing the claim, which must
+        #: stop this shard without stopping the host.
+        shard_stop = threading.Event()
+        current = {
+            "id": sid,
+            "claim": claim,
+            "tag": tag,
+            "progress": "starting",
+            "stop": shard_stop,
+            "lost": False,
+        }
         with self._lock:
-            self._current = {"id": sid, "claim": claim, "tag": tag, "progress": "starting"}
+            self._current = current
 
         def progress(msg: str) -> None:
             with self._lock:
                 if self._current is not None:
                     self._current["progress"] = msg
 
-        ctx = ShardContext(outdir=outdir, cachedir=cachedir, stop=self.stop, progress=progress)
+        ctx = ShardContext(outdir=outdir, cachedir=cachedir, stop=shard_stop, progress=progress)
         (outdir / "env.json").write_text(json.dumps(self.env, indent=1))
         started = time.monotonic()
         logger.info("shard %s: starting (attempt %d)", sid, claim["attempt"])
@@ -217,14 +236,25 @@ class Runner:
             status = 99
         seconds = round(time.monotonic() - started, 1)
 
+        # Still ours? Asked HERE, atomically, and not left to the heartbeat thread: a host that
+        # was frozen past the stale period wakes with its shard already finished, and the
+        # main thread reaches the upload before the next beat would notice anything. The
+        # compare-and-swap on the claim's last tag is the one test that cannot race.
+        with self._lock:
+            tag = current["tag"]
+            self._current = None
+        finishing = {**current["claim"], "heartbeat": _ts(), "progress": "uploading"}
+        key = self._claim_key(sid)
+        if current["lost"] or not self.store.replace_if(key, json.dumps(finishing).encode(), tag):
+            logger.warning("shard %s: abandoned after losing its claim; nothing uploaded", sid)
+            return
+        claim = finishing
+
         for path in sorted(outdir.rglob("*")):
             if path.is_file():
                 rel = path.relative_to(outdir).as_posix()
                 self.store.put_file(f"{self.prefix}shards/{sid}/{rel}", path)
 
-        with self._lock:
-            self._current = None
-        key = self._claim_key(sid)
         if status >= HOST_FAILURE_STATUS:
             self.host_failures += 1
             if self.host_failures >= HOST_FAILURE_LIMIT:
