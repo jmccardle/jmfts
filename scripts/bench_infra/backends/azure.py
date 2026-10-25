@@ -289,7 +289,11 @@ class AzureBackend(Backend):
         if identity is None:
             print("no self-delete identity in the group: finished VMs power off; run `sweep`")
 
+        # Names already used by this job, alive or not: a host that has deleted itself
+        # still has its records under hosts/<name>, and reusing the name would overwrite them.
         existing = {vm["name"] for vm in self.hosts(spec.job_id)}
+        for key in self.store().list(job_prefix(spec.job_id) + "hosts/"):
+            existing.add(key.rsplit("/", 1)[1].split(".", 1)[0])
         names = []
         i = 0
         while len(names) < hosts:
