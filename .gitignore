@@ -57,3 +57,8 @@ uv.lock
 eval-results/
 
 .mcp.json
+
+# scripts/bench_infra: local job stores, host work directories, collected results
+bench-store/
+bench-work/
+bench-results/
