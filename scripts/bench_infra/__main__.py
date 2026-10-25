@@ -20,12 +20,16 @@ import json
 import secrets
 import sys
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from scripts.bench_infra.backends import get_backend
 from scripts.bench_infra.spec import REPO_ROOT, JobSpec, git_state, job_prefix, utcnow
 from scripts.bench_infra.workloads import WORKLOADS
+
+#: Concurrent GETs against the store in `status` and `collect`.
+FETCH_THREADS = 8
 
 
 def _new_job_id(workload: str) -> str:
@@ -75,14 +79,25 @@ def _shard_states(store, spec: JobSpec) -> dict[str, dict]:
     prefix = job_prefix(spec.job_id)
     keys = set(store.list(prefix))
     now = datetime.now(timezone.utc).timestamp()
+    # One GET per DONE or claim, so a thousand-shard job is a thousand requests: in
+    # parallel, or `status` takes minutes.
+    wanted = []
+    for shard in spec.shards:
+        sid = shard["id"]
+        for key in (f"{prefix}shards/{sid}/DONE", f"{prefix}claims/{sid}"):
+            if key in keys:
+                wanted.append(key)
+                break
+    with ThreadPoolExecutor(max_workers=FETCH_THREADS) as pool:
+        fetched = dict(zip(wanted, pool.map(store.get, wanted)))
     states = {}
     for shard in spec.shards:
         sid = shard["id"]
-        if f"{prefix}shards/{sid}/DONE" in keys:
-            done = json.loads(store.get(f"{prefix}shards/{sid}/DONE"))
+        if f"{prefix}shards/{sid}/DONE" in fetched:
+            done = json.loads(fetched[f"{prefix}shards/{sid}/DONE"])
             states[sid] = {"state": "done", **done}
-        elif f"{prefix}claims/{sid}" in keys:
-            claim = json.loads(store.get(f"{prefix}claims/{sid}"))
+        elif f"{prefix}claims/{sid}" in fetched:
+            claim = json.loads(fetched[f"{prefix}claims/{sid}"])
             age = now - claim.get("heartbeat", 0)
             state = "released" if claim.get("released") else ("running" if age < 300 else "stale")
             states[sid] = {"state": state, "age_s": round(age), **claim}
@@ -132,7 +147,7 @@ def cmd_collect(args) -> int:
     store = backend.store()
     out = Path(args.output or REPO_ROOT / "bench-results" / spec.job_id)
     prefix = job_prefix(spec.job_id)
-    fetched = 0
+    todo = []
     for key in store.list(prefix):
         rel = key[len(prefix) :]
         if rel == "src.tar.gz":
@@ -140,9 +155,16 @@ def cmd_collect(args) -> int:
         dest = out / rel
         if dest.exists() and not rel.startswith(("hosts/", "claims/")):
             continue
+        todo.append((key, dest))
+
+    def fetch(item):
+        key, dest = item
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(store.get(key))
-        fetched += 1
+
+    with ThreadPoolExecutor(max_workers=FETCH_THREADS) as pool:
+        list(pool.map(fetch, todo))
+    fetched = len(todo)
     states = _shard_states(store, spec)
     done = {sid: s for sid, s in states.items() if s["state"] == "done"}
     summary = {
