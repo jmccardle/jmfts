@@ -120,6 +120,7 @@ class IngestWorker:
         heartbeat_seconds: float = 10.0,
         lease_seconds: float = 90.0,
         reap_seconds: float = 30.0,
+        claim_gate: Optional[Callable[[], bool]] = None,
     ):
         #: Identifies this worker in ``task_queue.claimed_by``. Includes the thread name
         #: so two workers in one process are distinguishable in the table.
@@ -138,6 +139,19 @@ class IngestWorker:
         self.service_badges = list(service_badges) if service_badges else None
         self.poll_seconds = poll_seconds
         self.error_backoff_seconds = error_backoff_seconds
+        #: Asked before every claim; False means claim nothing this round. Defaults to
+        #: :func:`~jmfts_core.embedder.embedder_reachable`, which is always True for a
+        #: worker holding the model and asks the runner for one started with
+        #: ``--runner-url``. A worker whose runner has gone otherwise claims a task, fails it
+        #: in milliseconds on ``ConnectError``, and claims the next — spending every
+        #: document's retry budget on a fact about the runner, faster than any healthy
+        #: worker can claim. The WHOLE worker pauses rather than only its embed work,
+        #: because several task types embed (``embed`` and the rollup summaries) and the
+        #: other workers in a fleet take everything else.
+        self.claim_gate = claim_gate
+        #: Whether the last claim was refused by the gate. Read by :meth:`drain`, which
+        #: must not report an empty queue when it only stopped asking.
+        self.paused = False
 
         # Fleet liveness, migration 011. Checked here as well as in Settings because a
         # caller can construct a worker directly — the test suite does — and the failure
@@ -175,8 +189,11 @@ class IngestWorker:
         ``root_document_id`` narrows the claim to one document's tree; see
         :meth:`~jmfts_core.repositories.task_queue.TaskQueueRepository.claim_next`. False
         then means "nothing claimable UNDER THAT ROOT", which is weaker than "nothing
-        left" — :meth:`drain_document` is the loop that knows the difference.
+        left" — :meth:`drain_document` is the loop that knows the difference. It also
+        means "the claim gate is closed", which :attr:`paused` distinguishes.
         """
+        if not self.claim_allowed():
+            return False
         with self.session_factory() as session:
             task = TaskQueueRepository(session).claim_next(
                 self.worker_id,
@@ -240,6 +257,28 @@ class IngestWorker:
             settle_after_task(scope_document_id, self.planner, session_factory=self.session_factory)
 
         return True
+
+    def claim_allowed(self) -> bool:
+        """Ask the claim gate, and log only when the answer changes.
+
+        One line when the worker pauses and one when it resumes, not one per poll: a
+        runner that is gone for an hour would otherwise write 3600 identical warnings.
+        """
+        if self.claim_gate is not None:
+            allowed = self.claim_gate()
+        else:
+            from jmfts_core.embedder import embedder_reachable
+
+            allowed = embedder_reachable()
+        if allowed and self.paused:
+            logger.warning("worker %s: runner answering again; claiming", self.worker_id)
+        elif not allowed and not self.paused:
+            logger.warning(
+                "worker %s: its runner is not answering; claiming nothing until it does",
+                self.worker_id,
+            )
+        self.paused = not allowed
+        return allowed
 
     def _record_failure(self, task_id: int, exc: BaseException) -> bool:
         """Classify and persist a task failure. Spec 3.4's ``error_type``.
@@ -379,6 +418,11 @@ class IngestWorker:
         ran = 0
         while ran < max_tasks:
             if not self.run_once():
+                if self.paused:
+                    raise RuntimeError(
+                        f"drain stopped after {ran} task(s) because worker {self.worker_id}'s "
+                        "runner is not answering; the queue is not known to be empty"
+                    )
                 return ran
             ran += 1
         raise RuntimeError(

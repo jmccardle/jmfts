@@ -13,6 +13,19 @@ versioning with the caveat that it is pre-1.0, so a minor version may break the 
 
 ## [Unreleased]
 
+### Fixed
+
+- **A worker whose runner has gone claims nothing until it comes back.** A worker started
+  with `--runner-url` asked nothing before claiming, so when its runner disappeared (a spot
+  VM evicted, a pod rescheduled) it failed each task in milliseconds on `ConnectError`,
+  backed off five seconds and claimed the next — out-claiming every healthy worker and
+  spending documents' retry budgets on a fact about the runner. `IngestWorker` now asks a
+  claim gate first; the default is `embedder_reachable()`, which is always true with a local
+  model and `GET /runner/info` (a 200 believed for two seconds) with a remote one. Any
+  non-200, 503 included, pauses the worker, which logs once on pausing and once on
+  resuming. `drain()` raises instead of returning while paused, because returning means the
+  queue is empty.
+
 ## [0.8.0] — 2026-10-24
 
 **A request the server would have ignored is refused, and a conflict names the row it hit.**

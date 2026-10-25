@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Optional
 
 import httpx
@@ -61,6 +62,11 @@ from jmfts_core.embedding import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: How long a successful :meth:`RemoteEmbedder.reachable` is believed. Short, because the
+#: window is how many tasks a worker can still send to a runner that has just gone: about
+#: one, at a second per embed.
+REACHABLE_TTL_SECONDS = 2.0
 
 
 class EmbedderMismatchError(RuntimeError):
@@ -118,6 +124,7 @@ class RemoteEmbedder:
         )
         self._lock = threading.Lock()
         self._info: Optional[RunnerInfo] = None
+        self._reachable_at: Optional[float] = None
 
     # -- identity ----------------------------------------------------------------------
 
@@ -155,6 +162,30 @@ class RemoteEmbedder:
                 response.raise_for_status()
                 self._info = RunnerInfo.model_validate(response.json())
             return self._info
+
+    def reachable(self) -> bool:
+        """Whether the runner answers ``GET /runner/info`` with 200 right now.
+
+        What a worker asks before it claims a task (``IngestWorker.claim_allowed``). Not
+        :meth:`info`, which is cached for the object's life: this is the opposite question,
+        "is it still there", and caching a NO would keep a worker idle after its runner came
+        back. A YES is remembered for :data:`REACHABLE_TTL_SECONDS`, so a worker claiming a
+        task a second does not double its request count to say so.
+
+        Any non-200 is a NO, 503 included — it is what a runner with a blank key answers,
+        and what one that has seen its eviction notice should answer.
+        """
+        now = time.monotonic()
+        with self._lock:
+            if self._reachable_at is not None and now - self._reachable_at < REACHABLE_TTL_SECONDS:
+                return True
+        try:
+            ok = self._client.get("/runner/info").status_code == 200
+        except httpx.HTTPError:
+            ok = False
+        with self._lock:
+            self._reachable_at = now if ok else None
+        return ok
 
     # -- the tokenizer and numpy half, delegated --------------------------------------
 
@@ -337,3 +368,18 @@ def reset_embedder() -> None:
         if _embedder is not None:
             _embedder.close()
         _embedder = None
+
+
+def embedder_reachable() -> bool:
+    """Whether this process's embedder can produce a vector right now.
+
+    Always True for the local service — a process holding the model has nothing to wait
+    for, and a model that will not load is a PERMANENT error on the task, not a pause. For
+    a :class:`RemoteEmbedder` it is :meth:`RemoteEmbedder.reachable`. This is the default
+    claim gate of every ``IngestWorker``, which is how a worker started with
+    ``--runner-url`` stops claiming when its runner goes away without any caller wiring it.
+    """
+    embedder = get_embedder()
+    if isinstance(embedder, RemoteEmbedder):
+        return embedder.reachable()
+    return True

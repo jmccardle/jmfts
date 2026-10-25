@@ -432,6 +432,115 @@ class TestTheWorkerFlag:
 
 
 # ---------------------------------------------------------------------------
+# A runner that has gone away
+# ---------------------------------------------------------------------------
+
+
+class TestAWorkerWhoseRunnerIsGoneClaimsNothing:
+    """A runner disappearing must not cost anybody's documents their retry budget.
+
+    Before this, a thin worker whose runner had gone — a spot VM evicted, a pod rescheduled
+    — claimed a task, failed it in milliseconds on ``ConnectError``, backed off five seconds
+    and claimed the next. Every failure is RETRYABLE and spends one of ``max_retries``, and
+    a worker that fails in milliseconds out-claims every healthy worker that spends a second
+    per embed, so a task that kept landing on it settled ``failed`` with nothing wrong with
+    the document. The fix is that the worker asks its runner before it claims anything.
+    """
+
+    @staticmethod
+    def _pointed_at(monkeypatch, url):
+        from jmfts_core.worker import apply_runner_override, build_parser, build_worker
+
+        monkeypatch.setattr(get_settings(), "runner_url", "")
+        args = build_parser().parse_args(["--runner-url", url, "--worker-id", "thin-test"])
+        apply_runner_override(args)
+        return build_worker(args)
+
+    def test_no_task_spends_a_retry_while_the_runner_is_unreachable(
+        self, db_session, monkeypatch, runner_key
+    ):
+        from sqlalchemy import select
+
+        from jmfts_client.contracts.upload import UploadedFile
+        from jmfts_core.ingest_worker import borrowed_session
+        from jmfts_core.models.task_queue import TaskQueue
+        from jmfts_core.services.ingest_service import IngestService
+
+        worker = self._pointed_at(monkeypatch, "http://127.0.0.1:1")
+        worker.session_factory = lambda: borrowed_session(db_session)
+        get_embedder()._client.timeout = 1.0
+
+        IngestService(db_session).upload_file(
+            UploadedFile(
+                data=("# A\n\n" + TEXT).encode(), filename="gone.md", content_type="text/markdown"
+            )
+        )
+        db_session.commit()
+
+        # More attempts than the queue holds tasks, so a worker that DID claim would
+        # reach the embed rung and fail on it.
+        for _ in range(50):
+            if not worker.run_once():
+                break
+
+        rows = db_session.execute(select(TaskQueue)).scalars().all()
+        assert rows
+        spent = [(r.task_type, r.retry_count, r.error) for r in rows if r.retry_count or r.error]
+        assert spent == []
+        assert worker.paused
+
+    def test_drain_refuses_to_report_an_empty_queue_while_paused(
+        self, db_session, monkeypatch, runner_key
+    ):
+        """``drain`` returning normally means "the queue is empty", and here it is not."""
+        from jmfts_client.contracts.upload import UploadedFile
+        from jmfts_core.ingest_worker import borrowed_session
+        from jmfts_core.services.ingest_service import IngestService
+
+        worker = self._pointed_at(monkeypatch, "http://127.0.0.1:1")
+        worker.session_factory = lambda: borrowed_session(db_session)
+        get_embedder()._client.timeout = 1.0
+
+        IngestService(db_session).upload_file(
+            UploadedFile(data=TEXT.encode(), filename="paused.md", content_type="text/markdown")
+        )
+        db_session.commit()
+
+        with pytest.raises(RuntimeError, match="runner"):
+            worker.drain()
+
+    def test_a_runner_that_answers_opens_the_gate(self, monkeypatch, runner_key):
+        worker = self._pointed_at(monkeypatch, "http://testserver")
+        embedder = get_embedder()
+        embedder._client.close()
+        embedder._client = TestClient(main.app, headers={"Authorization": f"Bearer {runner_key}"})
+
+        assert embedder.reachable() is True
+        assert worker.claim_allowed() is True
+        assert worker.paused is False
+
+    def test_a_runner_answering_503_is_not_reachable(self, monkeypatch, runner_key):
+        """503 is what a runner says when it is going away — a spot VM that has seen its
+        eviction notice — and also what a runner with a blank key says. Neither is a
+        runner to send work to."""
+        embedder = RemoteEmbedder("http://testserver", key=runner_key)
+        embedder._client.close()
+        embedder._client = TestClient(main.app, headers={"Authorization": f"Bearer {runner_key}"})
+        monkeypatch.setattr(get_settings(), "runner_key", "")
+        try:
+            assert embedder.reachable() is False
+        finally:
+            embedder.close()
+
+    def test_a_local_embedder_never_closes_the_gate(self, monkeypatch):
+        from jmfts_core.ingest_worker import IngestWorker
+
+        monkeypatch.setattr(get_settings(), "runner_url", "")
+        reset_embedder()
+        assert IngestWorker(worker_id="local").claim_allowed() is True
+
+
+# ---------------------------------------------------------------------------
 # The structural claim
 # ---------------------------------------------------------------------------
 
